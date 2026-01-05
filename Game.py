@@ -2,132 +2,131 @@ import os
 import sys
 import pygame
 import Assets
-from MainMenu import MainMenu
-from OptionsMenu import OptionsMenu
-from SimulationMenu import SimulationMenu
-from CreditsMenu import CreditsMenu
+from typing import NoReturn
 from MapGenerator import MapGenerator
 from MissionControl import MissionControl
+from Menu import Menu
 
-class Game():
-    def __init__(self):
+class Game:
+    """Main game class handling initialization, menus, and simulation."""
+
+    def __init__(self) -> None:
+        """Initialize the game with pygame, window, and menus."""
         # Center the game window on the screen
         os.environ['SDL_VIDEO_CENTERED'] = '1'
+        
         # Initialize all Pygame modules
-        pygame.init()
-        # Set game state variables: running and playing
-        self.running, self.playing = True, False
+        try:
+            pygame.init()
+        except pygame.error as e:
+            print(f"Failed to initialize Pygame: {e}")
+            sys.exit(1)
+        
+        # Set game state variables: running
+        self.running: bool = True
+        
         # Initialize key flags to handle menu navigation
-        self.UP_KEY,   self.DOWN_KEY, self.START_KEY = False, False, False
-        self.BACK_KEY, self.LEFT_KEY, self.RIGHT_KEY = False, False, False
+        self.UP_KEY: bool = False
+        self.DOWN_KEY: bool = False
+        self.START_KEY: bool = False
+        self.BACK_KEY: bool = False
+        self.LEFT_KEY: bool = False
+        self.RIGHT_KEY: bool = False
+        
         # Set the window to windowed mode
         self.to_windowed()
 
-        # Initialize each menu and set the current one to the main menu
-        self.options         = OptionsMenu(self)
-        self.main_menu       = MainMenu(self)
-        self.credits         = CreditsMenu(self)
-        self.simulation      = SimulationMenu(self)
-        self.curr_menu       = self.main_menu
+        # Initialize the menus
+        self.menu = Menu(self)
 
 
-    #   ____     _     __  __  _____   _       ___    ___   ____  
-    #  / ___|   / \   |  \/  || ____| | |     / _ \  / _ \ |  _ \ 
-    # | |  _   / _ \  | |\/| ||  _|   | |    | | | || | | || |_) |
-    # | |_| | / ___ \ | |  | || |___  | |___ | |_| || |_| ||  __/ 
-    #  \____|/_/   \_\|_|  |_||_____| |_____| \___/  \___/ |_|    
-    
-    # Run the simulation
-    def game_loop(self):
-        if self.playing:
-            # Get simulation settings: [Mode, Map Dimension, Seed, Drone Number, Scan Mode]
-            self.sim_settings  = self.simulation.get_sim_settings()
-            # Generate the cave
-            self.cartographer = MapGenerator(self)
-            # Prep and Start the mission
-            self.mission_control = MissionControl(self)
+    def run(self) -> NoReturn:
+        """Main menu loop - displays current menu until game exits."""
+        while self.running:
+            self.menu.display()
 
+    def start_mission(self) -> None:
+        """Start the mission with current settings.
 
-    #  __  __     _     _   _     _      ____  _____      ___  _   _  ____   _   _  _____  ____  
-    # |  \/  |   / \   | \ | |   / \    / ___|| ____|    |_ _|| \ | ||  _ \ | | | ||_   _|/ ___|
-    # | |\/| |  / _ \  |  \| |  / _ \  | |  _ |  _|       | | |  \| || |_) || | | |  | |  \___ \
-    # | |  | | / ___ \ | |\  | / ___ \ | |_| || |___      | | | |\  ||  __/ | |_| |  | |   ___) |
-    # |_|  |_|/_/   \_\|_| \_|/_/   \_\ \____||_____|    |___||_| \_||_|     \___/   |_|  |____/
+        Retrieves settings from simulation menu, generates the cave map,
+        initializes mission control, runs the simulation (blocking until completion),
+        then returns to the main menu.
+        """
+        match self.menu.simulation[2].value:
+            case 0: map_dim = 'SMALL'
+            case 1: map_dim = 'MEDIUM'
+            case 2: map_dim = 'BIG'
+        self.sim_settings = [
+            self.menu.simulation[1].value,
+            map_dim,
+            int(self.menu.simulation[3].text_input),
+            [3,4,5,6][self.menu.simulation[4].value],
+            self.menu.simulation[5].value
+        ]
+        self.cartographer = MapGenerator(self)
+        self.mission_control = MissionControl(self)
+        # Simulation runs here (blocks until completion)
 
-    # Check player inputs
-    def check_events(self):
-        # Retrieve input events
+    def check_events(self) -> None:
+        """Check player inputs and update key flags."""
         for event in pygame.event.get():
             match event.type:
-                # If the player clicks the x on top of the window exit the game
                 case pygame.QUIT:
                     pygame.quit()
                     sys.exit()
                 
-                # If a keyboard key is pressed, update corresponding flags
                 case pygame.KEYDOWN:
                     match event.key:
                         case pygame.K_RETURN:
                             self.START_KEY = True
                         case pygame.K_BACKSPACE:
-                            self.BACK_KEY  = True
+                            self.BACK_KEY = True
                         case pygame.K_DOWN:
-                            self.DOWN_KEY  = True
+                            self.DOWN_KEY = True
                         case pygame.K_UP:
-                            self.UP_KEY    = True
+                            self.UP_KEY = True
                         case pygame.K_LEFT:
-                            self.LEFT_KEY  = True
+                            self.LEFT_KEY = True
                         case pygame.K_RIGHT:
                             self.RIGHT_KEY = True
                     
-    # Reset pushed key flags to prevent multiple triggers
-    def reset_keys(self):
-        self.UP_KEY,   self.DOWN_KEY, self.START_KEY = False, False, False
-        self.BACK_KEY, self.LEFT_KEY, self.RIGHT_KEY = False, False, False
+    def reset_keys(self) -> None:
+        """Reset pushed key flags to prevent multiple triggers."""
+        self.UP_KEY = False
+        self.DOWN_KEY = False
+        self.START_KEY = False
+        self.BACK_KEY = False
+        self.LEFT_KEY = False
+        self.RIGHT_KEY = False
 
 
-    #  __  __     _     _   _     _      ____  _____      ____   ___  ____   ____   _         _    __   __
-    # |  \/  |   / \   | \ | |   / \    / ___|| ____|    |  _ \ |_ _|/ ___| |  _ \ | |       / \   \ \ / /
-    # | |\/| |  / _ \  |  \| |  / _ \  | |  _ |  _|      | | | | | | \___ \ | |_) || |      / _ \   \ V /
-    # | |  | | / ___ \ | |\  | / ___ \ | |_| || |___     | |_| | | |  ___) ||  __/ | |___  / ___ \   | |
-    # |_|  |_|/_/   \_\|_| \_|/_/   \_\ \____||_____|    |____/ |___||____/ |_|    |_____|/_/   \_\  |_|
-
-    # Update the display by blitting the current surface to the window
-    def blit_screen(self):
+    def blit_screen(self) -> None:
+        """Update the display by blitting the current surface to the window."""
         self.window.blit(self.display, (0, 0))
         pygame.display.update()
-        self.reset_keys() # Reset key flags for the next frame
+        self.reset_keys()  # Reset key flags for the next frame
     
-    # Maximize the game window to full screen
-    def to_maximised(self):
-        # Choose and set window dimensions for full screen
-        self.width = Assets.FULLSCREEN_W
-        self.height = Assets.FULLSCREEN_H
-
-        # Initialize the display surface
-        self.display = pygame.Surface((self.width,self.height))
-        self.window = pygame.display.set_mode((self.width,self.height), pygame.SCALED)
-        
-        # Set the window title
+    def _setup_window(self, width: int, height: int) -> pygame.Surface:
+        """Set up the window with given dimensions."""
+        self.width = width
+        self.height = height
+        self.display = pygame.Surface((self.width, self.height))
+        try:
+            self.window = pygame.display.set_mode((self.width, self.height), pygame.SCALED)
+        except pygame.error as e:
+            print(f"Failed to set display mode: {e}")
+            sys.exit(1)
         pygame.display.set_caption('Cave Game')
-
-        # Set the game icon
-        pygame.display.set_icon(pygame.image.load(Assets.Images['GAME_ICON'].value))
+        try:
+            pygame.display.set_icon(pygame.image.load(Assets.Images['GAME_ICON'].value))
+        except pygame.error as e:
+            print(f"Failed to load game icon: {e}")
         return self.display
 
-    # Return to the originial window dimensions
-    def to_windowed(self):
-        # Choose and set window dimensions for windowed mode
-        self.width = Assets.DISPLAY_W
-        self.height = Assets.DISPLAY_H
+    def to_maximised(self) -> pygame.Surface:
+        """Maximize the game window to full screen."""
+        return self._setup_window(Assets.FULLSCREEN_W, Assets.FULLSCREEN_H)
 
-        # Initialize the display surface
-        self.display = pygame.Surface((self.width,self.height))
-        self.window  = pygame.display.set_mode((self.width,self.height), pygame.SCALED)
-
-        # Set the window title
-        pygame.display.set_caption('Cave Game')
-
-        # Set the game icon
-        pygame.display.set_icon(pygame.image.load(Assets.Images['GAME_ICON'].value))
-        return self.display
+    def to_windowed(self) -> pygame.Surface:
+        """Return to the original window dimensions."""
+        return self._setup_window(Assets.DISPLAY_W, Assets.DISPLAY_H)

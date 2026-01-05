@@ -22,11 +22,16 @@ FULLSCREEN_W = 1915 #root.winfo_screenwidth() - 5
 FULLSCREEN_H = 1010 #root.winfo_screenheight() - 70
 LEGEND_WIDTH = 300
 
+# Display positions
+CENTER_W    = DISPLAY_W/2
+CENTER_H    = DISPLAY_H/2
+ALIGN_L     = CENTER_W - 550
+
 # Lists for menu voices and settings
 main_menu_states    = ['Start', 'Options', 'Credits', 'Exit']
 options_menu_states = ['Game Volume', 'Music Volume', 'Button Sound', 'Back']
 sim_menu_states     = ['Mode', 'Map Dimension', 'Seed', 'Drones', 'Prefab', 'Back', 'Start Simulation']
-mode_options        = ["Cave exploration", "Rescue mission"]
+mission_options     = ["Exploration", "Search and Rescue"]
 map_options         = ["Small", "Medium", "Big"]
 prefab_options      = ['No', 'Yes']
 vision_options      = [     39,       19,     4]
@@ -98,10 +103,10 @@ class Images(Enum):
         CAVE_FLOOR   = os.path.join(GAME_DIR, 'Assets',    'Map', 'floor.png')
 
 class RectHandle(Enum):
-        CENTER       = 'Center'
-        MIDTOP       = 'Midtop'
-        MIDRIGHT     = 'Midright'
-        MIDLEFT      = 'Midleft'
+        CENTER       = 'center'
+        MIDTOP       = 'midtop'
+        MIDRIGHT     = 'midright'
+        MIDLEFT      = 'midleft'
 
 class Brush(Enum):
         ROUND        = 0
