@@ -125,8 +125,8 @@ class Game:
 
     def to_maximised(self) -> pygame.Surface:
         """Maximize the game window to full screen."""
-        return self._setup_window(Assets.FULLSCREEN_W, Assets.FULLSCREEN_H)
+        return self._setup_window(Assets.Display.FULL_W, Assets.Display.FULL_H)
 
     def to_windowed(self) -> pygame.Surface:
         """Return to the original window dimensions."""
-        return self._setup_window(Assets.DISPLAY_W, Assets.DISPLAY_H)
+        return self._setup_window(Assets.Display.W, Assets.Display.H)

@@ -1,131 +1,140 @@
 # Cave Game - AI Coding Assistant Instructions
 
 ## Project Overview
-This is a Pygame-based distributed systems simulation game where drones explore procedurally generated cave maps. The project demonstrates multi-agent exploration algorithms, procedural map generation, and real-time visualization.
+This is a distributed systems simulation game built with Pygame, demonstrating multi-agent cave exploration algorithms. Drones and rovers concurrently explore procedurally generated cave maps using vision-based frontier exploration.
 
 ## Architecture Overview
 
 ### Core Components
-- **Game.py**: Main game loop managing menu navigation and state transitions
-- **MissionControl.py**: Simulation orchestrator handling threading, drone coordination, and mission completion
-- **Drone.py**: Individual drone agents with exploration logic, vision systems, and pathfinding
-- **MapGenerator.py**: Procedural cave generation using parallel "worm" algorithms
-- **Menu Classes**: UI system (MainMenu, SimulationMenu, OptionsMenu, etc.)
+- **`Game`**: Main orchestrator handling pygame initialization, menu navigation, and simulation lifecycle
+- **`MissionControl`**: Manages concurrent drone/rover operations using threading, coordinates exploration missions
+- **`MapGenerator`**: Parallel map generation using multiprocessing "worms" that erode solid terrain
+- **`Drone`/`Rover`**: Autonomous agents with vision cones, random walk exploration, and A* pathfinding
+- **`AStar`**: Pathfinding for reaching unexplored frontiers
+- **`Graph`**: Maintains exploration connectivity graphs
+- **`ControlCenter`**: Real-time mission status display
+- **`Assets`**: Centralized enum-based asset and constant management
 
 ### Key Design Patterns
-- **State Machine**: Menu-driven navigation with distinct game states
-- **Multi-threading**: Concurrent drone movement during simulation
-- **Multiprocessing**: Parallel map generation for performance
-- **Observer Pattern**: Event-driven input handling and state updates
-- **Factory Pattern**: Dynamic creation of drones/rovers based on settings
 
-**UI Architecture Note**: The current menu system uses inheritance-heavy design. Consider migrating to the component-based `UnifiedMenu` system for better maintainability.
+#### Threading for Concurrency
+```python
+# MissionControl uses threading for concurrent drone movement
+threads = []
+for i in range(self.num_drones):
+    t = threading.Thread(target=self.drone_thread, args=(i,))
+    threads.append(t)
+    t.start()
+```
+
+#### Multiprocessing for Map Generation
+```python
+# MapGenerator spawns parallel processes for cave erosion
+for i in range(proc_num):
+    proc_list.append(Process(target=self.worm(...)))
+    proc_list[i].start()
+```
+
+#### Vision-Based Exploration
+```python
+# Drones cast rays to detect walls and build vision polygons
+def cast_ray(self, start_pos, angle, max_length):
+    # Ray casting for obstacle detection
+```
+
+#### Layered Drawing System
+```python
+# Draw in layers: vision -> paths -> walls -> icons
+def draw(self):
+    self.draw_cave()
+    for layer in [vision, path, walls, icons]:
+        # Layer-specific rendering
+```
 
 ## Development Workflow
 
-### Running the Game
+### Running the Simulation
 ```bash
 python main.py
 ```
 - Navigate menus with arrow keys and Enter
-- Configure simulation settings in SimulationMenu
-- Watch real-time drone exploration in fullscreen mode
+- Configure mission type, map size, drone count, random seed
+- Simulation runs until all drones complete exploration
 
-### Configuration Files
-- `GameConfig/options.ini`: Audio and UI preferences
+### Debugging
+- Use VS Code Python debugger with `launch.json`
+- Mission runs in threads; use breakpoints in `drone_thread()` for drone-specific debugging
+- Map generation happens in separate processes; debug worms individually
+
+### Configuration
+- `GameConfig/options.ini`: Audio settings
 - `GameConfig/symSettings.ini`: Default simulation parameters
-- Settings persist between sessions
+- Random seed ensures reproducible map generation
 
-### Map Generation
-- Procedural generation using 8 parallel "worms" that erode the map
-- Seed-based reproducibility for testing
-- Support for prefab maps loaded from `Assets/Map/map_matrix.txt`
+## Code Conventions
 
-## Coding Conventions
-
-### Import Organization
+### Asset Management
 ```python
-import pygame
-import Assets
-from ComponentClass import ComponentClass
-```
-- Standard library first, then Assets, then local imports
-- Use `from Assets import Colors, Images` for enum access
+# Use enums for all assets and constants
+class Images(Enum):
+    CAVE_MAP = os.path.join(GAME_DIR, 'Assets', 'Map', 'map.png')
 
-### Enum Usage
-```python
-# Colors
-Assets.Colors.WHITE.value  # (255, 255, 255)
-
-# Images  
-Assets.Images.DRONE.value  # Path to drone image
-
-# Constants
-Assets.DISPLAY_W  # 1200
+# Access via Assets.Images['CAVE_MAP'].value
 ```
 
-### Coordinate System
-- Origin (0,0) at top-left
-- X increases right, Y increases down
-- Use `next_cell_coords(x, y, step, direction)` for movement calculations
-
-### Threading Patterns
+### Surface-Based Rendering
 ```python
-# Drone threads in MissionControl
-thread = threading.Thread(target=self.drone_thread, args=(drone_id,))
-thread.start()
-threads.append(thread)
-
-# Wait for completion
-for t in threads:
-    t.join()
+# Create transparent surfaces for overlays
+self.floor_surf = pygame.Surface((width, height), pygame.SRCALPHA)
+# Draw to surface, then blit to main window
+self.game.window.blit(self.floor_surf, (0,0))
 ```
 
-## Common Development Tasks
+### Error Handling
+```python
+try:
+    pygame.init()
+except pygame.error as e:
+    print(f"Failed to initialize Pygame: {e}")
+    sys.exit(1)
+```
 
-### Adding New Drone Behaviors
-1. Modify `Drone.move()` method
-2. Update exploration logic in `find_new_node()` and `explore()`
-3. Test with different map seeds and sizes
-
-### Modifying Map Generation
-1. Adjust worm parameters in `Assets.WormInputs`
-2. Update `MapGenerator.worm()` algorithm
-3. Test generation speed vs. quality tradeoffs
-
-### Adding UI Elements
-1. Extend menu classes inheriting from `Menu`
-2. Add states to `Assets.sim_menu_states`
-3. Implement `display()` and `check_input()` methods
-
-**Note**: Consider migrating to the new `UnifiedMenu` system (see `UI_REFACTOR_PROPOSAL.md` and `UnifiedMenu.py`) for simplified UI management.
-
-### UI Refactoring (Recommended)
-The current menu system has significant code duplication. A streamlined approach using `UnifiedMenu.py`:
-- Define menus as data structures instead of classes
-- Unified input handling and rendering
-- Component-based architecture with `MenuItem` subclasses
-- Reduces code by ~70% and improves maintainability
-
-### Performance Optimization
-- Map generation uses multiprocessing for CPU-intensive tasks
-- Simulation uses threading for concurrent drone updates
-- Vision calculations use ray casting for realistic field-of-view
+### Type Hints and Modern Python
+```python
+def __init__(self) -> None:
+def run(self) -> NoReturn:
+```
 
 ## Dependencies
-- pygame: Graphics and input handling
-- numpy: Matrix operations for map data
-- opencv-python: Image processing for map generation
-- art: ASCII art (optional, used only in Test.py)
+- `pygame`: Graphics and input handling
+- `numpy`: Matrix operations for map generation
+- `cv2` (opencv): Image processing for cave refinement
+- `art`: ASCII art (used in Test.py)
 
-## Testing Approach
-- Visual testing: Run simulations with different seeds
-- Unit testing: Validate pathfinding algorithms in isolation
-- Integration testing: Full simulation runs with multiple drones
+## Common Tasks
 
-## Key Files for Understanding
-- `MissionControl.py`: Simulation orchestration and threading
-- `Drone.py`: Core exploration algorithms and vision system
-- `MapGenerator.py`: Procedural generation with multiprocessing
-- `Assets.py`: All constants, enums, and utility functions
-- `SimulationMenu.py`: Configuration interface and settings management
+### Adding New Agent Behaviors
+1. Extend `Drone` or `Rover` class with new strategy
+2. Update `mission_completed()` logic
+3. Add visualization in `draw_*()` methods
+
+### Modifying Map Generation
+1. Adjust `WormInputs` enum values for different cave styles
+2. Modify `worm()` method for new erosion patterns
+3. Update `process_map()` for post-processing effects
+
+### Performance Optimization
+- Reduce `num_rays` in vision casting for faster rendering
+- Adjust `delay` in MissionControl for simulation speed
+- Profile multiprocessing overhead vs single-threaded generation
+
+## File Organization
+- `main.py`: Entry point
+- `Game.py`: Core game loop and menu handling
+- `MissionControl.py`: Simulation orchestration
+- `Drone.py`/`Rover.py`: Agent implementations
+- `MapGenerator.py`: Procedural cave generation
+- `Assets.py`: Centralized constants and enums
+- `AStar.py`/`Graph.py`: Pathfinding and graph management
+- `Menu.py`: UI components
+- `ControlCenter.py`: Status display
