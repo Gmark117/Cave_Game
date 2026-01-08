@@ -56,6 +56,31 @@ class MapGen:
     STRENGTH = 16
     LIFE = 75
 
+    # Chaotic brush factor range (fraction of strength)
+    CHAOTIC_FACTOR_LOW = 0.2
+    CHAOTIC_FACTOR_HIGH = 0.4
+
+    # Wall transition noise defaults
+    WALL_NOISE_BASE_DEPTH = 3
+    WALL_NOISE_BASE_PROB = 0.6
+    WALL_NOISE_MIN_SPIKES = 24
+    WALL_NOISE_SPIKE_DIVISOR = 25
+    WALL_NOISE_SPIKE_EXTRA = 6
+    WALL_NOISE_DILATE_KSIZE = 3
+    WALL_NOISE_DILATE_ITER = 1
+    
+    # Additional map-processing defaults
+    BLUR_KERNEL_FINAL = 5
+    BLUR_KERNEL_MULTIPLIER_STRENGTH = 1.5
+    MEDIAN_FILTER_REDUCTION = 1
+    STALACTITE_MIN_DEPTH = 0
+    STALACTITE_MAX_DEPTH = 7
+    STALACTITE_CHUNK_SIZE = 10
+    STALACTITE_PROBABILITY_AIR = 0.4
+    STALACTITE_PROBABILITY_STONE = 0.6
+    BORDER_THICKNESS = 50
+    DEFAULT_NUM_PROCESSES = 8
+
 # =============================================================================
 # COLORS
 # =============================================================================
@@ -169,27 +194,10 @@ def sqr(x: float) -> float:
 
 def next_cell_coords(x: int, y: int, step_len: int, dir: int) -> Tuple[int, int]:
     """Calculate next cell coordinates based on position, step, and direction."""
-    assert step_len > 0
-    
-    # Normalize direction to 0-360 range
-    dir = dir % 360
-    
-    # Determine the octant (8 main directions)
-    octant = round(dir / 45) % 8
-    
-    # Map octant to coordinate changes
-    directions = [
-        (0, -step_len),      # 0° - up
-        (step_len, -step_len),  # 45° - up-right
-        (step_len, 0),       # 90° - right
-        (step_len, step_len),   # 135° - down-right
-        (0, step_len),       # 180° - down
-        (-step_len, step_len),  # 225° - down-left
-        (-step_len, 0),      # 270° - left
-        (-step_len, -step_len)  # 315° - up-left
-    ]
-    
-    dx, dy = directions[octant]
+    import math
+    rad = math.radians(dir)
+    dx = round(step_len * math.sin(rad))
+    dy = -round(step_len * math.cos(rad))
     return x + dx, y + dy
 
 def wall_hit(map_matrix: list, pos: Tuple[int, int]) -> bool:

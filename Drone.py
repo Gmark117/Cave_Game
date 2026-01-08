@@ -16,7 +16,7 @@ class Drone():
         self.strategy = strategy
          
         self.id       = id # Unique identifier of the drone
-        self.map_size = self.settings[1] # Map dimension
+        self.map_size = self.settings.map_dim # Map dimension
         self.radius   = self.calculate_radius() # Radius that represent the field of view # 39
         self.step     = 10 # Step of the drone
         self.dir      = rand.randint(0,359)

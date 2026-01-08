@@ -12,7 +12,7 @@ from Rover import Rover
 class MissionControl():
     def __init__(self, game):
         # Set the seed from the settings
-        rand.seed(game.sim_settings[2])
+        rand.seed(game.sim_settings.seed)
 
         self.game         = game
         self.settings     = game.sim_settings 
@@ -26,11 +26,11 @@ class MissionControl():
         self.cave_walls_png = pygame.image.load(Assets.Images['CAVE_WALLS'].value).convert_alpha()
 
         # Initialize mission settings (0 for exploration, 1 for search & rescue)
-        self.mission   = self.settings[0]
+        self.mission   = self.settings.mission
         self.completed = False # Track whether the mission is completed
 
         # Initialise control center for displaying mission status
-        self.control_center = ControlCenter(game, self.settings[3])
+        self.control_center = ControlCenter(game, self.settings.num_drones)
 
         # Maximise the game window
         self.game.display = self.game.to_maximised()
@@ -133,7 +133,7 @@ class MissionControl():
     # Instantiate the swarm of drones as a list
     def build_drones(self):
         # Get the required number of drones from the settings
-        self.num_drones = self.settings[3]
+        self.num_drones = self.settings.num_drones
 
         # Set drone icon
         icon_size       = self.get_drone_icon_dim()
@@ -156,7 +156,7 @@ class MissionControl():
 
     # Return the dimension of the drone icon given the map dimension
     def get_drone_icon_dim(self):
-        match self.settings[1]:
+        match self.settings.map_dim:
             case 'SMALL' : return Assets.drone_icon_options[0]
             case 'MEDIUM': return Assets.drone_icon_options[1]
             case 'BIG'   : return Assets.drone_icon_options[2]
@@ -177,7 +177,7 @@ class MissionControl():
     # Instantiate the fleet of rovers as a list
     def build_rovers(self):
         # Get the number of rovers depending on the number of drones
-        self.num_rovers = math.ceil(self.settings[3]/4)
+        self.num_rovers = math.ceil(self.settings.num_drones/4)
 
         # Set rover icon
         icon_size       = self.get_rover_icon_dim()
@@ -201,7 +201,7 @@ class MissionControl():
 
     # Return the dimension of the drone icon given the map dimension
     def get_rover_icon_dim(self):
-        match self.settings[1]:
+        match self.settings.map_dim:
             case 'SMALL' : return Assets.rover_icon_options[0]
             case 'MEDIUM': return Assets.rover_icon_options[1]
             case 'BIG'   : return Assets.rover_icon_options[2]

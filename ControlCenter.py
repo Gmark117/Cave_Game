@@ -253,7 +253,7 @@ class ControlCenter():
         # Draw title
         self.draw_text([('Control Center', Assets.Colors['RED'].value, 255)],
                        35,
-                       self.mid_x,
+                       self.origin_x,
                        70,
                        Assets.Fonts['BIG'].value,
                        Assets.RectHandle['CENTER'].value)

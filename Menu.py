@@ -179,7 +179,7 @@ class Menu:
         self.game = game
 
         self.background = pygame.image.load(Assets.Images['CAVE'].value)
-        #self.dark_background = pygame.image.load(Assets.Images['DARK_CAVE'].value)
+        self.dark_background = pygame.image.load(Assets.Images['DARK_CAVE'].value)
 
         # Initialize pygame mixer for audio
         mix.init()
@@ -217,7 +217,7 @@ class Menu:
             MenuItem(self.game, "Cave Size", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 50), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.MAP_SIZE),
             MenuItem(self.game, "Seed", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 10), MenuItemType.TEXT_INPUT, text_input=""),
             MenuItem(self.game, "Drones", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6]),
-            MenuItem(self.game, "Demo Cave", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 70), MenuItemType.SELECTOR, value=1, options=Assets.GameOptions.PREFAB),
+            MenuItem(self.game, "Demo Cave", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 70), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.PREFAB),
             MenuItem(self.game, "Back", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable()))),
             MenuItem(self.game, "Start Mission", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 220), MenuItemType.BUTTON, action=self.start_mission, size=100, font_big=True)
         ]
@@ -392,3 +392,35 @@ class Menu:
             self.save_symSettings()
             self.game.start_mission()
             self.show_menu = False
+
+    # Display a static loading screen accounting for multiline texts
+    def blit_loading(self, text: List[str] = ['Loading...']) -> None:
+        """
+        Render a loading screen with the given text lines centered on screen.
+        
+        Args:
+            text: List of text strings to display (each on a separate line).
+        """
+        # Configuration
+        FONT_SIZE = 100
+        LINE_OFFSET = 100
+        
+        # Draw the dark background
+        self.game.display.blit(self.dark_background, (0, 0))
+
+        # Create font once (reuse for all lines)
+        font = pygame.font.Font(Assets.Fonts.BIG.value, FONT_SIZE)
+        
+        # Calculate starting y-coordinate to center text vertically
+        num_lines = len(text)
+        first_line_y = Assets.Display.CENTER_H - LINE_OFFSET * (num_lines - 1) / 2
+
+        # Draw each line
+        for i, line_text in enumerate(text):
+            text_surface = font.render(line_text, True, Assets.Colors.WHITE.value)
+            rect = text_surface.get_rect()
+            rect.center = (Assets.Display.CENTER_W, first_line_y + LINE_OFFSET * i)
+            self.game.display.blit(text_surface, rect)
+
+        # Update the display
+        self.game.blit_screen()
