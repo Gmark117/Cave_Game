@@ -73,11 +73,6 @@ class MapGen:
     BLUR_KERNEL_FINAL = 5
     BLUR_KERNEL_MULTIPLIER_STRENGTH = 1.5
     MEDIAN_FILTER_REDUCTION = 1
-    STALACTITE_MIN_DEPTH = 0
-    STALACTITE_MAX_DEPTH = 7
-    STALACTITE_CHUNK_SIZE = 10
-    STALACTITE_PROBABILITY_AIR = 0.4
-    STALACTITE_PROBABILITY_STONE = 0.6
     BORDER_THICKNESS = 50
     DEFAULT_NUM_PROCESSES = 8
 
@@ -124,8 +119,8 @@ class RoverColors(Enum):
 
 class Fonts(Enum):
     """Font resources."""
-    BIG = GAME_DIR / 'Assets' / 'Fonts' / 'Cave-Stone.ttf'
-    SMALL = GAME_DIR / 'Assets' / 'Fonts' / '8-BIT.TTF'
+    SMALL = GAME_DIR / 'Assets' / 'Fonts' / 'Cave-Stone.ttf'
+    BIG = GAME_DIR / 'Assets' / 'Fonts' / 'CroMagnum.ttf'
 
 # =============================================================================
 # AUDIO
