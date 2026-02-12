@@ -1,5 +1,4 @@
-import pygame
-from Assets import sqr, wall_hit, check_pixel_color, Colors
+from Assets import wall_hit, check_pixel_color, Colors
 
 class Graph():
     def __init__(self, x_start, y_start, cave_mat):

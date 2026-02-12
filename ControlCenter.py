@@ -15,16 +15,16 @@ class ControlCenter():
         self.num_rovers = 1 + (4 % num_drones)
 
         # Calculate surface origin
-        self.origin_x = Assets.FULLSCREEN_W - Assets.LEGEND_WIDTH
+        self.origin_x = Assets.Display.FULL_W - Assets.Display.LEGEND_WIDTH
         self.origin_y = 0
         self.origin   = (self.origin_x,self.origin_y)
 
         # Calculate surface mid points
-        self.mid_x = self.origin_x + (Assets.LEGEND_WIDTH / 2)
-        self.mid_y = Assets.FULLSCREEN_H / 2
+        self.mid_x = self.origin_x + (Assets.Display.LEGEND_WIDTH / 2)
+        self.mid_y = Assets.Display.FULL_H / 2
 
         # Define surface
-        self.control_surf = pygame.Surface((Assets.LEGEND_WIDTH, Assets.FULLSCREEN_H), pygame.SRCALPHA)
+        self.control_surf = pygame.Surface((Assets.Display.LEGEND_WIDTH, Assets.Display.FULL_H), pygame.SRCALPHA)
         self.control_surf.fill((*Assets.Colors.BLACK.value, 255))
 
         # Create dictionaries
@@ -129,11 +129,11 @@ class ControlCenter():
     # Set color depending on the percentage
     def percent_color(self, val, max_val=100):
         if val < max_val*20/100:
-            return Assets.Colors['RED'].value
+            return Assets.Colors.RED.value
         elif val < max_val*80/100:
-            return Assets.Colors['YELLOW'].value
+            return Assets.Colors.YELLOW.value
         else:
-            return Assets.Colors['GREEN'].value
+            return Assets.Colors.GREEN.value
 
     # Write title and voices
     def draw_text(self, texts, size, x, y, font, handle):
@@ -170,21 +170,21 @@ class ControlCenter():
 
     def draw_statistics(self):
         # Draw time
-        self.draw_text([('MET:           ', Assets.Colors['GREY'].value, 255),
-                        (self.format_timer(), Assets.Colors['WHITE'].value, 255)],
+        self.draw_text([('MET:           ', Assets.Colors.GREY.value, 255),
+                        (self.format_timer(), Assets.Colors.WHITE.value, 255)],
                        25,
                        self.origin_x,
                        120,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['MIDLEFT'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.MIDLEFT.value)
         # Draw explored map percentage
-        self.draw_text([('Explored:     ', Assets.Colors['GREY'].value, 255),
+        self.draw_text([('Explored:     ', Assets.Colors.GREY.value, 255),
                         (f'{self.explored_percent}%', self.percent_color(self.explored_percent), 255)],
                        25,
                        self.origin_x,
                        150,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['MIDLEFT'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.MIDLEFT.value)
     
     def draw_status(self, label, rover=False, deployed=True):
         # Get data
@@ -211,61 +211,61 @@ class ControlCenter():
         self.draw_text([(label, color, 255)], 25,
                        self.origin_x,
                        name_height + 60*number,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['MIDLEFT'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.MIDLEFT.value)
         
         if deployed:
             # Define Status color
             match status:
                 case 'Ready'|'Done':
-                    status_color = Assets.Colors['GREEN'].value
+                    status_color = Assets.Colors.GREEN.value
                 case 'Updating'|'Advancing'|'Sharing'|'Charging':
-                    status_color = Assets.Colors['YELLOW'].value
+                    status_color = Assets.Colors.YELLOW.value
                 case 'Deployed'|'Homing':
-                    status_color = Assets.Colors['WHITE'].value
+                    status_color = Assets.Colors.WHITE.value
                 case _:
-                    status_color = Assets.Colors['RED'].value
+                    status_color = Assets.Colors.RED.value
             
             # Define Battery color
             battery_color = self.percent_color(battery, max_battery)
 
             # Blit data
             self.draw_text([(f'{battery}%', battery_color, 128),
-                            ('  |  ', Assets.Colors['WHITE'].value, 128),
+                            ('  |  ', Assets.Colors.WHITE.value, 128),
                             (status, status_color, 128)],
                            25,
                            self.origin_x,
                            data_height + 60*number,
-                           Assets.Fonts['BIG'].value,
-                           Assets.RectHandle['MIDLEFT'].value)
+                           Assets.Fonts.BIG.value,
+                           Assets.RectHandle.MIDLEFT.value)
         else:
             # Blit 'N/A'
-            self.draw_text([('N/A', Assets.Colors['GREY'].value, 128)],
+            self.draw_text([('N/A', Assets.Colors.GREY.value, 128)],
                            25,
                            self.origin_x,
                            data_height + 60*number,
-                           Assets.Fonts['BIG'].value,
-                           Assets.RectHandle['MIDLEFT'].value)
+                           Assets.Fonts.BIG.value,
+                           Assets.RectHandle.MIDLEFT.value)
 
     # Blit the control center on the map
     def draw_control_center(self):
         self.game.window.blit(self.control_surf, self.origin)
         # Draw title
-        self.draw_text([('Control Center', Assets.Colors['RED'].value, 255)],
+        self.draw_text([('Control Center', Assets.Colors.RED.value, 255)],
                        35,
                        self.origin_x,
                        70,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['CENTER'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.CENTER.value)
         # Draw statistics
         self.draw_statistics()
         # Draw subtitle
-        self.draw_text([('Drones', Assets.Colors['EUCALYPTUS'].value, 255)],
+        self.draw_text([('Drones', Assets.Colors.EUCALYPTUS.value, 255)],
                        30,
                        self.mid_x,
                        195,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['CENTER'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.CENTER.value)
 
         for drone in self.drones:
             if self.drones[drone]['id'] < self.num_drones:
@@ -273,12 +273,12 @@ class ControlCenter():
             else:
                 self.draw_status(drone, deployed=False)
         # Draw subtitle
-        self.draw_text([('Rovers', Assets.Colors['EUCALYPTUS'].value, 255)],
+        self.draw_text([('Rovers', Assets.Colors.EUCALYPTUS.value, 255)],
                        30,
                        self.mid_x,
                        725,
-                       Assets.Fonts['BIG'].value,
-                       Assets.RectHandle['CENTER'].value)
+                       Assets.Fonts.BIG.value,
+                       Assets.RectHandle.CENTER.value)
 
         for rover in self.rovers:
             if self.rovers[rover]['id'] < self.num_rovers:

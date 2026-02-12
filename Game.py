@@ -122,7 +122,7 @@ class Game:
             sys.exit(1)
         pygame.display.set_caption('Cave Game')
         try:
-            pygame.display.set_icon(pygame.image.load(Assets.Images['GAME_ICON'].value))
+            pygame.display.set_icon(pygame.image.load(Assets.Images.GAME_ICON.value))
         except pygame.error as e:
             print(f"Failed to load game icon: {e}")
         return self.display

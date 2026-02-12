@@ -1,13 +1,18 @@
 import random as rand
 import pygame
-import time
 import sys
 import math
 import threading
+import os
+import numpy as np
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import shared_memory
 import Assets
 from ControlCenter import ControlCenter
 from Drone import Drone
 from Rover import Rover
+import AStarPathfinder
+
 
 class MissionControl():
     def __init__(self, game):
@@ -18,12 +23,24 @@ class MissionControl():
         self.settings     = game.sim_settings 
         self.cartographer = game.cartographer
         self.map_matrix   = self.cartographer.bin_map # Get the binary map representation
-        self.cave_png     = pygame.image.load(Assets.Images['CAVE_MAP'].value).convert_alpha() # Load cave map image
+        self.cave_png     = pygame.image.load(Assets.Images.CAVE_MAP.value).convert_alpha() # Load cave map image
+
+        # Create shared-memory copy of the map for worker processes
+        try:
+            arr = np.array(self.map_matrix, dtype=np.uint8)
+            self.map_shape = arr.shape
+            shm = shared_memory.SharedMemory(create=True, size=arr.nbytes)
+            shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+            shm_arr[:] = arr[:]
+            self.map_shm = shm
+        except Exception:
+            self.map_shm = None
+            self.map_shape = None
         
         self.delay = 1/15 # Set a delay for frame updates
 
         # Load cave wall images
-        self.cave_walls_png = pygame.image.load(Assets.Images['CAVE_WALLS'].value).convert_alpha()
+        self.cave_walls_png = pygame.image.load(Assets.Images.CAVE_WALLS.value).convert_alpha()
 
         # Initialize mission settings (0 for exploration, 1 for search & rescue)
         self.mission   = self.settings.mission
@@ -48,12 +65,24 @@ class MissionControl():
 
         # Show the map and the robots at step 0 for 1 second
         pygame.display.update()
-        time.sleep(1)
+        pygame.time.wait(1000)
 
         # Create an event to stop the threads when the mission is complete
         self.mission_event = threading.Event()
+        # Clock used to control main loop FPS
+        self.clock = pygame.time.Clock()
 
-        # Start mission
+        # Create process pool for pathfinding and start mission
+        cpu = (os.cpu_count() or 1)
+        # Reserve one CPU for the main process when possible
+        if cpu > 1:
+            max_workers = min(self.settings.num_drones, cpu - 1)
+        else:
+            max_workers = 1
+        self.pool = ProcessPoolExecutor(max_workers=max_workers)
+        # Semaphore to bound concurrent submissions to the pool (prevents over-submission)
+        self.pool_sem = threading.Semaphore(max_workers)
+
         self.start_mission()
 
 #  __  __  ___  ____   ____   ___   ___   _   _      ____   ___   _   _  _____  ____    ___   _     
@@ -65,6 +94,8 @@ class MissionControl():
     def start_mission(self):
         # Start timer
         self.control_center.start_timer()
+        # Compute FPS from delay (guard against zero)
+        fps = max(1, round(1 / self.delay))
 
         # Create and start a thread for each drone's movement
         threads = [] # List to keep track of all threads
@@ -75,6 +106,9 @@ class MissionControl():
 
         # Main loop to keep moving drones until the mission is completed
         while not self.completed:
+            # Cap frame rate and allow timely interrupt
+            self.clock.tick(fps)
+
             for event in pygame.event.get():
                 # If the window is closed
                 if event.type == pygame.QUIT:
@@ -97,14 +131,25 @@ class MissionControl():
         # Wait for all threads to finish executing
         for t in threads:
             t.join()
-        
+        # Shutdown process pool and cleanup shared memory
+        try:
+            self.pool.shutdown(wait=True)
+        except Exception:
+            pass
+        if getattr(self, 'map_shm', None):
+            try:
+                self.map_shm.close()
+                self.map_shm.unlink()
+            except Exception:
+                pass
     # Among the starting positions of the worms, find one that is viable
     def set_start_point(self):
          # Continuously search for a valid starting point until one is found
         while self.start_point is None or Assets.wall_hit(self.map_matrix, self.start_point):
             # Randomly select one of the initial points of the worms
-            i = rand.randint(0,3)
-            self.start_point = (self.cartographer.worm_x[i],self.cartographer.worm_y[i])
+            # Choose based on available worm starts (don't assume 4)
+            i = rand.randrange(len(self.cartographer.worm_x))
+            self.start_point = (self.cartographer.worm_x[i], self.cartographer.worm_y[i])
     
     # Check if the mission is completed
     def is_mission_over(self):
@@ -128,7 +173,26 @@ class MissionControl():
             self.drones[drone_id].move()  # Move the drone
 
             # Control the speed of movement
-            time.sleep(self.delay)
+            # Use Event.wait so the sleep is interruptible when `mission_event` is set
+            self.mission_event.wait(self.delay)
+
+    def compute_path(self, start, goal):
+        """Submit pathfinding job to worker pool and return result (blocking)."""
+        if not getattr(self, 'map_shm', None):
+            return []
+        try:
+            # Block submission when the pool is saturated to avoid queue buildup
+            self.pool_sem.acquire()
+            fut = self.pool.submit(AStarPathfinder.compute_path, self.map_shm.name, self.map_shape, start, goal)
+            result = fut.result()
+            return result
+        except Exception:
+            return []
+        finally:
+            try:
+                self.pool_sem.release()
+            except Exception:
+                pass
 
     # Instantiate the swarm of drones as a list
     def build_drones(self):
@@ -137,7 +201,7 @@ class MissionControl():
 
         # Set drone icon
         icon_size       = self.get_drone_icon_dim()
-        self.drone_icon = pygame.image.load(Assets.Images['DRONE'].value)
+        self.drone_icon = pygame.image.load(Assets.Images.DRONE.value)
         self.drone_icon = pygame.transform.scale(self.drone_icon, icon_size)
 
         # List to store drone colors
@@ -157,16 +221,19 @@ class MissionControl():
     # Return the dimension of the drone icon given the map dimension
     def get_drone_icon_dim(self):
         match self.settings.map_dim:
-            case 'SMALL' : return Assets.drone_icon_options[0]
-            case 'MEDIUM': return Assets.drone_icon_options[1]
-            case 'BIG'   : return Assets.drone_icon_options[2]
+            case 'SMALL' : return Assets.GameOptions.DRONE_ICON[0]
+            case 'MEDIUM': return Assets.GameOptions.DRONE_ICON[1]
+            case 'BIG'   : return Assets.GameOptions.DRONE_ICON[2]
 
     def pool_information(self):
-        for i in range(self.drones):
-            self.drones[i].get_pos_history()
+        # Iterate drone objects directly; guard optional methods
+        for drone in self.drones:
+            if hasattr(drone, 'get_pos_history'):
+                drone.get_pos_history()
 
-        for i in range(self.drones):
-            self.drones[i].update_explored_map()
+        for drone in self.drones:
+            if hasattr(drone, 'update_explored_map'):
+                drone.update_explored_map()
 
 #  ____    ___  __     __ _____  ____  
 # |  _ \  / _ \ \ \   / /| ____||  _ \
@@ -181,7 +248,7 @@ class MissionControl():
 
         # Set rover icon
         icon_size       = self.get_rover_icon_dim()
-        self.rover_icon = pygame.image.load(Assets.Images['ROVER'].value)
+        self.rover_icon = pygame.image.load(Assets.Images.ROVER.value)
         self.rover_icon = pygame.transform.scale(self.rover_icon, icon_size)
 
         # List to store rover colors (Deprecated: Rovers don't need colors)
@@ -202,9 +269,9 @@ class MissionControl():
     # Return the dimension of the drone icon given the map dimension
     def get_rover_icon_dim(self):
         match self.settings.map_dim:
-            case 'SMALL' : return Assets.rover_icon_options[0]
-            case 'MEDIUM': return Assets.rover_icon_options[1]
-            case 'BIG'   : return Assets.rover_icon_options[2]
+            case 'SMALL' : return Assets.GameOptions.ROVER_ICON[0]
+            case 'MEDIUM': return Assets.GameOptions.ROVER_ICON[1]
+            case 'BIG'   : return Assets.GameOptions.ROVER_ICON[2]
 
 #  ____   ____      _  __        __ ___  _   _   ____ 
 # |  _ \ |  _ \    / \ \ \      / /|_ _|| \ | | / ___|
@@ -224,19 +291,22 @@ class MissionControl():
 
     # Draw all game elements in layers: (Lowest layer) 0 -> 3 (Highest layer)
     def draw(self):
+        # Base map
         self.draw_cave()
 
-        for i in range(4):
-            for j in range(self.num_drones):
-                match i:
-                    case 0: self.drones[j].draw_vision()
-                    case 1: self.drones[j].draw_path()
-                    case 2:
-                        if j==0:
-                            self.draw_walls()
-                    case 3:
-                        self.drones[j].draw_icon()
-                        if j < len(self.rovers):
-                            self.rovers[j].draw_icon()
-        
+        # Per-drone overlays: vision and explored path
+        for drone in self.drones:
+            drone.draw_vision()
+            drone.draw_path()
+
+        # Draw cave walls once
+        self.draw_walls()
+
+        # Draw all icons (drones and rovers)
+        for i, drone in enumerate(self.drones):
+            drone.draw_icon()
+            if i < len(self.rovers):
+                self.rovers[i].draw_icon()
+                
+        # Control center UI
         self.control_center.draw_control_center()

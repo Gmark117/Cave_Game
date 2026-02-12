@@ -4,7 +4,6 @@ import time
 import math
 from Assets import next_cell_coords, check_pixel_color, Colors
 from Graph import Graph
-from AStar import AStar
 
 
 class Drone():
@@ -44,7 +43,6 @@ class Drone():
         self.pos       = start_pos
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
-        self.astar     = AStar(self.floor_surf, cave, self.color, self.game)
 
     # Define the radius based on the map size
     def calculate_radius(self):
@@ -116,31 +114,54 @@ class Drone():
         self.explored = True
         # Log the direction chosen
         self.dir_log.append(self.dir)
-        # Add the target node to the graph
-        self.graph.add_node(chosen_target)
-        # Update the drone's position
-        self.pos = chosen_target
-        # Remove the explored direction
-        valid_dirs.remove(self.dir)
         # Add unexplored pixels to the border list (each pixel only added once)
         self.border.extend(valid_targets)
         self.border = list(set(self.border))
+        # Remove the explored direction
+        valid_dirs.remove(self.dir)
+
+        # Compute path to chosen target using MissionControl worker pool
+        path = []
+        if hasattr(self.control, 'compute_path'):
+            path = self.control.compute_path(self.pos, chosen_target)
+
+        # If no path found, return False to trigger boundary handling
+        if not path:
+            return False
+
+        # Follow the path step-by-step
+        for node in path:
+            self.pos = node
+            self.graph.add_node(node)
+            if hasattr(self.control, 'mission_event'):
+                self.control.mission_event.wait(self.delay / self.speed_factor)
+            else:
+                time.sleep(self.delay / self.speed_factor)
+
         return True
     
     # If no valid directions are found, use A* algorithm to reach the nearest border pixel
     def reach_border(self):
-        
-        self.astar.clear() # Reset the A* state
         self.border.sort(key=self.get_distance) # Sort border pixels by distance
 
-        # Use A* to find the optimal path to the closest border
-        path = self.astar.find_path(self.pos, self.border)
+        # Use worker pool pathfinding to the closest border pixel
+        if not self.border:
+            return False
+        target = self.border[0]
+        path = []
+        if hasattr(self.control, 'compute_path'):
+            path = self.control.compute_path(self.pos, target)
 
-        # Move the drone along the calculated path
+        if not path:
+            return False
+
         for node in path:
             self.pos = node
-            self.graph.add_node(node) # Add the node to the graph
-            time.sleep(self.delay/self.speed_factor) # Add delay for visualization
+            self.graph.add_node(node)
+            if hasattr(self.control, 'mission_event'):
+                self.control.mission_event.wait(self.delay / self.speed_factor)
+            else:
+                time.sleep(self.delay / self.speed_factor)
         return True
     
     # Update the border list, removing explored pixels

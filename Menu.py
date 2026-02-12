@@ -127,8 +127,8 @@ class MenuItem:
         """
         cx = int(center_x)
         cy = int(center_y)
-        half_w = max(4, int(size // 2))
-        half_h = max(4, int(size // 2))
+        half_w = max(3, int(size // 2))
+        half_h = max(3, int(size // 2))
         if direction == 'left':
             points = [(cx + half_w, cy - half_h), (cx + half_w, cy + half_h), (cx - half_w, cy)]
         else:
@@ -143,7 +143,7 @@ class MenuItem:
         """
         value_text = str(self.options[self.value]) if isinstance(self.value, int) else str(self.value)
         value_x = x + value_offset
-        arrow_size = max(12, self.size - 8)
+        arrow_size = max(10, int(self.size * 0.4))
 
         # Render and position the value text so we can measure its bounds
         font_path = str(Assets.Fonts.SMALL.value)
@@ -162,13 +162,16 @@ class MenuItem:
         left_offset = max(18, self.size)
         left_x = text_rect.left - left_offset
         right_x = text_rect.right + left_offset - 5
+        # Center arrows vertically on the rendered text
+        left_y = text_rect.centery
+        right_y = text_rect.centery
 
         # Only draw arrows when there are options in that direction
         if len(self.options) > 1:
             if self.value > 0:
-                self._draw_arrow(left_x, y, arrow_size, 'left', Assets.Colors.GREY.value)
+                self._draw_arrow(left_x, left_y, arrow_size, 'left', Assets.Colors.GREY.value)
             if self.value < len(self.options) - 1:
-                self._draw_arrow(right_x, y, arrow_size, 'right', Assets.Colors.GREY.value)
+                self._draw_arrow(right_x, right_y, arrow_size, 'right', Assets.Colors.GREY.value)
 
 
     def _draw_slider(self, x: int, y: int, value_offset: int) -> None:
@@ -189,18 +192,20 @@ class MenuItem:
             color = Assets.Colors.GREEN.value if i < filled_bars else Assets.Colors.WHITE.value
             pygame.draw.rect(self.game.display, color, (slider_x + i * bar_width, y - 8, bar_width - 2, 20))
 
-        arrow_size = max(12, self.size - 8)
+        arrow_size = max(10, int(self.size * 0.4))
         left_enabled = (self.value > min_val)
         right_enabled = (self.value < max_val)
 
         left_offset = max(18, self.size)
         left_x = slider_x - left_offset
         right_x = slider_x + max_width + left_offset - 5
+        # Center arrows vertically on the slider bars
+        bar_center_y = int((y - 8) + (20 / 2))
 
         if left_enabled:
-            self._draw_arrow(left_x, y, arrow_size, 'left', Assets.Colors.GREY.value)
+            self._draw_arrow(left_x, bar_center_y, arrow_size, 'left', Assets.Colors.GREY.value)
         if right_enabled:
-            self._draw_arrow(right_x, y, arrow_size, 'right', Assets.Colors.GREY.value)
+            self._draw_arrow(right_x, bar_center_y, arrow_size, 'right', Assets.Colors.GREY.value)
 
 
     # -------------------------------------------------------------------------
@@ -292,13 +297,13 @@ class Menu:
     def __init__(self, game: Any) -> None:
         self.game = game
 
-        self.background = pygame.image.load(Assets.Images['CAVE'].value)
-        self.dark_background = pygame.image.load(Assets.Images['DARK_CAVE'].value)
+        self.background = pygame.image.load(Assets.Images.CAVE.value)
+        self.dark_background = pygame.image.load(Assets.Images.DARK_CAVE.value)
 
         # Initialize pygame mixer for audio
         mix.init()
-        mix.music.load(Assets.Audio['AMBIENT'].value)
-        self.button = mix.Sound(Assets.Audio['BUTTON'].value)
+        mix.music.load(Assets.Audio.AMBIENT.value)
+        self.button = mix.Sound(Assets.Audio.BUTTON.value)
         self.button.set_volume(0.5)
         self.load_options()
         # Start background music if enabled and not already playing

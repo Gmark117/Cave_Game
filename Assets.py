@@ -9,11 +9,13 @@ from pathlib import Path
 from enum import Enum
 from typing import Tuple
 
+
 # =============================================================================
 # GAME DIRECTORY
 # =============================================================================
 
 GAME_DIR = Path(__file__).parent
+
 
 # =============================================================================
 # DISPLAY SETTINGS
@@ -32,6 +34,7 @@ class Display:
     CENTER_H = H / 2
     ALIGN_L = CENTER_W - 550
 
+
 # =============================================================================
 # MENU AND GAME STATES
 # =============================================================================
@@ -45,6 +48,7 @@ class GameOptions:
     DRONE_ICON = [(30, 30), (10, 10), (1, 1)]
     ROVER_ICON = [(40, 40), (15, 15), (5, 5)]
     SEED_DEFAULTS = [5, 19, 837]  # Default seeds for map sizes
+
 
 # =============================================================================
 # MAP GENERATION
@@ -76,6 +80,7 @@ class MapGen:
     BORDER_THICKNESS = 50
     DEFAULT_NUM_PROCESSES = 8
 
+
 # =============================================================================
 # COLORS
 # =============================================================================
@@ -91,6 +96,7 @@ class Colors(Enum):
     GREEN = (51, 255, 51)
     GREY = (112, 128, 144)
     BLUE = (0, 0, 153)
+
 
 # =============================================================================
 # DRONE AND ROVER COLORS
@@ -113,6 +119,7 @@ class RoverColors(Enum):
     BLUE = (0, 0, 255)   # Dewey
     GREEN = (0, 128, 0)  # Louie
 
+
 # =============================================================================
 # FONTS
 # =============================================================================
@@ -122,6 +129,7 @@ class Fonts(Enum):
     SMALL = GAME_DIR / 'Assets' / 'Fonts' / 'Cave-Stone.ttf'
     BIG = GAME_DIR / 'Assets' / 'Fonts' / 'CroMagnum.ttf'
 
+
 # =============================================================================
 # AUDIO
 # =============================================================================
@@ -130,6 +138,7 @@ class Audio(Enum):
     """Audio resources."""
     AMBIENT = GAME_DIR / 'Assets' / 'Audio' / 'Menu.wav'
     BUTTON = GAME_DIR / 'Assets' / 'Audio' / 'Button.wav'
+
 
 # =============================================================================
 # IMAGES
@@ -148,6 +157,7 @@ class Images(Enum):
     CAVE_MATRIX = GAME_DIR / 'Assets' / 'Map' / 'map_matrix.txt'
     CAVE_WALLS = GAME_DIR / 'Assets' / 'Map' / 'walls.png'
     CAVE_FLOOR = GAME_DIR / 'Assets' / 'Map' / 'floor.png'
+
 
 # =============================================================================
 # RECT HANDLE AND BRUSH
@@ -169,6 +179,7 @@ class Brush(Enum):
     OCTAGON = 4
     RECTANGULAR = 5
 
+
 # =============================================================================
 # MAP GENERATOR INPUTS
 # =============================================================================
@@ -179,13 +190,10 @@ class WormInputs(Enum):
     MEDIUM = [MapGen.STEP * 2, MapGen.STRENGTH * 2, MapGen.LIFE * 4]
     BIG = [MapGen.STEP, MapGen.STRENGTH, MapGen.LIFE * 15]
 
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
-def sqr(x: float) -> float:
-    """Calculate the square of the passed argument."""
-    return x ** 2
 
 def next_cell_coords(x: int, y: int, step_len: int, dir: int) -> Tuple[int, int]:
     """Calculate next cell coordinates based on position, step, and direction."""
@@ -203,22 +211,3 @@ def check_pixel_color(surface, pixel: Tuple[int, int], color: Tuple[int, int, in
     """Check if pixel color matches (or doesn't match) the given color."""
     pixel_color = surface.get_at(pixel)[:3]
     return pixel_color != color if is_not else pixel_color == color
-
-# =============================================================================
-# BACKWARD COMPATIBILITY ALIASES
-# =============================================================================
-
-# Display
-FULLSCREEN_W = Display.FULL_W
-FULLSCREEN_H = Display.FULL_H
-LEGEND_WIDTH = Display.LEGEND_WIDTH
-
-# Game options
-vision_options = GameOptions.VISION
-drone_icon_options = GameOptions.DRONE_ICON
-rover_icon_options = GameOptions.ROVER_ICON
-
-# Map gen
-step = MapGen.STEP
-strength = MapGen.STRENGTH
-life = MapGen.LIFE

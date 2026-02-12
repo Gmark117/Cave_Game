@@ -4,7 +4,6 @@ import time
 import math
 from Assets import next_cell_coords, check_pixel_color, Colors
 from Graph import Graph
-from AStar import AStar
 
 
 class Rover():
@@ -42,7 +41,6 @@ class Rover():
         self.pos       = start_pos
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
-        self.astar     = AStar(self.floor_surf, cave, self.color, self.game)
 
     # Define the radius based on the map size
     def calculate_radius(self):
