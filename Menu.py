@@ -341,7 +341,7 @@ class Menu:
             MenuItem(self.game, "Objective", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 90), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.MISSION),
             MenuItem(self.game, "Cave Size", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 50), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.MAP_SIZE),
             MenuItem(self.game, "Seed", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 10), MenuItemType.TEXT_INPUT, text_input=""),
-            MenuItem(self.game, "Drones", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6]),
+            MenuItem(self.game, "Drones", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6,7,8]),
             MenuItem(self.game, "Demo Cave", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 70), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.PREFAB),
             MenuItem(self.game, "Back", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable()))),
             MenuItem(self.game, "Start Mission", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 220), MenuItemType.BUTTON, action=self.start_mission, size=100, font_big=True)
@@ -554,7 +554,7 @@ class Menu:
             'Mode': Assets.GameOptions.MISSION[self.simulation[1].value],  # Index into mission options
             'Map_dimension': Assets.GameOptions.MAP_SIZE[self.simulation[2].value],  # Index into map options
             'Seed': self.simulation[3].text_input,
-            'Drones': [3,4,5,6][self.simulation[4].value],  # Index into drone count options
+            'Drones': [3,4,5,6,7,8][self.simulation[4].value],  # Index into drone count options
             'Prefab': Assets.GameOptions.PREFAB[self.simulation[5].value]  # Index into prefab options
         }
         with open(config_path, 'w') as f:

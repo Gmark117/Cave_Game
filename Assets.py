@@ -45,8 +45,8 @@ class GameOptions:
     MAP_SIZE = ["Small", "Medium", "Big"]
     PREFAB = ['No', 'Yes']
     VISION = [39, 19, 4]  # Vision ranges for map sizes
-    DRONE_ICON = [(30, 30), (10, 10), (1, 1)]
-    ROVER_ICON = [(40, 40), (15, 15), (5, 5)]
+    DRONE_ICON = [(30, 30), (20, 20), (10, 10)]
+    ROVER_ICON = [(40, 40), (25, 25), (10, 10)]
     SEED_DEFAULTS = [5, 19, 837]  # Default seeds for map sizes
 
 
@@ -94,13 +94,8 @@ class Colors(Enum):
     YELLOW = (255, 255, 51)
     RED = (255, 0, 0)
     GREEN = (51, 255, 51)
-    GREY = (112, 128, 144)
+    GREY = (100, 100, 100)
     BLUE = (0, 0, 153)
-
-
-# =============================================================================
-# DRONE AND ROVER COLORS
-# =============================================================================
 
 class DroneColors(Enum):
     """Colors for different drones."""

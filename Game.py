@@ -62,7 +62,7 @@ class Game:
             mission=self.menu.simulation[1].value,
             map_dim=map_dim,
             seed=int(self.menu.simulation[3].text_input) if self.menu.simulation[3].text_input else 0,
-            num_drones=[3,4,5,6][self.menu.simulation[4].value],
+            num_drones=[3,4,5,6,7,8][self.menu.simulation[4].value],
             prefab=self.menu.simulation[5].value
         )
 

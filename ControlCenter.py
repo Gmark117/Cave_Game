@@ -1,13 +1,27 @@
-import os
+"""Control center UI for mission status and runtime statistics.
+
+Provides a compact, cached-rendering surface used by `MissionControl`
+to display drone/rover health, elapsed time, and simple status lines.
+"""
+
 import time
-import configparser
+from typing import Optional, Tuple, List, Any
+
 import pygame
 import Assets
 
-class ControlCenter():
-    def __init__(self, game, num_drones):
+class ControlCenter:
+    """UI component that renders mission status, timers and agent stats."""
+
+    def __init__(self, game: Any, num_drones: int) -> None:
+        """Create control center UI state for the running `game`.
+
+        Args:
+            game: Owner `Game` instance (used to blit the control surface).
+            num_drones: Number of drones to display in the status panel.
+        """
         self.game = game
-        self.tic = 0
+        self.tic = None
         self.explored_percent = 100 # TO BE CALCULATED OUTSIDE AND PASSED AS ARGUMENT
 
         # Get number of deployed drones and rovers
@@ -30,9 +44,31 @@ class ControlCenter():
         # Create dictionaries
         self.drone_dict()
         self.rover_dict()
+        
+        # Caches for fonts and pre-rendered static surfaces
+        self._font_cache = {}
+        self._static_surfaces = {}
+        # Static text fragments (substring -> surface) to avoid re-rendering common labels
+        self._static_fragments = {}
+        self._pre_render_statics()
+        # Cache for dynamic text surfaces: {key: {'value': tuple, 'time': float, 'surf': Surface}}
+        self._dynamic_cache = {}
+        # Debug flags removed in production
+        # Handle mapping to avoid repeated string comparisons
+        self._handle_map = {
+            'center': 'center',
+            'midtop': 'midtop',
+            'midright': 'midright',
+            'midleft': 'midleft'
+        }
 
-    # Create drone dictionary
+
+# =============================================================================
+# Utility methods (Dictionaries)
+# =============================================================================
+
     def drone_dict(self):
+        """Populate `self.drones` with default drone status entries."""
         self.drones = {
             'Blinky': {
                 'id': 0,
@@ -86,6 +122,7 @@ class ControlCenter():
 
     # Create rover dictionary
     def rover_dict(self):
+        """Populate `self.rovers` with default rover status entries."""
         self.rovers = {
             'Huey' : {
                 'id': 0,
@@ -106,87 +143,139 @@ class ControlCenter():
                 'status': 'Ready'
             }
         }
-    
-    def start_timer(self):
+
+
+# =============================================================================
+# Timer methods
+# =============================================================================
+
+    def start_timer(self) -> None:
         self.tic = time.perf_counter()
     
-    def format_timer(self):
-        #str(round(time.perf_counter()-self.tic))
-        elapsed = round(time.perf_counter() - self.tic)
+
+    def format_timer(self) -> str:
+        """
+        Format the elapsed time as a string in MM:SS format.
+        Returns:
+            str: A string representing the elapsed time in the format "MM:SS".
+                 Returns "00:00" if the timer has not been started yet.
+                 Minutes and seconds are zero-padded to always show two digits.
+        Example:
+            >>> # Timer not started
+            >>> format_timer()
+            '00:00'
+            >>> # After 65 seconds
+            >>> format_timer()
+            '01:05'
+        """
+        # If timer not started yet, show 00:00
+        if not self.tic:
+            return '00:00'
+        # Use integer seconds to avoid rounding artifacts during the first second
+        elapsed = int(time.perf_counter() - self.tic)
+        if elapsed < 0:
+            elapsed = 0
         minutes, seconds = divmod(elapsed, 60)
 
-        str_minutes = '0' + str(minutes) if (minutes<10) else str(minutes)
-        str_seconds = '0' + str(seconds) if (seconds<10) else str(seconds)
+        str_minutes = '0' + str(minutes) if (minutes < 10) else str(minutes)
+        str_seconds = '0' + str(seconds) if (seconds < 10) else str(seconds)
 
         return str_minutes + ':' + str_seconds
 
-#  ____   ____      _  __        __ ___  _   _   ____ 
-# |  _ \ |  _ \    / \ \ \      / /|_ _|| \ | | / ___|
-# | | | || |_) |  / _ \ \ \ /\ / /  | | |  \| || |  _
-# | |_| ||  _ <  / ___ \ \ V  V /   | | | |\  || |_| |
-# |____/ |_| \_\/_/   \_\ \_/\_/   |___||_| \_| \____|
 
-    # Set color depending on the percentage
-    def percent_color(self, val, max_val=100):
-        if val < max_val*20/100:
-            return Assets.Colors.RED.value
-        elif val < max_val*80/100:
-            return Assets.Colors.YELLOW.value
-        else:
-            return Assets.Colors.GREEN.value
+# =============================================================================
+# Drawing methods
+# =============================================================================
 
-    # Write title and voices
-    def draw_text(self, texts, size, x, y, font, handle):
-        style = pygame.font.Font(font, size)
-        total_width = 0
-        surfaces = []
+    def draw_control_center(self) -> None:
+        """Render the entire control center onto `self.control_surf` and blit it."""
+        # Clear control surface, draw content there, then blit once to window
+        self.control_surf.fill((*Assets.Colors.BLACK.value, 255))
+
+        self._draw_title()
+        self._draw_statistics()
+        self._draw_drone_section()
+        self._draw_rover_section()
+
+        self.game.window.blit(self.control_surf, self.origin)
+        # Debug rectangles removed
         
-        # Create individual surfaces for each substring and calculate total width
-        for substring, color, alpha in texts:
-            text_surface = style.render(substring, True, color)
-            text_surface.set_alpha(alpha)
-            surfaces.append(text_surface)
-            total_width += text_surface.get_width()
+
+    def _draw_title(self) -> None:
+        """Render the title at the top of the control panel."""
+        surf = self._static_surfaces.get('title')
+        if surf:
+            # Ensure the title fits the legend: clamp or scale if necessary
+            legend_w = Assets.Display.LEGEND_WIDTH
+            max_w = max(legend_w - 16, 8)
+            if surf.get_width() > max_w:
+                scale = max_w / surf.get_width()
+                new_w = int(surf.get_width() * scale)
+                new_h = int(surf.get_height() * scale)
+                surf = pygame.transform.smoothscale(surf, (new_w, new_h)).convert_alpha()
+
+            rect = surf.get_rect()
+            rect.centerx = legend_w // 2
+            rect.centery = 70
+            # If centering would push the left edge off-surface, clamp to a small margin
+            if rect.left < 8:
+                rect.left = 8
+            self.control_surf.blit(surf, rect)
         
-        # Set initial x position based on alignment
-        if handle == 'Center':
-            start_x = x - total_width // 2
-        elif handle == 'Midtop':
-            start_x = x - total_width // 2
-        elif handle == 'Midright':
-            start_x = x - total_width
-        elif handle == 'Midleft':
-            start_x = x
-        else:
-            start_x = x  # Default to left-aligned if handle is unknown
-        
-        # Blit each surface with appropriate horizontal offset
-        for surface in surfaces:
-            text_rect = surface.get_rect()
-            text_rect.midleft = (start_x, y)
-            self.game.window.blit(surface, text_rect)
-            start_x += surface.get_width()  # Move x for next substring
+
+    def _draw_statistics(self) -> None:
+        """Render timer and overall statistics in the control panel."""
+        # Draw time (update at most once per second)
+        met_texts = [('M.E.T.:           ', Assets.Colors.GREY.value, 255),
+                     (self.format_timer(), Assets.Colors.WHITE.value, 255)]
+        met_surf = self._get_cached_text_surface('met', met_texts, 25, Assets.Fonts.BIG.value, ttl=1.0)
+        if met_surf:
+            self._blit_cached_surface(met_surf, self.origin_x, 120, Assets.RectHandle.MIDLEFT.value)
+
+        # Draw explored map percentage (only when value changes)
+        explored_texts = [('Explored:     ', Assets.Colors.GREY.value, 255),
+                          (f'{self.explored_percent}%', self.percent_color(self.explored_percent), 255)]
+        explored_surf = self._get_cached_text_surface(f'explored_{self.explored_percent}', explored_texts, 25, Assets.Fonts.BIG.value)
+        if explored_surf:
+            self._blit_cached_surface(explored_surf, self.origin_x, 150, Assets.RectHandle.MIDLEFT.value)
 
 
-    def draw_statistics(self):
-        # Draw time
-        self.draw_text([('MET:           ', Assets.Colors.GREY.value, 255),
-                        (self.format_timer(), Assets.Colors.WHITE.value, 255)],
-                       25,
-                       self.origin_x,
-                       120,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.MIDLEFT.value)
-        # Draw explored map percentage
-        self.draw_text([('Explored:     ', Assets.Colors.GREY.value, 255),
-                        (f'{self.explored_percent}%', self.percent_color(self.explored_percent), 255)],
-                       25,
-                       self.origin_x,
-                       150,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.MIDLEFT.value)
+    def _draw_drone_section(self) -> None:
+        """Render the drone section header and individual drone statuses."""
+        # Draw subtitle
+        surf = self._static_surfaces.get('drones')
+        if surf:
+            rect = surf.get_rect()
+            rect.centerx = Assets.Display.LEGEND_WIDTH // 2
+            rect.centery = 195
+            self.control_surf.blit(surf, rect)
+
+        for drone in self.drones:
+            if self.drones[drone]['id'] < self.num_drones:
+                self._draw_status(drone)
+            else:
+                self._draw_status(drone, deployed=False)
+
+
+    def _draw_rover_section(self) -> None:
+        """Render the rover section header and individual rover statuses."""
+        # Draw subtitle
+        surf = self._static_surfaces.get('rovers')
+        if surf:
+            rect = surf.get_rect()
+            rect.centerx = Assets.Display.LEGEND_WIDTH // 2
+            rect.centery = 725
+            self.control_surf.blit(surf, rect)
+
+        for rover in self.rovers:
+            if self.rovers[rover]['id'] < self.num_rovers:
+                self._draw_status(rover, rover=True)
+            else:
+                self._draw_status(rover, rover=True, deployed=False)
     
-    def draw_status(self, label, rover=False, deployed=True):
+
+    def _draw_status(self, label: str, rover: bool = False, deployed: bool = True) -> None:
+        """Render a single status line for a drone or rover identified by `label`."""
         # Get data
         if not rover:
             number = self.drones[label]['id']
@@ -207,12 +296,13 @@ class ControlCenter():
             data_height = 790
             max_battery = 2400
 
-        # Blit label
-        self.draw_text([(label, color, 255)], 25,
-                       self.origin_x,
-                       name_height + 60*number,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.MIDLEFT.value)
+        # Blit label (pre-rendered)
+        key = ('rover_' + label) if rover else ('drone_' + label)
+        name_surf = self._static_surfaces.get(key)
+        y_center = name_height + 60*number
+        rect = name_surf.get_rect()
+        rect.midleft = (8, y_center)
+        self.control_surf.blit(name_surf, rect)
         
         if deployed:
             # Define Status color
@@ -229,60 +319,187 @@ class ControlCenter():
             # Define Battery color
             battery_color = self.percent_color(battery, max_battery)
 
-            # Blit data
-            self.draw_text([(f'{battery}%', battery_color, 128),
-                            ('  |  ', Assets.Colors.WHITE.value, 128),
-                            (status, status_color, 128)],
-                           25,
-                           self.origin_x,
-                           data_height + 60*number,
-                           Assets.Fonts.BIG.value,
-                           Assets.RectHandle.MIDLEFT.value)
+            # Blit data (cache and only re-render when battery/status changes)
+            key = f'status_{"rover_"+label if rover else label}_{battery}_{status}'
+            data_surf = self._get_cached_status_surface(key, battery, status, battery_color, status_color, 25, Assets.Fonts.BIG.value, max_battery)
+            if data_surf:
+                self._blit_cached_surface(data_surf, self.origin_x, data_height + 60*number, Assets.RectHandle.MIDLEFT.value)
         else:
             # Blit 'N/A'
-            self.draw_text([('N/A', Assets.Colors.GREY.value, 128)],
-                           25,
-                           self.origin_x,
-                           data_height + 60*number,
-                           Assets.Fonts.BIG.value,
-                           Assets.RectHandle.MIDLEFT.value)
+            na_surf = self._static_fragments['N/A']
+            rect = na_surf.get_rect()
+            rect.midleft = (8, data_height + 60*number)
+            self.control_surf.blit(na_surf, rect)
+            
 
-    # Blit the control center on the map
-    def draw_control_center(self):
-        self.game.window.blit(self.control_surf, self.origin)
-        # Draw title
-        self.draw_text([('Control Center', Assets.Colors.RED.value, 255)],
-                       35,
-                       self.origin_x,
-                       70,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.CENTER.value)
-        # Draw statistics
-        self.draw_statistics()
-        # Draw subtitle
-        self.draw_text([('Drones', Assets.Colors.EUCALYPTUS.value, 255)],
-                       30,
-                       self.mid_x,
-                       195,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.CENTER.value)
+    def draw_text(self, texts: List[Tuple[str, Tuple[int, int, int], int]], size: int, x: int, y: int, font, handle) -> None:
+        """Compose and blit a composed text surface at absolute `x,y` using `handle`."""
+        # Compose a single surface for these texts (this applies alpha during composition)
+        surf = self._compose_text_surface(texts, size, font)
+        # Compute local coordinates and blit using cached handle mapping
+        x_local = x - self.origin_x
+        rect = surf.get_rect()
+        handle_l = str(handle).lower() if handle is not None else ''
+        attr = self._handle_map.get(handle_l, 'midleft')
+        setattr(rect, attr, (int(x_local), y))
+        self.control_surf.blit(surf, rect)
 
-        for drone in self.drones:
-            if self.drones[drone]['id'] < self.num_drones:
-                self.draw_status(drone)
+
+    def _compose_text_surface(self, texts: List[Tuple[str, Tuple[int, int, int], int]], size: int, font) -> 'pygame.Surface':
+        """Compose and return a Surface for the given text fragments.
+
+        `texts` is a list of tuples `(substring, color, alpha)`.
+        """
+        font_obj = self._get_font(font, size)
+        parts = []
+        total_w = 0
+        max_h = 0
+        for substring, color, alpha in texts:
+            # Reuse pre-rendered fragment if available (exact-match)
+            s = self._static_fragments.get(substring)
+            if s is None:
+                s = font_obj.render(substring, True, color).convert_alpha()
             else:
-                self.draw_status(drone, deployed=False)
-        # Draw subtitle
-        self.draw_text([('Rovers', Assets.Colors.EUCALYPTUS.value, 255)],
-                       30,
-                       self.mid_x,
-                       725,
-                       Assets.Fonts.BIG.value,
-                       Assets.RectHandle.CENTER.value)
+                # avoid mutating shared static fragments when applying alpha
+                s = s.copy()
+            if alpha != 255:
+                s.set_alpha(alpha)
+            parts.append(s)
+            w, h = s.get_size()
+            total_w += w
+            max_h = max(max_h, h)
 
-        for rover in self.rovers:
-            if self.rovers[rover]['id'] < self.num_rovers:
-                self.draw_status(rover, rover=True)
-            else:
-                self.draw_status(rover, rover=True, deployed=False)
-        
+        surf = pygame.Surface((total_w, max_h), pygame.SRCALPHA)
+        x = 0
+        for p in parts:
+            surf.blit(p, (x, (max_h - p.get_height()) // 2))
+            x += p.get_width()
+        return surf
+
+
+    def _get_cached_text_surface(self, key: str, texts: List[Tuple[str, Tuple[int, int, int], int]], size: int, font, ttl: float = None) -> Optional['pygame.Surface']:
+        """Return cached composed surface for texts; re-render when value changes or ttl expires."""
+        now = time.perf_counter()
+        value = tuple(t[0] for t in texts)
+        entry = self._dynamic_cache.get(key)
+        if entry:
+            if entry.get('value') == value:
+                if ttl is None or (now - entry.get('time', 0)) >= ttl:
+                    # ttl expired -> re-render
+                    pass
+                else:
+                    return entry['surf']
+            # value changed -> re-render
+        # Render new surface
+        surf = self._compose_text_surface(texts, size, font)
+        self._dynamic_cache[key] = {'value': value, 'time': now, 'surf': surf}
+        return surf
+
+
+    def _get_cached_status_surface(self, key: str, battery: int, status: str, battery_color: Tuple[int, int, int], status_color: Tuple[int, int, int], size: int, font, max_battery: int = 100) -> 'pygame.Surface':
+        """Compose and cache a status surface with fixed-width battery column."""
+        now = time.perf_counter()
+        value = (str(battery), status)
+        entry = self._dynamic_cache.get(key)
+        if entry and entry.get('value') == value:
+            return entry['surf']
+
+        # Prepare font and individual surfaces
+        font_obj = self._get_font(font, size)
+        # Battery surface
+        battery_text = f'{battery}%'
+        bat_s = font_obj.render(battery_text, True, battery_color).convert_alpha()
+        bat_s.set_alpha(128)
+
+        # Determine fixed battery column width using a 5-digit standard '00000%'
+        sample_text = '00000%'
+        sample = font_obj.render(sample_text, True, battery_color).convert_alpha()
+        col_w = sample.get_width()
+
+        # Separator
+        sep_s = font_obj.render('|', True, Assets.Colors.WHITE.value).convert_alpha()
+        sep_s.set_alpha(128)
+
+        # Status surface
+        stat_s = font_obj.render(status, True, status_color).convert_alpha()
+        stat_s.set_alpha(128)
+
+        # Build composed surface: battery column (col_w), gap, separator, gap, status
+        gap = 8
+        total_w = col_w + gap + sep_s.get_width() + gap + stat_s.get_width()
+        max_h = max(bat_s.get_height(), sep_s.get_height(), stat_s.get_height())
+        surf = pygame.Surface((total_w, max_h), pygame.SRCALPHA)
+
+        # Blit battery right-aligned inside column so digits line up
+        bat_x = col_w - bat_s.get_width()
+        bat_y = (max_h - bat_s.get_height()) // 2
+        surf.blit(bat_s, (bat_x, bat_y))
+
+        # Blit separator at column end + gap
+        sep_x = col_w + gap
+        sep_y = (max_h - sep_s.get_height()) // 2
+        surf.blit(sep_s, (sep_x, sep_y))
+
+        # Blit status after separator + gap
+        stat_x = sep_x + sep_s.get_width() + gap
+        stat_y = (max_h - stat_s.get_height()) // 2
+        surf.blit(stat_s, (stat_x, stat_y))
+
+        self._dynamic_cache[key] = {'value': value, 'time': now, 'surf': surf}
+        return surf
+
+
+    def _blit_cached_surface(self, surf: 'pygame.Surface', x: int, y: int, handle: Any) -> None:
+        """Blit a prepared surface onto `control_surf` using handle and absolute x,y."""
+        x_local = x - self.origin_x
+        rect = surf.get_rect()
+        handle_l = str(handle).lower() if handle is not None else ''
+        attr = self._handle_map.get(handle_l, 'midleft')
+        setattr(rect, attr, (int(x_local), y))
+        self.control_surf.blit(surf, rect)
+
+
+    def _get_font(self, font_path: Any, size: int) -> 'pygame.font.Font':
+        key = (font_path, size)
+        f = self._font_cache.get(key)
+        if f is None:
+            f = pygame.font.Font(font_path, size)
+            self._font_cache[key] = f
+        return f
+
+
+    def _pre_render_statics(self) -> None:
+        """Prepare pre-rendered static surfaces used by the control panel."""
+        # Pre-render title and section labels
+        title_font = self._get_font(Assets.Fonts.BIG.value, 35)
+        self._static_surfaces['title'] = title_font.render('Control Center', True, Assets.Colors.RED.value).convert_alpha()
+        sub_font = self._get_font(Assets.Fonts.BIG.value, 30)
+        self._static_surfaces['drones'] = sub_font.render('Drones', True, Assets.Colors.EUCALYPTUS.value).convert_alpha()
+        self._static_surfaces['rovers'] = sub_font.render('Rovers', True, Assets.Colors.EUCALYPTUS.value).convert_alpha()
+
+        # Pre-render drone and rover name labels
+        name_font = self._get_font(Assets.Fonts.BIG.value, 25)
+        for name, info in self.drones.items():
+            surf = name_font.render(name, True, info['color']).convert_alpha()
+            self._static_surfaces[('drone_' + name)] = surf
+        for name, info in self.rovers.items():
+            surf = name_font.render(name, True, info['color']).convert_alpha()
+            self._static_surfaces[('rover_' + name)] = surf
+        # Pre-render small static fragments used in dynamic lines
+        small_font = self._get_font(Assets.Fonts.BIG.value, 25)
+        self._static_fragments['M.E.T.:           '] = small_font.render('M.E.T.:           ', True, Assets.Colors.GREY.value).convert_alpha()
+        self._static_fragments['Explored:     '] = small_font.render('Explored:     ', True, Assets.Colors.GREY.value).convert_alpha()
+        self._static_fragments['  |  '] = small_font.render('  |  ', True, Assets.Colors.WHITE.value).convert_alpha()
+        s = small_font.render('N/A', True, Assets.Colors.GREY.value).convert_alpha()
+        s.set_alpha(128)
+        self._static_fragments['N/A'] = s
+    
+
+    def percent_color(self, val: int, max_val: int = 100) -> Tuple[int, int, int]:
+        """Return a color tuple representing a percentage (red/yellow/green)."""
+        if val < max_val*20/100:
+            return Assets.Colors.RED.value
+        elif val < max_val*80/100:
+            return Assets.Colors.YELLOW.value
+        else:
+            return Assets.Colors.GREEN.value

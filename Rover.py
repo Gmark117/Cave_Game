@@ -1,13 +1,32 @@
-import pygame
-import random as rand
-import time
+"""Rover agent for the Cave Explorer simulation.
+
+This module defines the `Rover` class which behaves similarly to a
+`Drone` but with different battery and visualization settings. The
+class provides movement helpers and simple drawing utilities used by
+`MissionControl` when rendering and stepping the simulation.
+"""
+
 import math
+import time
+import random as rand
+from typing import Tuple
+
+import pygame
+
 from Assets import next_cell_coords, check_pixel_color, Colors
 from Graph import Graph
 
 
-class Rover():
-    def __init__(self, game, control, id, start_pos, color, icon, cave, strategy="random"):
+class Rover:
+    """Simple ground rover agent used for map exploration visualization.
+
+    The rover stores runtime state (position, battery, path surface)
+    and provides drawing helpers. Types are intentionally permissive
+    to avoid circular imports with `Game`/`MissionControl`.
+    """
+
+    def __init__(self, game: object, control: object, id: int, start_pos: Tuple[int, int],
+                 color: Tuple[int, int, int], icon: pygame.Surface, cave: list, strategy: str = "random") -> None:
         self.game     = game
         self.settings = game.sim_settings
         self.cave     = cave
@@ -43,7 +62,8 @@ class Rover():
         self.graph     = Graph(*start_pos, cave)
 
     # Define the radius based on the map size
-    def calculate_radius(self):
+    def calculate_radius(self) -> int:
+        """Return vision radius (pixels) based on chosen map size."""
         match self.map_size:
             case 'SMALL' : return 40
             case 'MEDIUM': return 20
@@ -58,7 +78,8 @@ class Rover():
 # |____/ |_| \_\/_/   \_\ \_/\_/   |___||_| \_| \____|
 
     # Draw the rover icon
-    def draw_icon(self):
+    def draw_icon(self) -> None:
+        """Blit the rover icon centered at current position onto the window."""
         icon_width, icon_height = self.icon.get_size()  # Get dimensions of the icon
         icon_position = (int(self.pos[0] - icon_width // 2), int(self.pos[1] - icon_height // 2))  # Center the icon
 
