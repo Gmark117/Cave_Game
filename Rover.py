@@ -9,7 +9,7 @@ class provides movement helpers and simple drawing utilities used by
 import math
 import time
 import random as rand
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 import pygame
 
@@ -44,7 +44,7 @@ class Rover:
         self.icon  = icon
 
         self.battery  = 2400
-        self.statuses = ['Ready', 'Updating', 'Advancing', 'Done']
+        self.status = 'Ready'
         
         # Transparent surface used to track the explored path
         self.floor_surf = pygame.Surface((self.game.width,self.game.height), pygame.SRCALPHA)
@@ -54,6 +54,8 @@ class Rover:
 
         self.show_path    = True
         self.speed_factor = 4
+        self.current_path: List[Tuple[int, int]] = []
+        self.target: Optional[Tuple[int, int]] = None
          
         self.border    = []
         self.start_pos = start_pos
@@ -69,6 +71,51 @@ class Rover:
             case 'MEDIUM': return 20
             case 'BIG'   : return 10
             case _       : return 20
+
+
+    def move(self) -> None:
+        """Plan and follow terrain-aware routes toward scanned rough areas."""
+        if self.current_path:
+            self.status = 'Advancing'
+            self.pos = self.current_path.pop(0)
+            self.graph.add_node(self.pos)
+            self.battery = max(0, self.battery - 1)
+
+            if not self.current_path:
+                self.status = 'Done'
+                if hasattr(self.control, 'release_rover_target'):
+                    self.control.release_rover_target(self.id, completed=True)
+                self.target = None
+            return
+
+        self.status = 'Updating'
+        if not hasattr(self.control, 'acquire_rover_target') or not hasattr(self.control, 'compute_rover_path'):
+            return
+
+        target = self.control.acquire_rover_target(self.id, self.pos)
+        if target is None:
+            self.status = 'Ready'
+            return
+
+        path = self.control.compute_rover_path(self.pos, target)
+        if len(path) <= 1:
+            self.control.release_rover_target(self.id, completed=False)
+            self.status = 'Ready'
+            return
+
+        self.target = target
+        self.current_path = path[1:]
+        self.status = 'Advancing'
+
+
+    def draw_path(self) -> None:
+        """Render the rover route history on its own transparent surface."""
+        if not self.show_path:
+            return
+
+        for i in range(1, len(self.graph.pos)):
+            pygame.draw.line(self.floor_surf, (*self.color, 180), self.graph.pos[i], self.graph.pos[i - 1], 2)
+        self.game.window.blit(self.floor_surf, (0, 0))
 
 
 #  ____   ____      _  __        __ ___  _   _   ____ 

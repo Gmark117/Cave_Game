@@ -45,7 +45,18 @@ class MissionControl:
         self.settings     = game.sim_settings 
         self.cartographer = game.cartographer
         self.map_matrix   = self.cartographer.bin_map # Get the binary map representation
+        self.map_h, self.map_w = np.asarray(self.map_matrix).shape
+        self.terrain_roughness = np.array(getattr(self.cartographer, 'terrain_roughness', np.zeros_like(self.map_matrix)), dtype=np.float32)
         self.cave_png     = pygame.image.load(Assets.Images.CAVE_MAP.value).convert_alpha() # Load cave map image
+        self.floor_cells = max(1, int(np.count_nonzero(np.asarray(self.map_matrix) == 0)))
+        self.known_roughness = np.full(np.asarray(self.map_matrix).shape, -1.0, dtype=np.float32)
+        self.terrain_confidence = np.zeros(np.asarray(self.map_matrix).shape, dtype=np.float32)
+        self.terrain_lock = threading.Lock()
+        self.rover_assignment_lock = threading.Lock()
+        self.rover_assignments = {}
+        self.completed_rover_targets = set()
+        # Temporary switch: keep rovers stationary
+        self.rover_motion_enabled = False
 
         # Create shared-memory copy of the map for worker processes
         try:
@@ -75,6 +86,15 @@ class MissionControl:
 
         # Maximise the game window
         self.game.display = self.game.to_maximised()
+
+        self.show_terrain_heatmap = False
+        self.terrain_heatmap_dirty = True
+
+        self.terrain_heatmap_surf = pygame.Surface((self.map_w, self.map_h), pygame.SRCALPHA)
+        self.last_heatmap_refresh = 0.0
+        self.heatmap_refresh_interval = 0.25
+        self.last_explored_update = 0.0
+        self.explored_update_interval = 0.5
         
         # Set the starting position for drones
         self.start_point = None
@@ -134,6 +154,12 @@ class MissionControl:
             threads.append(t)
             t.start()
 
+        if self.rover_motion_enabled:
+            for i in range(self.num_rovers):
+                t = threading.Thread(target=self.rover_thread, args=(i,))
+                threads.append(t)
+                t.start()
+
         # Main loop to keep moving drones until the mission is completed
         while not self.completed:
             # Cap frame rate and allow timely interrupt
@@ -147,6 +173,10 @@ class MissionControl:
                     # Quit and close the program
                     pygame.quit()
                     sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    click_result = self.control_center.handle_click(event.pos, self.drones)
+                    if click_result == 'terrain_heatmap':
+                        self.toggle_terrain_heatmap()
 
             # Check if mission is over
             self.completed = self.is_mission_over()
@@ -253,6 +283,172 @@ class MissionControl:
                 self.pool_sem.release()
             except Exception:
                 pass
+
+
+    def compute_rover_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """Compute a terrain-aware path for rovers without affecting drone A*."""
+        with self.terrain_lock:
+            known_roughness = self.known_roughness.copy()
+            terrain_confidence = self.terrain_confidence.copy()
+        cave_map = np.asarray(self.map_matrix, dtype=np.uint8)
+        return AStarPathfinder.compute_weighted_path(cave_map, known_roughness, terrain_confidence, start, goal)
+
+
+    def record_terrain_scan(self, samples: List[Tuple[int, int, float, float]]) -> None:
+        """Fuse drone terrain observations into the shared known-terrain maps."""
+        if not samples:
+            return
+
+        map_updated = False
+        with self.terrain_lock:
+            for x, y, roughness, confidence in samples:
+                xi = int(x)
+                yi = int(y)
+                if yi < 0 or yi >= self.known_roughness.shape[0] or xi < 0 or xi >= self.known_roughness.shape[1]:
+                    continue
+                if self.map_matrix[yi][xi] != 0:
+                    continue
+
+                obs_conf = float(np.clip(confidence, 0.05, 1.0))
+                obs_roughness = float(np.clip(roughness, 0.0, 1.0))
+                prev_conf = float(self.terrain_confidence[yi, xi])
+                prev_value = float(self.known_roughness[yi, xi]) if prev_conf > 0 else obs_roughness
+                total_conf = prev_conf + obs_conf
+                blended = ((prev_value * prev_conf) + (obs_roughness * obs_conf)) / total_conf
+
+                self.known_roughness[yi, xi] = blended
+                self.terrain_confidence[yi, xi] = min(1.0, total_conf)
+                map_updated = True
+
+            now = pygame.time.get_ticks() / 1000.0
+            if map_updated and (now - self.last_explored_update) >= self.explored_update_interval:
+                explored_cells = int(np.count_nonzero(self.terrain_confidence > 0))
+                self.control_center.explored_percent = round((explored_cells / self.floor_cells) * 100)
+                self.last_explored_update = now
+
+        if map_updated:
+            self.terrain_heatmap_dirty = True
+
+
+    def toggle_terrain_heatmap(self) -> None:
+        """Toggle visibility of the scanned terrain heatmap overlay."""
+        self.show_terrain_heatmap = not self.show_terrain_heatmap
+        if self.show_terrain_heatmap:
+            for drone in self.drones:
+                drone.show_path = False
+                drone.show_vision = False
+        else:
+            for drone in self.drones:
+                drone.show_path = True
+                drone.show_vision = True
+
+
+    def _refresh_terrain_heatmap(self) -> None:
+        """Rebuild the cached terrain heatmap surface from discovered scans."""
+        with self.terrain_lock:
+            roughness = np.clip(self.known_roughness.copy(), 0.0, 1.0)
+            confidence = np.clip(self.terrain_confidence.copy(), 0.0, 1.0)
+
+        valid_mask = confidence > 0.0
+        if not np.any(valid_mask):
+            self.terrain_heatmap_surf.fill((0, 0, 0, 0))
+            self.terrain_heatmap_dirty = False
+            return
+
+        # 5-band discrete palette (Blue -> Green -> Yellow -> Orange -> Red)
+        # Use nonlinear-stretched roughness to improve separation in mid-range values.
+        ramp = np.clip(((roughness - 0.5) * 1.8) + 0.5, 0.0, 1.0)
+        band = np.clip((ramp * 5.0).astype(np.int8), 0, 4)
+
+        red = np.zeros_like(ramp, dtype=np.float32)
+        green = np.zeros_like(ramp, dtype=np.float32)
+        blue = np.zeros_like(ramp, dtype=np.float32)
+
+        # Band colors (RGB):
+        # 0: Blue, 1: Green, 2: Yellow, 3: Orange, 4: Red
+        red[band == 0], green[band == 0], blue[band == 0] = 30.0, 80.0, 235.0
+        red[band == 1], green[band == 1], blue[band == 1] = 45.0, 190.0, 70.0
+        red[band == 2], green[band == 2], blue[band == 2] = 245.0, 225.0, 60.0
+        red[band == 3], green[band == 3], blue[band == 3] = 245.0, 145.0, 40.0
+        red[band == 4], green[band == 4], blue[band == 4] = 235.0, 45.0, 40.0
+
+        alpha = np.where(valid_mask, 35.0 + (confidence * 125.0), 0.0)
+
+        red = np.clip(red, 0.0, 255.0).astype(np.uint8)
+        green = np.clip(green, 0.0, 255.0).astype(np.uint8)
+        blue = np.clip(blue, 0.0, 255.0).astype(np.uint8)
+        alpha = np.clip(alpha, 0.0, 160.0).astype(np.uint8)
+
+        rgb_view = pygame.surfarray.pixels3d(self.terrain_heatmap_surf)
+        alpha_view = pygame.surfarray.pixels_alpha(self.terrain_heatmap_surf)
+        rgb_view[:, :, 0] = red.T
+        rgb_view[:, :, 1] = green.T
+        rgb_view[:, :, 2] = blue.T
+        alpha_view[:, :] = alpha.T
+        del rgb_view
+        del alpha_view
+
+        self.terrain_heatmap_dirty = False
+
+
+    def draw_terrain_heatmap(self) -> None:
+        """Blit the scanned terrain heatmap overlay when enabled."""
+        if not self.show_terrain_heatmap:
+            return
+        now = pygame.time.get_ticks() / 1000.0
+        if self.terrain_heatmap_dirty and (now - self.last_heatmap_refresh) >= self.heatmap_refresh_interval:
+            self._refresh_terrain_heatmap()
+            self.last_heatmap_refresh = now
+        self.game.window.blit(self.terrain_heatmap_surf, (0, 0))
+
+
+    def acquire_rover_target(self, rover_id: int, current_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        """Choose and reserve a discovered rough-terrain target for a rover."""
+        with self.rover_assignment_lock, self.terrain_lock:
+            assigned_targets = {target for rid, target in self.rover_assignments.items() if rid != rover_id}
+            candidate_mask = (
+                (np.asarray(self.map_matrix) == 0)
+                & (self.terrain_confidence >= 0.25)
+                & (self.known_roughness >= 0.35)
+            )
+
+            if not np.any(candidate_mask):
+                return None
+
+            ys, xs = np.where(candidate_mask)
+            best_target = None
+            best_score = float('-inf')
+            norm = max(1.0, math.hypot(self.game.width, self.game.height))
+
+            for x, y in zip(xs, ys):
+                target = (int(x), int(y))
+                if target in assigned_targets or target in self.completed_rover_targets:
+                    continue
+
+                distance_penalty = math.dist(current_pos, target) / norm
+                score = (0.7 * float(self.known_roughness[y, x])) + (0.3 * float(self.terrain_confidence[y, x])) - distance_penalty
+                if score > best_score:
+                    best_score = score
+                    best_target = target
+
+            if best_target is not None:
+                self.rover_assignments[rover_id] = best_target
+            return best_target
+
+
+    def release_rover_target(self, rover_id: int, completed: bool = False) -> None:
+        """Release or mark complete a rover terrain target reservation."""
+        with self.rover_assignment_lock:
+            target = self.rover_assignments.pop(rover_id, None)
+            if completed and target is not None:
+                self.completed_rover_targets.add(target)
+
+
+    def rover_thread(self, rover_id: int) -> None:
+        """Drive rover movement using the terrain-aware weighted planner."""
+        while not self.mission_event.is_set():
+            self.rovers[rover_id].move()
+            self.mission_event.wait(self.delay)
 
     
     def build_drones(self) -> None:
@@ -370,9 +566,13 @@ class MissionControl:
         """
         # Base map
         self.draw_cave()
+        self.draw_terrain_heatmap()
+        
         # Per-drone overlays: draw explored paths (under vision)
         for drone in self.drones:
             drone.draw_path()
+        for rover in self.rovers:
+            rover.draw_path()
 
         # Draw cave walls once
         self.draw_walls()
@@ -388,4 +588,4 @@ class MissionControl:
                 self.rovers[i].draw_icon()
 
         # Control center UI
-        self.control_center.draw_control_center()
+        self.control_center.draw_control_center(self.drones, self.rovers, self.show_terrain_heatmap)

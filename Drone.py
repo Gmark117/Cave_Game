@@ -71,7 +71,13 @@ class Drone:
 
         # Rendering / motion configuration
         self.show_path = True
+        self.show_vision = True
         self.speed_factor = 4
+        self.scan_interval = 0.25
+        self.last_scan_time = 0.0
+        self.scan_rays = 96
+        self.border_retry_cooldown = 1.5
+        self.border_retry_until: dict[Tuple[int, int], float] = {}
 
         # Exploration bookkeeping
         self.border = []
@@ -79,6 +85,8 @@ class Drone:
         self.pos = start_pos
         self.dir_log = []
         self.graph = Graph(*start_pos, cave)
+        self.returning_home = False
+        self.done = False
 
     
     def calculate_radius(self) -> int:
@@ -100,6 +108,16 @@ class Drone:
         Repeatedly attempts to find a new frontier direction; if none are
         available, tries to reach a stored border pixel using pathfinding.
         """
+        if self.done:
+            return
+
+        # Once exploration is exhausted, return to the start point
+        if self.returning_home or (self.explored and not self.border):
+            self.returning_home = True
+            if self.reach_start_point():
+                self.done = True
+            return
+
         node_found = False
         while not node_found:
             try:
@@ -109,9 +127,39 @@ class Drone:
                 # If no valid directions, update borders and try to reach the nearest border
                 self.update_borders()
                 node_found = self.reach_border()
+                if not node_found:
+                    # Yield control to avoid busy-looping in dead-ends
+                    return
             else:
                 # Otherwise move in one of the valid directions
                 node_found = self.explore(valid_dirs, valid_targets, chosen_target)
+
+
+    def reach_start_point(self) -> bool:
+        """Return the drone to `start_pos` using A* pathfinding.
+
+        Returns True when the drone is back at the starting position,
+        otherwise False.
+        """
+        if self.pos == self.start_pos:
+            return True
+
+        path: List[Tuple[int, int]] = []
+        if hasattr(self.control, 'compute_path'):
+            path = self.control.compute_path(self.pos, self.start_pos)
+
+        if not path:
+            return False
+
+        for node in path:
+            self.pos = node
+            self.graph.add_node(node)
+            if hasattr(self.control, 'mission_event'):
+                self.control.mission_event.wait(self.delay / self.speed_factor)
+            else:
+                time.sleep(self.delay / self.speed_factor)
+
+        return self.pos == self.start_pos
     
     
     def find_new_node(self) -> Tuple[List[int], List[Tuple[int, int]], Tuple[int, int]]:
@@ -208,39 +256,65 @@ class Drone:
         """
         self.border.sort(key=self.get_distance)  # Sort border pixels by distance
 
-        # Use worker pool pathfinding to the closest border pixel
         if not self.border:
             return False
-        target = self.border[0]
-        path = []
-        if hasattr(self.control, 'compute_path'):
-            path = self.control.compute_path(self.pos, target)
 
-        if not path:
-            return False
+        # Try multiple candidate border pixels (nearest first)
+        now = time.perf_counter()
+        for target in list(self.border):
+            if target == self.pos:
+                continue
+            retry_at = self.border_retry_until.get(target, 0.0)
+            if now < retry_at:
+                continue
 
-        for node in path:
-            self.pos = node
-            self.graph.add_node(node)
-            if hasattr(self.control, 'mission_event'):
-                self.control.mission_event.wait(self.delay / self.speed_factor)
-            else:
-                time.sleep(self.delay / self.speed_factor)
-        return True
+            path: List[Tuple[int, int]] = []
+            if hasattr(self.control, 'compute_path'):
+                path = self.control.compute_path(self.pos, target)
+
+            # Accept only meaningful paths (more than current position)
+            if not path or len(path) <= 1:
+                self.border_retry_until[target] = now + self.border_retry_cooldown
+                continue
+
+            for node in path:
+                self.pos = node
+                self.graph.add_node(node)
+                if hasattr(self.control, 'mission_event'):
+                    self.control.mission_event.wait(self.delay / self.speed_factor)
+                else:
+                    time.sleep(self.delay / self.speed_factor)
+
+            # Reached candidate; remove it from border and continue exploration
+            if target in self.border:
+                self.border.remove(target)
+            self.border_retry_until.pop(target, None)
+            return True
+
+        return False
     
     
     def update_borders(self) -> None:
         """Remove border pixels that are now explored (not matching `self.color`)."""
         self.border = [pixel for pixel in self.border if check_pixel_color(self.floor_surf, pixel, self.color, is_not=True)]
+        valid = set(self.border)
+        self.border_retry_until = {k: v for k, v in self.border_retry_until.items() if k in valid}
 
     
     def mission_completed(self) -> bool:
         # Verify that the mission cannot be completed if it has never been explored
         if not self.explored:
             return False
-        if not self.border:  # If the border list is empty, the mission is considered completed
+
+        # Exploration finished: trigger homing, then complete only at start
+        if not self.border and not self.done:
+            self.returning_home = True
+            return False
+
+        if self.done:
             print(f"Drone {self.id} has completed the mission!")
             return True  # Mission completed
+
         return False
     
     
@@ -274,17 +348,17 @@ class Drone:
         if len(self.ray_points) > 2:
             pygame.draw.polygon(self.floor_surf, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
 
-        # Draw the A* path as a polyline (if enabled)
-        if self.show_path:
-            for i in range(1, len(self.graph.pos)):
-                pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
+        # Draw the A* path as a polyline
+        for i in range(1, len(self.graph.pos)):
+            pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
 
         # Draw the starting point marker
         self.start_surf = pygame.Surface((12, 12), pygame.SRCALPHA)
         pygame.draw.circle(self.start_surf, (*Colors.BLUE.value, 255), (6, 6), 6)
 
         # Blit the explored path surface and the starting point onto the game window
-        self.game.window.blit(self.floor_surf, (0, 0))
+        if self.show_path:
+            self.game.window.blit(self.floor_surf, (0, 0))
         self.game.window.blit(self.start_surf, (self.start_pos[0] - 6, self.start_pos[1] - 6))
     
     
@@ -311,6 +385,41 @@ class Drone:
                 break
         return None
 
+
+    def scan_terrain(self, num_rays: int = 24) -> None:
+        """Sample terrain roughness along visible rays and share it with mission control."""
+        if not hasattr(self.control, 'record_terrain_scan') or not hasattr(self.control, 'terrain_roughness'):
+            return
+
+        now = time.perf_counter()
+        if (now - self.last_scan_time) < self.scan_interval:
+            return
+        self.last_scan_time = now
+
+        samples = []
+        angle_increment = 2 * math.pi / num_rays
+        sample_step = max(2, self.radius // 12) # Sample every few pixels along the ray
+        height = len(self.cave)
+        width = len(self.cave[0]) if height else 0
+
+        for i in range(num_rays):
+            angle = i * angle_increment
+            for length in range(0, self.radius + 1, sample_step):
+                sample_x = int(self.pos[0] + length * math.cos(angle))
+                sample_y = int(self.pos[1] + length * math.sin(angle))
+
+                if not (0 <= sample_x < width and 0 <= sample_y < height):
+                    break
+                if self.cave[sample_y][sample_x] != 0:
+                    break
+
+                base_roughness = float(self.control.terrain_roughness[sample_y, sample_x])
+                confidence = max(0.2, 1.0 - (length / max(1, self.radius)))
+                noise = rand.uniform(-0.03, 0.03)
+                samples.append((sample_x, sample_y, min(1.0, max(0.0, base_roughness + noise)), confidence))
+
+        self.control.record_terrain_scan(samples)
+
     
     def draw_vision(self) -> None:
         """Render the drone's vision cone by casting multiple sensor rays.
@@ -318,7 +427,7 @@ class Drone:
         Uses `cast_ray` to collect hit points; if enough points are found a
         filled polygon is rendered to visually represent the agent's FOV.
         """
-        num_rays = 100  # Number of rays for 360-degree vision
+        num_rays = 72  # Number of rays for 360-degree vision
         angle_increment = 2 * math.pi / num_rays  # Incremental angle between rays
         self.ray_points.clear()  # Clear previous ray points
 
@@ -336,12 +445,27 @@ class Drone:
                 end_y = self.pos[1] + self.radius * math.sin(angle)
                 self.ray_points.append((end_x, end_y))
 
+        self.scan_terrain(self.scan_rays)
+
         # Draw the field of view as a polygon if there are enough intersection points
+        if not self.show_vision:
+            return
+
         if len(self.ray_points) > 3:
             pygame.draw.polygon(self.game.window, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
         else:
             # Fallback: draw an outline circle indicating vision radius
             pygame.draw.circle(self.game.window, (*self.color, int(2 * self.alpha / 3)), (int(self.pos[0]), int(self.pos[1])), self.radius, 1)
+
+
+    def toggle_path(self) -> None:
+        """Toggle rendering visibility for the drone path overlay."""
+        self.show_path = not self.show_path
+
+
+    def toggle_vision(self) -> None:
+        """Toggle rendering visibility for the drone vision overlay."""
+        self.show_vision = not self.show_vision
       
     
     def draw_icon(self) -> None:

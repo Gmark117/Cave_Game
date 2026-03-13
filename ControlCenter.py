@@ -53,6 +53,8 @@ class ControlCenter:
         self._pre_render_statics()
         # Cache for dynamic text surfaces: {key: {'value': tuple, 'time': float, 'surf': Surface}}
         self._dynamic_cache = {}
+        self.drone_toggle_rects = {}
+        self.heatmap_toggle_rect = None
         # Debug flags removed in production
         # Handle mapping to avoid repeated string comparisons
         self._handle_map = {
@@ -187,14 +189,24 @@ class ControlCenter:
 # Drawing methods
 # =============================================================================
 
-    def draw_control_center(self) -> None:
+    def draw_control_center(self, drone_objects: List[Any], rover_objects: Optional[List[Any]] = None, show_terrain_heatmap: bool = True) -> None:
         """Render the entire control center onto `self.control_surf` and blit it."""
         # Clear control surface, draw content there, then blit once to window
         self.control_surf.fill((*Assets.Colors.BLACK.value, 255))
+        self.drone_toggle_rects.clear()
+        self.heatmap_toggle_rect = None
+
+        if rover_objects is not None:
+            for name, rover_info in self.rovers.items():
+                rover_id = rover_info['id']
+                if rover_id < len(rover_objects):
+                    rover = rover_objects[rover_id]
+                    rover_info['battery'] = rover.battery
+                    rover_info['status'] = rover.status
 
         self._draw_title()
-        self._draw_statistics()
-        self._draw_drone_section()
+        self._draw_statistics(show_terrain_heatmap)
+        self._draw_drone_section(drone_objects)
         self._draw_rover_section()
 
         self.game.window.blit(self.control_surf, self.origin)
@@ -223,24 +235,33 @@ class ControlCenter:
             self.control_surf.blit(surf, rect)
         
 
-    def _draw_statistics(self) -> None:
+    def _draw_statistics(self, show_terrain_heatmap: bool) -> None:
         """Render timer and overall statistics in the control panel."""
         # Draw time (update at most once per second)
-        met_texts = [('M.E.T.:           ', Assets.Colors.GREY.value, 255),
+        met_texts = [('M.E.T.: ', Assets.Colors.GREY.value, 255),
                      (self.format_timer(), Assets.Colors.WHITE.value, 255)]
         met_surf = self._get_cached_text_surface('met', met_texts, 25, Assets.Fonts.BIG.value, ttl=1.0)
         if met_surf:
             self._blit_cached_surface(met_surf, self.origin_x, 120, Assets.RectHandle.MIDLEFT.value)
 
         # Draw explored map percentage (only when value changes)
-        explored_texts = [('Explored:     ', Assets.Colors.GREY.value, 255),
+        explored_texts = [('Explored: ', Assets.Colors.GREY.value, 255),
                           (f'{self.explored_percent}%', self.percent_color(self.explored_percent), 255)]
         explored_surf = self._get_cached_text_surface(f'explored_{self.explored_percent}', explored_texts, 25, Assets.Fonts.BIG.value)
         if explored_surf:
             self._blit_cached_surface(explored_surf, self.origin_x, 150, Assets.RectHandle.MIDLEFT.value)
 
+        self._draw_heatmap_toggle(show_terrain_heatmap)
 
-    def _draw_drone_section(self) -> None:
+
+    def _draw_heatmap_toggle(self, enabled: bool) -> None:
+        """Draw the global terrain heatmap toggle button."""
+        rect = pygame.Rect(Assets.Display.LEGEND_WIDTH - 46, 138, 34, 24)
+        self._draw_toggle_button(rect, 'H', enabled, Assets.Colors.EUCALYPTUS.value)
+        self.heatmap_toggle_rect = rect.move(self.origin_x, self.origin_y)
+
+
+    def _draw_drone_section(self, drone_objects: List[Any]) -> None:
         """Render the drone section header and individual drone statuses."""
         # Draw subtitle
         surf = self._static_surfaces.get('drones')
@@ -252,7 +273,8 @@ class ControlCenter:
 
         for drone in self.drones:
             if self.drones[drone]['id'] < self.num_drones:
-                self._draw_status(drone)
+                drone_id = self.drones[drone]['id']
+                self._draw_status(drone, drone_obj=drone_objects[drone_id])
             else:
                 self._draw_status(drone, deployed=False)
 
@@ -274,7 +296,7 @@ class ControlCenter:
                 self._draw_status(rover, rover=True, deployed=False)
     
 
-    def _draw_status(self, label: str, rover: bool = False, deployed: bool = True) -> None:
+    def _draw_status(self, label: str, rover: bool = False, deployed: bool = True, drone_obj: Any = None) -> None:
         """Render a single status line for a drone or rover identified by `label`."""
         # Get data
         if not rover:
@@ -303,6 +325,9 @@ class ControlCenter:
         rect = name_surf.get_rect()
         rect.midleft = (8, y_center)
         self.control_surf.blit(name_surf, rect)
+
+        if deployed and not rover and drone_obj is not None:
+            self._draw_drone_toggles(number, y_center, drone_obj)
         
         if deployed:
             # Define Status color
@@ -330,6 +355,63 @@ class ControlCenter:
             rect = na_surf.get_rect()
             rect.midleft = (8, data_height + 60*number)
             self.control_surf.blit(na_surf, rect)
+
+
+    def _draw_drone_toggles(self, drone_id: int, y_center: int, drone_obj: Any) -> None:
+        """Draw clickable path/vision toggle buttons for one drone row."""
+        button_width = 34
+        button_height = 24
+        gap = 8
+        start_x = Assets.Display.LEGEND_WIDTH - ((button_width * 2) + gap + 12)
+        top = y_center - (button_height // 2)
+
+        path_rect = pygame.Rect(start_x, top, button_width, button_height)
+        vision_rect = pygame.Rect(start_x + button_width + gap, top, button_width, button_height)
+
+        self._draw_toggle_button(path_rect, 'P', drone_obj.show_path, drone_obj.color)
+        self._draw_toggle_button(vision_rect, 'V', drone_obj.show_vision, drone_obj.color)
+
+        self.drone_toggle_rects[(drone_id, 'path')] = path_rect.move(self.origin_x, self.origin_y)
+        self.drone_toggle_rects[(drone_id, 'vision')] = vision_rect.move(self.origin_x, self.origin_y)
+
+
+    def _draw_toggle_button(self, rect: 'pygame.Rect', label: str, enabled: bool, accent_color: Tuple[int, int, int]) -> None:
+        """Draw a single toggle button in the control panel."""
+        bg_color = accent_color if enabled else Assets.Colors.GREY.value
+        text_color = Assets.Colors.BLACK.value if enabled else Assets.Colors.WHITE.value
+
+        button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(button_surf, (*bg_color, 128), button_surf.get_rect(), border_radius=6)
+        pygame.draw.rect(button_surf, (*Assets.Colors.WHITE.value, 128), button_surf.get_rect(), width=1, border_radius=6)
+
+        font = self._get_font(Assets.Fonts.BIG.value, 18)
+        text_surf = font.render(label, True, text_color).convert_alpha()
+        text_surf.set_alpha(128)
+        text_rect = text_surf.get_rect(center=rect.center)
+        button_surf.blit(text_surf, text_surf.get_rect(center=button_surf.get_rect().center))
+        self.control_surf.blit(button_surf, rect.topleft)
+
+
+    def handle_click(self, mouse_pos: Tuple[int, int], drone_objects: List[Any]) -> Optional[str]:
+        """Handle click events and return an action token.
+
+        Returns:
+            'terrain_heatmap' when the heatmap toggle is clicked,
+            'drone_overlay' when a drone path/vision toggle is clicked,
+            None when no control was clicked.
+        """
+        if self.heatmap_toggle_rect is not None and self.heatmap_toggle_rect.collidepoint(mouse_pos):
+            return 'terrain_heatmap'
+
+        for (drone_id, overlay_type), rect in self.drone_toggle_rects.items():
+            if rect.collidepoint(mouse_pos):
+                drone = drone_objects[drone_id]
+                if overlay_type == 'path':
+                    drone.toggle_path()
+                else:
+                    drone.toggle_vision()
+                return 'drone_overlay'
+        return None
             
 
     def draw_text(self, texts: List[Tuple[str, Tuple[int, int, int], int]], size: int, x: int, y: int, font, handle) -> None:

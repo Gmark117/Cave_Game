@@ -98,11 +98,11 @@ class Colors(Enum):
     BLUE = (0, 0, 153)
 
 class DroneColors(Enum):
-    """Colors for different drones."""
-    RED = (255, 0, 0)    # Blinky
+    """Colors for drones."""
+    RED = (255, 0, 0)       # Blinky
     PINK = (255, 184, 255)  # Pinky
     L_BLUE = (0, 255, 255)  # Inky
-    ORANGE = (255, 184, 82)  # Clyde
+    ORANGE = (255, 184, 82) # Clyde
     PURPLE = (148, 0, 221)  # Sue
     BROWN = (160, 82, 45)   # Tim
     GREEN = (34, 139, 34)   # Funky

@@ -79,6 +79,8 @@ class MapGenerator:
             self.save_map()
             self._extract_cave_layer(self.COLOR_WHITE, 'CAVE_WALLS')
             self._extract_cave_layer(self.COLOR_BLACK, 'CAVE_FLOOR')
+
+        self.build_terrain_roughness()
     
 
     def dig_map(self, proc_num: int) -> None:
@@ -234,6 +236,36 @@ class MapGenerator:
 
         # Final small blur to avoid single-pixel artifacts
         self.bin_map = cv2.medianBlur(stalac, Assets.MapGen.BLUR_KERNEL_FINAL)
+
+
+    def build_terrain_roughness(self) -> None:
+        """Create a floor-only asperity map used by drones and rovers.
+
+        The generated map stays in `[0, 1]` where higher values represent
+        rougher terrain. Roughness is synthesized from smooth noise,
+        clustered bumps, and a wall-distance bias so chokepoints and cave
+        edges tend to be harsher for rovers to traverse.
+        """
+        floor_mask = (self.bin_map == 0).astype(np.uint8)
+
+        base_noise = self.rng.random((self.height, self.width), dtype=np.float32)
+        base_noise = cv2.GaussianBlur(base_noise, (0, 0), sigmaX=18, sigmaY=18)
+        base_noise = cv2.normalize(base_noise, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+        cluster_noise = self.rng.random((self.height, self.width), dtype=np.float32)
+        cluster_noise = cv2.GaussianBlur(cluster_noise, (0, 0), sigmaX=6, sigmaY=6)
+        cluster_noise = cv2.normalize(cluster_noise, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+        wall_bias = np.zeros((self.height, self.width), dtype=np.float32)
+        if np.any(floor_mask):
+            wall_distance = cv2.distanceTransform(floor_mask, cv2.DIST_L2, 5)
+            max_distance = float(wall_distance.max()) or 1.0
+            wall_bias = 1.0 - np.clip(wall_distance / max_distance, 0.0, 1.0)
+
+        roughness = (0.45 * base_noise) + (0.35 * wall_bias) + (0.20 * cluster_noise)
+        roughness = np.clip(roughness, 0.0, 1.0).astype(np.float32)
+        roughness *= floor_mask.astype(np.float32)
+        self.terrain_roughness = roughness
 
 
     def _extract_cave_layer(self, color_to_remove: Tuple[int, int, int], output_key: str) -> None:
