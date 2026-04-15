@@ -13,7 +13,7 @@ This is a distributed systems simulation game built with Pygame, demonstrating m
 - **`AStar`**: Pathfinding for reaching unexplored frontiers
 - **`Graph`**: Maintains exploration connectivity graphs
 - **`ControlCenter`**: Real-time mission status display
-- **`Assets`**: Centralized enum-based asset and constant management
+- **`asset_config/*`**: Domain-split enum/constants modules (gameplay, mapgen, media, rendering, helpers)
 
 ### Key Design Patterns
 
@@ -75,11 +75,11 @@ python main.py
 
 ### Asset Management
 ```python
-# Use enums for all assets and constants
-class Images(Enum):
-    CAVE_MAP = os.path.join(GAME_DIR, 'Assets', 'Map', 'map.png')
+# Use domain-split enums for assets and constants
+from asset_config.media import Images
 
-# Access via Assets.Images['CAVE_MAP'].value
+# Prefer direct enum access in app code
+Images.CAVE_MAP.value
 ```
 
 ### Surface-Based Rendering
@@ -109,7 +109,6 @@ def run(self) -> NoReturn:
 - `pygame`: Graphics and input handling
 - `numpy`: Matrix operations for map generation
 - `cv2` (opencv): Image processing for cave refinement
-- `art`: ASCII art (used in Test.py)
 
 ## Common Tasks
 
@@ -134,7 +133,7 @@ def run(self) -> NoReturn:
 - `MissionControl.py`: Simulation orchestration
 - `Drone.py`/`Rover.py`: Agent implementations
 - `MapGenerator.py`: Procedural cave generation
-- `Assets.py`: Centralized constants and enums
-- `AStar.py`/`Graph.py`: Pathfinding and graph management
+- `asset_config/`: Domain-split constants and enums
+- `AStarPathfinder.py`/`Graph.py`: Pathfinding and graph management
 - `Menu.py`: UI components
 - `ControlCenter.py`: Status display

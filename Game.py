@@ -1,7 +1,8 @@
 import os
 import sys
 import pygame
-import Assets
+from asset_config.gameplay import Display
+from asset_config.media import Images
 from typing import NoReturn
 from MapGenerator import MapGenerator
 from MissionControl import MissionControl
@@ -122,15 +123,16 @@ class Game:
             sys.exit(1)
         pygame.display.set_caption('Cave Game')
         try:
-            pygame.display.set_icon(pygame.image.load(Assets.Images.GAME_ICON.value))
+            pygame.display.set_icon(pygame.image.load(Images.GAME_ICON.value))
         except pygame.error as e:
             print(f"Failed to load game icon: {e}")
         return self.display
 
     def to_maximised(self) -> pygame.Surface:
         """Maximize the game window to full screen."""
-        return self._setup_window(Assets.Display.FULL_W, Assets.Display.FULL_H)
+        return self._setup_window(Display.FULL_W, Display.FULL_H)
 
     def to_windowed(self) -> pygame.Surface:
         """Return to the original window dimensions."""
-        return self._setup_window(Assets.Display.W, Assets.Display.H)
+        return self._setup_window(Display.W, Display.H)
+

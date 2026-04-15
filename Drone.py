@@ -8,11 +8,14 @@ runtime imports permissive to avoid circular dependencies.
 import math
 import time
 import random as rand
+import threading
 from typing import List, Tuple, Optional
 
+import numpy as np
 import pygame
 
-from Assets import next_cell_coords, check_pixel_color, Colors
+from asset_config.helpers import next_cell_coords, check_pixel_color
+from asset_config.rendering import Colors
 from Graph import Graph
 
 
@@ -26,8 +29,7 @@ class Drone:
     """
 
     def __init__(self, game, control, id: int, start_pos: Tuple[int, int],
-                 color: Tuple[int, int, int], icon: 'pygame.Surface', cave: list,
-                 strategy: str = "random") -> None:
+                 color: Tuple[int, int, int], icon: 'pygame.Surface', cave: list) -> None:
         """Initialize runtime state for a drone.
 
         Args:
@@ -38,13 +40,11 @@ class Drone:
             color: RGB color tuple used for drawing the drone overlays.
             icon: Pygame Surface for drawing the drone icon.
             cave: Binary map matrix used for collision checks.
-            strategy: Strategy name (currently unused; reserved for extension).
         """
         self.game = game
         self.settings = game.sim_settings
         self.cave = cave
         self.control = control
-        self.strategy = strategy
 
         # Identity and movement
         self.id = id
@@ -78,6 +78,14 @@ class Drone:
         self.scan_rays = 96
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Tuple[int, int], float] = {}
+
+        # Local terrain knowledge (distributed mapping)
+        self.known_roughness = np.full(np.asarray(self.cave).shape, -1.0, dtype=np.float32)
+        self.terrain_confidence = np.zeros(np.asarray(self.cave).shape, dtype=np.float32)
+        self.terrain_lock = threading.Lock()
+        self.exploration_lock = threading.Lock()
+        self.last_share_time = 0.0
+        self.share_interval = 0.5
 
         # Exploration bookkeeping
         self.border = []
@@ -295,8 +303,24 @@ class Drone:
     
     
     def update_borders(self) -> None:
-        """Remove border pixels that are now explored (not matching `self.color`)."""
-        self.border = [pixel for pixel in self.border if check_pixel_color(self.floor_surf, pixel, self.color, is_not=True)]
+        """Remove border pixels that are now explored.
+
+        A border cell is considered explored if either:
+        - it is already painted on `floor_surf`, or
+        - local/shared terrain confidence marks it as known.
+        """
+        def is_explored(pixel: Tuple[int, int]) -> bool:
+            x, y = int(pixel[0]), int(pixel[1])
+            if y < 0 or y >= self.terrain_confidence.shape[0] or x < 0 or x >= self.terrain_confidence.shape[1]:
+                return True
+            if self.cave[y][x] != 0:
+                return True
+            explored_by_surface = self.floor_surf.get_at((x, y))[3] > 0
+            explored_by_terrain = float(self.terrain_confidence[y, x]) > 0.0
+            return explored_by_surface or explored_by_terrain
+
+        with self.exploration_lock:
+            self.border = [pixel for pixel in self.border if not is_explored(pixel)]
         valid = set(self.border)
         self.border_retry_until = {k: v for k, v in self.border_retry_until.items() if k in valid}
 
@@ -323,15 +347,6 @@ class Drone:
         # Discard targets within the current vision circle by returning a large value
         return float(self.game.width) if dist <= self.radius else dist
 
-
-    def update_explored_map(self) -> None:
-        """Placeholder for generating an explored map snapshot (optional).
-
-        Currently a no-op; kept for compatibility with MissionControl calls.
-        """
-        return None
-
-
 # =============================================================================
 # Drone drawing methods (vision and path)
 # =============================================================================
@@ -344,13 +359,14 @@ class Drone:
         - Draw a small starting-point marker and blit both overlays to the
           main window.
         """
-        # Filled polygon of the last vision rays (gives a filled explored area)
-        if len(self.ray_points) > 2:
-            pygame.draw.polygon(self.floor_surf, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
+        with self.exploration_lock:
+            # Filled polygon of the last vision rays (gives a filled explored area)
+            if len(self.ray_points) > 2:
+                pygame.draw.polygon(self.floor_surf, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
 
-        # Draw the A* path as a polyline
-        for i in range(1, len(self.graph.pos)):
-            pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
+            # Draw the A* path as a polyline
+            for i in range(1, len(self.graph.pos)):
+                pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
 
         # Draw the starting point marker
         self.start_surf = pygame.Surface((12, 12), pygame.SRCALPHA)
@@ -358,7 +374,8 @@ class Drone:
 
         # Blit the explored path surface and the starting point onto the game window
         if self.show_path:
-            self.game.window.blit(self.floor_surf, (0, 0))
+            with self.exploration_lock:
+                self.game.window.blit(self.floor_surf, (0, 0))
         self.game.window.blit(self.start_surf, (self.start_pos[0] - 6, self.start_pos[1] - 6))
     
     
@@ -387,8 +404,11 @@ class Drone:
 
 
     def scan_terrain(self, num_rays: int = 24) -> None:
-        """Sample terrain roughness along visible rays and share it with mission control."""
-        if not hasattr(self.control, 'record_terrain_scan') or not hasattr(self.control, 'terrain_roughness'):
+        """Sample terrain roughness along visible rays and update local terrain maps."""
+        if not hasattr(self.control, 'terrain_roughness'):
+            return
+        terrain = self.control.terrain_roughness
+        if terrain.shape != np.asarray(self.cave).shape:
             return
 
         now = time.perf_counter()
@@ -398,7 +418,7 @@ class Drone:
 
         samples = []
         angle_increment = 2 * math.pi / num_rays
-        sample_step = max(2, self.radius // 12) # Sample every few pixels along the ray
+        sample_step = max(2, self.radius // 12)
         height = len(self.cave)
         width = len(self.cave[0]) if height else 0
 
@@ -413,12 +433,117 @@ class Drone:
                 if self.cave[sample_y][sample_x] != 0:
                     break
 
-                base_roughness = float(self.control.terrain_roughness[sample_y, sample_x])
+                base_roughness = float(terrain[sample_y, sample_x])
                 confidence = max(0.2, 1.0 - (length / max(1, self.radius)))
                 noise = rand.uniform(-0.03, 0.03)
                 samples.append((sample_x, sample_y, min(1.0, max(0.0, base_roughness + noise)), confidence))
 
-        self.control.record_terrain_scan(samples)
+        # Update local terrain knowledge
+        self._record_local_terrain_scan(samples)
+
+
+    def _record_local_terrain_scan(self, samples: List[Tuple[int, int, float, float]]) -> None:
+        """Fuse terrain observations into this drone's local knowledge maps."""
+        if not samples:
+            return
+        
+        with self.terrain_lock:
+            for x, y, roughness, confidence in samples:
+                xi = int(x)
+                yi = int(y)
+                if yi < 0 or yi >= self.known_roughness.shape[0] or xi < 0 or xi >= self.known_roughness.shape[1]:
+                    continue
+                if self.cave[yi][xi] != 0:
+                    continue
+                
+                obs_conf = float(np.clip(confidence, 0.05, 1.0))
+                obs_roughness = float(np.clip(roughness, 0.0, 1.0))
+                prev_conf = float(self.terrain_confidence[yi, xi])
+                prev_value = float(self.known_roughness[yi, xi]) if prev_conf > 0 else obs_roughness
+                total_conf = prev_conf + obs_conf
+                blended = ((prev_value * prev_conf) + (obs_roughness * obs_conf)) / total_conf
+                
+                self.known_roughness[yi, xi] = blended
+                self.terrain_confidence[yi, xi] = min(1.0, total_conf)
+    
+    def merge_terrain_data(self, other_roughness: np.ndarray, other_confidence: np.ndarray) -> None:
+        """Merge terrain data from another drone into this drone's maps.
+        
+        Uses weighted averaging: cells with higher confidence in either map
+        are weighted more heavily.
+        """
+        if other_roughness is None or other_confidence is None:
+            return
+        
+        with self.terrain_lock:
+            h = min(self.known_roughness.shape[0], other_roughness.shape[0])
+            w = min(self.known_roughness.shape[1], other_roughness.shape[1])
+            if h <= 0 or w <= 0:
+                return
+
+            target_rough = self.known_roughness[:h, :w]
+            target_conf = self.terrain_confidence[:h, :w]
+            source_rough = np.clip(other_roughness[:h, :w], 0.0, 1.0)
+            source_conf = np.clip(other_confidence[:h, :w], 0.0, 1.0)
+            floor = (np.asarray(self.cave)[:h, :w] == 0)
+
+            valid = floor & (source_conf > 0.0)
+            if not np.any(valid):
+                return
+
+            self_conf_vals = target_conf[valid]
+            source_conf_vals = source_conf[valid]
+            source_rough_vals = source_rough[valid]
+            self_rough_vals = target_rough[valid]
+
+            base_self = np.where(self_conf_vals > 0.0, self_rough_vals, source_rough_vals)
+            total = self_conf_vals + source_conf_vals
+            blended = ((base_self * self_conf_vals) + (source_rough_vals * source_conf_vals)) / np.maximum(total, 1e-6)
+
+            target_rough[valid] = blended
+            target_conf[valid] = np.minimum(1.0, total)
+
+    def merge_exploration_data(
+        self,
+        other_explored_alpha: np.ndarray,
+        other_border: List[Tuple[int, int]]
+    ) -> None:
+        """Merge highlighted explored area and border metadata from another drone.
+
+        This allows frontiers (`border`) to converge when drones exchange data.
+        """
+        if other_explored_alpha is None and other_border is None:
+            return
+
+        with self.exploration_lock:
+            if other_explored_alpha is not None:
+                # Merge only explored alpha, but repaint with this drone color to avoid color bleed.
+                rgb_view = pygame.surfarray.pixels3d(self.floor_surf)
+                alpha_view = pygame.surfarray.pixels_alpha(self.floor_surf)
+
+                h = min(alpha_view.shape[1], other_explored_alpha.shape[1])
+                w = min(alpha_view.shape[0], other_explored_alpha.shape[0])
+                if h > 0 and w > 0:
+                    incoming_alpha = other_explored_alpha[:w, :h]
+                    mask = incoming_alpha > 0
+                    if np.any(mask):
+                        alpha_view[:w, :h][mask] = np.maximum(alpha_view[:w, :h][mask], incoming_alpha[mask])
+                        rgb_view[:w, :h, 0][mask] = self.color[0]
+                        rgb_view[:w, :h, 1][mask] = self.color[1]
+                        rgb_view[:w, :h, 2][mask] = self.color[2]
+
+                del rgb_view
+                del alpha_view
+
+            if other_border:
+                merged = set(self.border)
+                for b in other_border:
+                    p = (int(b[0]), int(b[1]))
+                    if 0 <= p[1] < len(self.cave) and 0 <= p[0] < len(self.cave[0]) and self.cave[p[1]][p[0]] == 0:
+                        merged.add(p)
+                self.border = list(merged)
+
+        self.update_borders()
 
     
     def draw_vision(self) -> None:

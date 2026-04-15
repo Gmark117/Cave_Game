@@ -13,7 +13,8 @@ from typing import Tuple, List, Optional
 
 import pygame
 
-from Assets import next_cell_coords, check_pixel_color, Colors
+from asset_config.helpers import next_cell_coords, check_pixel_color
+from asset_config.rendering import Colors
 from Graph import Graph
 
 
@@ -26,12 +27,11 @@ class Rover:
     """
 
     def __init__(self, game: object, control: object, id: int, start_pos: Tuple[int, int],
-                 color: Tuple[int, int, int], icon: pygame.Surface, cave: list, strategy: str = "random") -> None:
+                 color: Tuple[int, int, int], icon: pygame.Surface, cave: list) -> None:
         self.game     = game
         self.settings = game.sim_settings
         self.cave     = cave
         self.control  = control
-        self.strategy = strategy
          
         self.id       = id # Unique identifier of the drone
         self.map_size = self.settings.map_dim # Map dimension

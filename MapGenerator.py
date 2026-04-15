@@ -12,12 +12,17 @@ Key behaviors:
 """
 
 import os
+import logging
+from pathlib import Path
 from typing import Tuple
 import numpy as np
 import cv2
 import pygame
-import Assets
-from Assets import next_cell_coords
+from asset_config.gameplay import Display
+from asset_config.helpers import next_cell_coords
+from asset_config.mapgen import MapGen, WormInputs
+from asset_config.media import Images
+from asset_config.rendering import Colors
 from MapGenHelpers import (
     make_derangement,
     with_surfarrays,
@@ -33,6 +38,19 @@ from MapGenHelpers import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+def _image_path_from_key(key: str) -> Path:
+    """Resolve an Images enum member by key and return its path."""
+    normalized = key.upper()
+    try:
+        return Images[normalized].value
+    except KeyError as exc:
+        valid = ", ".join(item.name for item in Images)
+        raise KeyError(f"Unknown image key '{key}'. Valid keys: {valid}") from exc
+
+
 class MapGenerator:
     """Orchestrates multi-process worm erosion and post-processing.
 
@@ -42,31 +60,31 @@ class MapGenerator:
     - `worm_x`, `worm_y`: lists of worm start coordinates
     """
 
-    # Configuration constants (moved to Assets.MapGen where appropriate)
-    NUM_PROCESSES = getattr(Assets.MapGen, 'DEFAULT_NUM_PROCESSES', 8)
+    # Configuration constants imported from asset_config.mapgen.MapGen
+    NUM_PROCESSES = getattr(MapGen, 'DEFAULT_NUM_PROCESSES', 8)
     # Color aliases
-    COLOR_WHITE = Assets.Colors.WHITE.value
-    COLOR_BLACK = Assets.Colors.BLACK.value
+    COLOR_WHITE = Colors.WHITE.value
+    COLOR_BLACK = Colors.BLACK.value
 
     
     def __init__(self, game, settings) -> None:
         self.game     = game
         self.settings = settings
-        self.width    = Assets.Display.FULL_W - Assets.Display.LEGEND_WIDTH
-        self.height   = Assets.Display.FULL_H
+        self.width    = Display.FULL_W - Display.LEGEND_WIDTH
+        self.height   = Display.FULL_H
         
         # Use a NumPy Generator for reproducible RNG
         self.rng = np.random.default_rng(self.settings.seed)
 
         # Initialise worm management settings
-        self.worm_inputs  = Assets.WormInputs[self.settings.map_dim].value # Inputs for worm behavior
+        self.worm_inputs  = WormInputs[self.settings.map_dim].value # Inputs for worm behavior
         self.targets      = list(map(int, np.linspace(0, self.NUM_PROCESSES - 1, self.NUM_PROCESSES))) # Targets for each worm
         self.proc_counter = 0 # Counter for completed processes
         self.dir          = 0 # Initialize direction (updated during worm movement)
         self.set_starts()  # Set the starting positions of the worms
 
         if self.settings.prefab: # Load existing map
-            self.bin_map = np.loadtxt(Assets.Images.CAVE_MATRIX.value)
+            self.bin_map = np.loadtxt(Images.CAVE_MATRIX.value)
         else: # Generate new map
             # Initialize binary map with all walls (1s)
             self.bin_map = np.ones([self.height,self.width])
@@ -95,6 +113,7 @@ class MapGenerator:
         num_cpus = os.cpu_count() or 1
         worker_count = min(proc_num, num_cpus)
 
+        shm = None
         try:
             init_map = self.bin_map.astype(np.uint8)
             shm, shm_arr = safe_shm_create(init_map)
@@ -102,7 +121,8 @@ class MapGenerator:
             # Show a simple, non-process-dependent loading message
             try:
                 self.game.menu.blit_loading(['Digging...'])
-            except Exception:
+            except (AttributeError, pygame.error) as exc:
+                logger.debug("Loading overlay unavailable during dig phase: %s", exc)
                 pass
 
             # Derangement targets
@@ -127,7 +147,7 @@ class MapGenerator:
         finally:
             try:
                 safe_shm_close(shm)
-            except Exception:
+            except (AttributeError, OSError):
                 pass
 
 
@@ -143,9 +163,9 @@ class MapGenerator:
                                      3*self.width/4,    # Bottom Right
                                      self.width/4,      # Bottom Left
                                      self.width/2,      # Center
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.width - Assets.MapGen.BORDER_THICKNESS + 1)),
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.width - Assets.MapGen.BORDER_THICKNESS + 1)),
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.width - Assets.MapGen.BORDER_THICKNESS + 1))]))
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.width - MapGen.BORDER_THICKNESS + 1)),
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.width - MapGen.BORDER_THICKNESS + 1)),
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.width - MapGen.BORDER_THICKNESS + 1))]))
         
         self.worm_y = list(map(int, [self.height/4,     # Top Left
                                      self.height/4,     # Top Right
@@ -153,9 +173,9 @@ class MapGenerator:
                                      3*self.height/4,   # Bottom Left
                                      self.height/2,     # Center
                                      # Random
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.height - Assets.MapGen.BORDER_THICKNESS + 1)),
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.height - Assets.MapGen.BORDER_THICKNESS + 1)),
-                                     int(self.rng.integers(Assets.MapGen.BORDER_THICKNESS, self.height - Assets.MapGen.BORDER_THICKNESS + 1))]))
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.height - MapGen.BORDER_THICKNESS + 1)),
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.height - MapGen.BORDER_THICKNESS + 1)),
+                                     int(self.rng.integers(MapGen.BORDER_THICKNESS, self.height - MapGen.BORDER_THICKNESS + 1))]))
 
 
     def set_ends(self, step: int, id: int) -> Tuple[int, int, int, int, int]:
@@ -195,13 +215,13 @@ class MapGenerator:
             y2 = min(y + stren, self.height-1)
 
             # Use OpenCV brush helper to apply the connect-room brush
-            strong = int(Assets.MapGen.BLUR_KERNEL_MULTIPLIER_STRENGTH * stren)
+            strong = int(MapGen.BLUR_KERNEL_MULTIPLIER_STRENGTH * stren)
             mode_choice = int(self.rng.integers(0, 5))
             sub = self.bin_map[y1:y2+1, x1:x2+1]
             apply_cv_brush(sub, x - x1, y - y1, mode_choice, strong, self.rng)
             
             # Control the borders after eating
-            self.dir = border_control_helper(self.rng, x1, x2, y1, y2, stren, self.dir, False, self.width, self.height, Assets.MapGen.BORDER_THICKNESS)
+            self.dir = border_control_helper(self.rng, x1, x2, y1, y2, stren, self.dir, False, self.width, self.height, MapGen.BORDER_THICKNESS)
             
             # Update coordinates for the next cell based on direction
             x, y = next_cell_coords(x, y, step, self.dir)
@@ -221,7 +241,7 @@ class MapGenerator:
         """
         self.game.menu.blit_loading(['Breeding bats...'])
         # Smooth the raw binary map and remove tiny isolated caves
-        kernel_dim = int(max(1, (self.worm_inputs[1] - Assets.MapGen.MEDIAN_FILTER_REDUCTION) | 1))
+        kernel_dim = int(max(1, (self.worm_inputs[1] - MapGen.MEDIAN_FILTER_REDUCTION) | 1))
         raw = self.bin_map.astype('uint8')
         smoothed = cv2.medianBlur(raw, kernel_dim)
         cleaned = remove_hermit_caves(smoothed)
@@ -231,11 +251,12 @@ class MapGenerator:
         stalac = cv2.bitwise_or(raw, cleaned)
         try:
             stalac = add_wall_transition_noise(stalac, self.width, self.height, self.settings.seed, self.worm_inputs)
-        except Exception:
+        except (cv2.error, ValueError, OverflowError) as exc:
+            logger.warning("Wall-transition noise pass skipped due to processing error: %s", exc)
             pass
 
         # Final small blur to avoid single-pixel artifacts
-        self.bin_map = cv2.medianBlur(stalac, Assets.MapGen.BLUR_KERNEL_FINAL)
+        self.bin_map = cv2.medianBlur(stalac, MapGen.BLUR_KERNEL_FINAL)
 
 
     def build_terrain_roughness(self) -> None:
@@ -272,10 +293,10 @@ class MapGenerator:
         """Make `color_to_remove` transparent in the saved cave image.
 
         Loads the cave image, clears the alpha channel for matching pixels,
-        and writes the result to `Assets.Images[output_key]`.
+        and writes the result to `Images[output_key]`.
         """
         # Load the cave map image
-        cave_map = pygame.image.load(Assets.Images.CAVE_MAP.value).convert_alpha()
+        cave_map = pygame.image.load(Images.CAVE_MAP.value).convert_alpha()
         
         # Use context manager to safely access and release surfarray views
         with with_surfarrays(cave_map) as (rgb_arr, alpha_arr):
@@ -283,16 +304,16 @@ class MapGenerator:
             alpha_arr[mask] = 0
         
         # Save the modified map
-        pygame.image.save(cave_map, Assets.Images[output_key].value)
+        pygame.image.save(cave_map, _image_path_from_key(output_key))
 
 
     def save_map(self) -> None:
         """Persist the generated map image and matrix to disk.
 
         Writes `map.png` (visual) and `map_matrix.txt` (numeric matrix) into
-        `Assets.GAME_DIR/Assets/Map`.
+        `<repo>/Assets/Map`.
         """
-        map_dir = os.path.join(Assets.GAME_DIR, 'Assets', 'Map')
+        map_dir = os.path.join(Path(__file__).parent, 'Assets', 'Map')
         os.makedirs(map_dir, exist_ok=True)
         byte_map = np.where(self.bin_map == 1, 0, 255).astype(np.uint8)
         cv2.imwrite(os.path.join(map_dir, 'map.png'), byte_map)

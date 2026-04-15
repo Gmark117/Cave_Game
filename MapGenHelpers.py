@@ -7,6 +7,7 @@ This module contains performance-focused helpers used by the generator:
 - Post-processing helpers for cleaning and adding noise to the map
 """
 import math
+import logging
 from contextlib import contextmanager
 import time
 from multiprocessing import Process
@@ -14,8 +15,11 @@ from multiprocessing import shared_memory as mp_shm
 import numpy as np
 import cv2
 import pygame
-import Assets
-from Assets import next_cell_coords
+from asset_config.helpers import next_cell_coords
+from asset_config.mapgen import MapGen
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -66,7 +70,7 @@ def apply_cv_brush(sub: np.ndarray, cx: float, cy: float, mode_choice: int, stre
             cv2.fillPoly(mask, pts, 1)
         else:
             local_rng = rng if rng is not None else np.random.default_rng()
-            factor = float(local_rng.uniform(Assets.MapGen.CHAOTIC_FACTOR_LOW, Assets.MapGen.CHAOTIC_FACTOR_HIGH))
+            factor = float(local_rng.uniform(MapGen.CHAOTIC_FACTOR_LOW, MapGen.CHAOTIC_FACTOR_HIGH))
             rr = max(1, int(round(factor * stren)))
             x1 = max(0, icx - rr)
             x2 = min(w - 1, icx + rr)
@@ -83,7 +87,7 @@ def apply_cv_brush(sub: np.ndarray, cx: float, cy: float, mode_choice: int, stre
         XX, YY = np.meshgrid(xs, ys, indexing='xy')
         if mode_choice == 4:
             local_rng = rng if rng is not None else np.random.default_rng()
-            factor = float(local_rng.uniform(Assets.MapGen.CHAOTIC_FACTOR_LOW, Assets.MapGen.CHAOTIC_FACTOR_HIGH))
+            factor = float(local_rng.uniform(MapGen.CHAOTIC_FACTOR_LOW, MapGen.CHAOTIC_FACTOR_HIGH))
             mask = ((XX - cx) ** 2 + (YY - cy) ** 2) <= (factor * stren) ** 2
         else:
             mask = ((XX - cx) ** 2 + (YY - cy) ** 2) <= (0.5 * stren) ** 2
@@ -222,13 +226,13 @@ def safe_shm_close(shm) -> None:
         return
     try:
         shm.close()
-    except Exception:
+    except (BufferError, OSError):
         pass
     try:
         shm.unlink()
     except FileNotFoundError:
         pass
-    except Exception:
+    except (BufferError, OSError):
         pass
 
 
@@ -246,49 +250,53 @@ def worm(shm_name: str, height: int, width: int, start_x: int, start_y: int,
         shm = mp_shm.SharedMemory(name=shm_name)
     except FileNotFoundError:
         return
-    bin_map = np.ndarray((height, width), dtype=np.uint8, buffer=shm.buf)
-    rng = np.random.default_rng(seed)
-
-    # Local direction helpers bound to this worker's RNG and context
-    def border_control_local(x1: int, x2: int, y1: int, y2: int, s: int, current_dir: int, new_dir: bool = True) -> int:
-        return border_control_helper(rng, x1, x2, y1, y2, s, current_dir, new_dir, width, height, Assets.MapGen.BORDER_THICKNESS)
-    def homing_local(x: int, y: int, target_idx: int) -> int:
-        return homing_helper(rng, x, y, worm_x_list[target_idx], worm_y_list[target_idx])
-    
-    dir_local = 0
-    x = start_x
-    y = start_y
-    while life > 0:
-        x1 = max(x - int(0.5 * stren), 0)
-        y1 = max(y - int(0.5 * stren), 0)
-        x2 = min(x + int(0.5 * stren), width-1)
-        y2 = min(y + int(0.5 * stren), height-1)
-        mode_choice = int(rng.integers(0, 5))
-        sub = bin_map[y1:y2+1, x1:x2+1]
-        apply_cv_brush(sub, x - x1, y - y1, mode_choice, stren, rng)
-        dir_local = border_control_local(x1, x2, y1, y2, stren, dir_local)
-        x, y = next_cell_coords(x, y, step, dir_local)
-        life -= 1
-    target = targets_list[wid]
-    life2 = 100
-    while ((x < (worm_x_list[target] - 2*step) or x > (worm_x_list[target] + 2*step) or
-            y < (worm_y_list[target] - 2*step) or y > (worm_y_list[target] + 2*step)) and life2 > 0):
-        dir_local = homing_local(x, y, target)
-        x1 = max(x - stren, 0)
-        y1 = max(y - stren, 0)
-        x2 = min(x + stren, width-1)
-        y2 = min(y + stren, height-1)
-        strong = int(Assets.MapGen.BLUR_KERNEL_MULTIPLIER_STRENGTH * stren)
-        mode_choice = int(rng.integers(0, 5))
-        sub = bin_map[y1:y2+1, x1:x2+1]
-        apply_cv_brush(sub, x - x1, y - y1, mode_choice, strong, rng)
-        dir_local = border_control_local(x1, x2, y1, y2, stren, dir_local, new_dir=False)
-        x, y = next_cell_coords(x, y, step, dir_local)
-        life2 -= 1
     try:
-        shm.close()
-    except Exception:
-        pass
+        bin_map = np.ndarray((height, width), dtype=np.uint8, buffer=shm.buf)
+        rng = np.random.default_rng(seed)
+
+        # Local direction helpers bound to this worker's RNG and context
+        def border_control_local(x1: int, x2: int, y1: int, y2: int, s: int, current_dir: int, new_dir: bool = True) -> int:
+            return border_control_helper(rng, x1, x2, y1, y2, s, current_dir, new_dir, width, height, MapGen.BORDER_THICKNESS)
+
+        def homing_local(x: int, y: int, target_idx: int) -> int:
+            return homing_helper(rng, x, y, worm_x_list[target_idx], worm_y_list[target_idx])
+
+        dir_local = 0
+        x = start_x
+        y = start_y
+        while life > 0:
+            x1 = max(x - int(0.5 * stren), 0)
+            y1 = max(y - int(0.5 * stren), 0)
+            x2 = min(x + int(0.5 * stren), width-1)
+            y2 = min(y + int(0.5 * stren), height-1)
+            mode_choice = int(rng.integers(0, 5))
+            sub = bin_map[y1:y2+1, x1:x2+1]
+            apply_cv_brush(sub, x - x1, y - y1, mode_choice, stren, rng)
+            dir_local = border_control_local(x1, x2, y1, y2, stren, dir_local)
+            x, y = next_cell_coords(x, y, step, dir_local)
+            life -= 1
+
+        target = targets_list[wid]
+        life2 = 100
+        while ((x < (worm_x_list[target] - 2*step) or x > (worm_x_list[target] + 2*step) or
+                y < (worm_y_list[target] - 2*step) or y > (worm_y_list[target] + 2*step)) and life2 > 0):
+            dir_local = homing_local(x, y, target)
+            x1 = max(x - stren, 0)
+            y1 = max(y - stren, 0)
+            x2 = min(x + stren, width-1)
+            y2 = min(y + stren, height-1)
+            strong = int(MapGen.BLUR_KERNEL_MULTIPLIER_STRENGTH * stren)
+            mode_choice = int(rng.integers(0, 5))
+            sub = bin_map[y1:y2+1, x1:x2+1]
+            apply_cv_brush(sub, x - x1, y - y1, mode_choice, strong, rng)
+            dir_local = border_control_local(x1, x2, y1, y2, stren, dir_local, new_dir=False)
+            x, y = next_cell_coords(x, y, step, dir_local)
+            life2 -= 1
+    finally:
+        try:
+            shm.close()
+        except (BufferError, OSError):
+            pass
 
 
 def start_worms(shm_name: str, worker_count: int, worm_x: list, worm_y: list, worm_inputs: tuple,
@@ -358,7 +366,8 @@ def monitor_worms(proc_list: list, update_callback, poll_interval: float = 0.05)
         while not all(finished):
             try:
                 pygame.event.pump()
-            except Exception:
+            except pygame.error as exc:
+                logger.debug("Event pump failed while monitoring worms: %s", exc)
                 pass
             for idx, p in enumerate(proc_list):
                 if finished[idx]:
@@ -366,7 +375,8 @@ def monitor_worms(proc_list: list, update_callback, poll_interval: float = 0.05)
                 if not p.is_alive():
                     try:
                         p.join(timeout=0)
-                    except Exception:
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        logger.debug("Immediate join failed for worker %s: %s", idx, exc)
                         pass
                     finished[idx] = True
                     exitcode = p.exitcode
@@ -375,25 +385,29 @@ def monitor_worms(proc_list: list, update_callback, poll_interval: float = 0.05)
                         print(f"MapGenerator: worker {idx} exited with code {exitcode}")
                     try:
                         update_callback()
-                    except Exception:
+                    except (RuntimeError, ValueError) as exc:
+                        logger.debug("Progress callback failed for worker %s: %s", idx, exc)
                         pass
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         print('MapGenerator: generation interrupted by user')
         any_crashed = True
-    except Exception as e:
-        print(f'MapGenerator: watchdog failed: {e}')
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.exception("Map generation watchdog failed")
+        print(f'MapGenerator: watchdog failed: {exc}')
         any_crashed = True
     finally:
         for p in proc_list:
             if p.is_alive():
                 try:
                     p.terminate()
-                except Exception:
+                except (OSError, RuntimeError, ValueError) as exc:
+                    logger.debug("Failed to terminate worker: %s", exc)
                     pass
             try:
                 p.join(timeout=1)
-            except Exception:
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.debug("Final join failed for worker: %s", exc)
                 pass
     return any_crashed
 
@@ -451,4 +465,5 @@ def make_derangement(n: int, rng: 'np.random.Generator') -> list:
         perm = rng.permutation(n).tolist()
         if all(i != perm[i] for i in range(n)):
             return list(map(int, perm))
+
 

@@ -6,11 +6,19 @@ rendering and input handling).
 
 import os
 import configparser
+import logging
 from enum import Enum
 from typing import List, Optional, Callable, Any, Tuple
 import pygame
 import pygame.mixer as mix
-import Assets
+from pathlib import Path
+from asset_config.gameplay import Display, GameOptions
+from asset_config.media import Audio, Images
+from asset_config.rendering import Colors, Fonts
+
+
+logger = logging.getLogger(__name__)
+GAME_DIR = Path(__file__).parent
 
 
 # =============================================================================
@@ -77,12 +85,12 @@ class MenuItem:
         """Render the menu item on the screen."""
         x, y = self.position
         # Titles are green, selected items red, others white
-        color = Assets.Colors.EUCALYPTUS.value if self.item_type == MenuItemType.TITLE else (Assets.Colors.RED.value if self.is_selected else Assets.Colors.WHITE.value)
+        color = Colors.EUCALYPTUS.value if self.item_type == MenuItemType.TITLE else (Colors.RED.value if self.is_selected else Colors.WHITE.value)
         # Offset for displaying values to the right of labels
         value_offset = 350
 
         # Draw label
-        self._draw_text(self.label, x, y, self.size, Assets.Fonts.BIG.value if self.font_big else Assets.Fonts.SMALL.value, color, self.alignment)
+        self._draw_text(self.label, x, y, self.size, Fonts.BIG.value if self.font_big else Fonts.SMALL.value, color, self.alignment)
 
         # Draw value based on type
         if self.item_type == MenuItemType.SELECTOR and self.options:
@@ -91,11 +99,11 @@ class MenuItem:
             # Blinking text effect on empty input
             if not self.text_input:
                 display_text = "Enter value" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
-                color = Assets.Colors.RED.value
+                color = Colors.RED.value
             else:
                 display_text = self.text_input
-                color = Assets.Colors.GREENDARK.value
-            self._draw_text(display_text, x + value_offset, y, self.size, Assets.Fonts.SMALL.value, color, self.alignment)
+                color = Colors.GREENDARK.value
+            self._draw_text(display_text, x + value_offset, y, self.size, Fonts.SMALL.value, color, self.alignment)
         elif self.item_type == MenuItemType.SLIDER:
             self._draw_slider(x, y, value_offset)
         elif self.item_type == MenuItemType.TITLE or self.item_type == MenuItemType.BUTTON:
@@ -146,9 +154,9 @@ class MenuItem:
         arrow_size = max(10, int(self.size * 0.4))
 
         # Render and position the value text so we can measure its bounds
-        font_path = str(Assets.Fonts.SMALL.value)
+        font_path = str(Fonts.SMALL.value)
         font_obj = pygame.font.Font(font_path, self.size)
-        text_surf = font_obj.render(value_text, True, Assets.Colors.GREENDARK.value)
+        text_surf = font_obj.render(value_text, True, Colors.GREENDARK.value)
         text_rect = text_surf.get_rect()
         if self.alignment == 'midright':
             text_rect.midright = (value_x, y)
@@ -169,9 +177,9 @@ class MenuItem:
         # Only draw arrows when there are options in that direction
         if len(self.options) > 1:
             if self.value > 0:
-                self._draw_arrow(left_x, left_y, arrow_size, 'left', Assets.Colors.GREY.value)
+                self._draw_arrow(left_x, left_y, arrow_size, 'left', Colors.GREY.value)
             if self.value < len(self.options) - 1:
-                self._draw_arrow(right_x, right_y, arrow_size, 'right', Assets.Colors.GREY.value)
+                self._draw_arrow(right_x, right_y, arrow_size, 'right', Colors.GREY.value)
 
 
     def _draw_slider(self, x: int, y: int, value_offset: int) -> None:
@@ -185,11 +193,11 @@ class MenuItem:
         # Compute filled bars safely
         try:
             filled_bars = round((self.value - min_val) / ((max_val - min_val) / num_bars))
-        except Exception:
+        except (TypeError, ValueError, ZeroDivisionError):
             filled_bars = 0
 
         for i in range(num_bars):
-            color = Assets.Colors.GREEN.value if i < filled_bars else Assets.Colors.WHITE.value
+            color = Colors.GREEN.value if i < filled_bars else Colors.WHITE.value
             pygame.draw.rect(self.game.display, color, (slider_x + i * bar_width, y - 8, bar_width - 2, 20))
 
         arrow_size = max(10, int(self.size * 0.4))
@@ -203,9 +211,9 @@ class MenuItem:
         bar_center_y = int((y - 8) + (20 / 2))
 
         if left_enabled:
-            self._draw_arrow(left_x, bar_center_y, arrow_size, 'left', Assets.Colors.GREY.value)
+            self._draw_arrow(left_x, bar_center_y, arrow_size, 'left', Colors.GREY.value)
         if right_enabled:
-            self._draw_arrow(right_x, bar_center_y, arrow_size, 'right', Assets.Colors.GREY.value)
+            self._draw_arrow(right_x, bar_center_y, arrow_size, 'right', Colors.GREY.value)
 
 
     # -------------------------------------------------------------------------
@@ -221,16 +229,16 @@ class MenuItem:
                     self.value -= 1
                     try:
                         self.game.menu._play_button()
-                    except Exception:
-                        pass
+                    except (AttributeError, pygame.error) as exc:
+                        logger.debug("Menu button sound unavailable: %s", exc)
                     return True
             elif game.RIGHT_KEY:
                 if isinstance(self.value, int) and self.value < len(self.options) - 1:
                     self.value += 1
                     try:
                         self.game.menu._play_button()
-                    except Exception:
-                        pass
+                    except (AttributeError, pygame.error) as exc:
+                        logger.debug("Menu button sound unavailable: %s", exc)
                     return True
         elif self.item_type == MenuItemType.SLIDER:
             min_val, max_val, step = self.options
@@ -297,13 +305,13 @@ class Menu:
     def __init__(self, game: Any) -> None:
         self.game = game
 
-        self.background = pygame.image.load(Assets.Images.CAVE.value)
-        self.dark_background = pygame.image.load(Assets.Images.DARK_CAVE.value)
+        self.background = pygame.image.load(Images.CAVE.value)
+        self.dark_background = pygame.image.load(Images.DARK_CAVE.value)
 
         # Initialize pygame mixer for audio
         mix.init()
-        mix.music.load(Assets.Audio.AMBIENT.value)
-        self.button = mix.Sound(Assets.Audio.BUTTON.value)
+        mix.music.load(Audio.AMBIENT.value)
+        self.button = mix.Sound(Audio.BUTTON.value)
         self.button.set_volume(0.5)
         self.load_options()
         # Start background music if enabled and not already playing
@@ -326,25 +334,25 @@ class Menu:
     def create_main_menu(self) -> None:
         """Create the main menu items."""
         self.main = [
-            MenuItem(self.game, "CAVE EXPLORER", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 250), MenuItemType.TITLE, size=110, font_big=True),
-            MenuItem(self.game, "Simulation Settings", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 50), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.simulation), setattr(self, 'current_index', len(self.simulation) - 1))),
-            MenuItem(self.game, "Audio Settings", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 10), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.options), setattr(self, 'current_index', self._get_first_selectable()))),
-            MenuItem(self.game, "Credits", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 70), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.credits), setattr(self, 'current_index', self._get_first_selectable()))),
-            MenuItem(self.game, "Exit", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 130), MenuItemType.BUTTON, action=lambda: [setattr(self.game, 'running', False), setattr(self, 'show_menu', False)])
+            MenuItem(self.game, "CAVE EXPLORER", (Display.ALIGN_L, Display.CENTER_H - 250), MenuItemType.TITLE, size=110, font_big=True),
+            MenuItem(self.game, "Simulation Settings", (Display.ALIGN_L, Display.CENTER_H - 50), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.simulation), setattr(self, 'current_index', len(self.simulation) - 1))),
+            MenuItem(self.game, "Audio Settings", (Display.ALIGN_L, Display.CENTER_H + 10), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.options), setattr(self, 'current_index', self._get_first_selectable()))),
+            MenuItem(self.game, "Credits", (Display.ALIGN_L, Display.CENTER_H + 70), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.credits), setattr(self, 'current_index', self._get_first_selectable()))),
+            MenuItem(self.game, "Exit", (Display.ALIGN_L, Display.CENTER_H + 130), MenuItemType.BUTTON, action=lambda: [setattr(self.game, 'running', False), setattr(self, 'show_menu', False)])
         ]
 
 
     def create_simulation_menu(self) -> None:
         """Create the simulation settings menu items."""
         self.simulation = [
-            MenuItem(self.game, "SIMULATION SETTINGS", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 170), MenuItemType.TITLE, size=50, font_big=True),
-            MenuItem(self.game, "Objective", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 90), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.MISSION),
-            MenuItem(self.game, "Cave Size", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 50), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.MAP_SIZE),
-            MenuItem(self.game, "Seed", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 10), MenuItemType.TEXT_INPUT, text_input=""),
-            MenuItem(self.game, "Drones", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6,7,8]),
-            MenuItem(self.game, "Demo Cave", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 70), MenuItemType.SELECTOR, value=0, options=Assets.GameOptions.PREFAB),
-            MenuItem(self.game, "Back", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable()))),
-            MenuItem(self.game, "Start Mission", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 220), MenuItemType.BUTTON, action=self.start_mission, size=100, font_big=True)
+            MenuItem(self.game, "SIMULATION SETTINGS", (Display.ALIGN_L, Display.CENTER_H - 170), MenuItemType.TITLE, size=50, font_big=True),
+            MenuItem(self.game, "Objective", (Display.ALIGN_L, Display.CENTER_H - 90), MenuItemType.SELECTOR, value=0, options=GameOptions.MISSION),
+            MenuItem(self.game, "Cave Size", (Display.ALIGN_L, Display.CENTER_H - 50), MenuItemType.SELECTOR, value=0, options=GameOptions.MAP_SIZE),
+            MenuItem(self.game, "Seed", (Display.ALIGN_L, Display.CENTER_H - 10), MenuItemType.TEXT_INPUT, text_input=""),
+            MenuItem(self.game, "Drones", (Display.ALIGN_L, Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6,7,8]),
+            MenuItem(self.game, "Demo Cave", (Display.ALIGN_L, Display.CENTER_H + 70), MenuItemType.SELECTOR, value=0, options=GameOptions.PREFAB),
+            MenuItem(self.game, "Back", (Display.ALIGN_L, Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable()))),
+            MenuItem(self.game, "Start Mission", (Display.ALIGN_L, Display.CENTER_H + 220), MenuItemType.BUTTON, action=self.start_mission, size=100, font_big=True)
         ]
         self.set_default_seed()
 
@@ -352,22 +360,21 @@ class Menu:
     def create_options_menu(self) -> None:
         """Create the options menu items."""
         self.options = [
-            MenuItem(self.game, "AUDIO SETTINGS", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 150), MenuItemType.TITLE, size=50, font_big=True),
-            MenuItem(self.game, "Game Volume", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 40), MenuItemType.SLIDER, value=self.volume, options=[0, 100, 20]),
-            MenuItem(self.game, "Music", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H), MenuItemType.SELECTOR, value=0 if self.sound_on_off == 'on' else 1, options=['on', 'off']),
-            MenuItem(self.game, "Button", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 40), MenuItemType.SELECTOR, value=0 if self.button_on_off == 'on' else 1, options=['on', 'off']),
-            MenuItem(self.game, "Back", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (self.save_options(), setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable())))
+            MenuItem(self.game, "AUDIO SETTINGS", (Display.ALIGN_L, Display.CENTER_H - 150), MenuItemType.TITLE, size=50, font_big=True),
+            MenuItem(self.game, "Game Volume", (Display.ALIGN_L, Display.CENTER_H - 40), MenuItemType.SLIDER, value=self.volume, options=[0, 100, 20]),
+            MenuItem(self.game, "Music", (Display.ALIGN_L, Display.CENTER_H), MenuItemType.SELECTOR, value=0 if self.sound_on_off == 'on' else 1, options=['on', 'off']),
+            MenuItem(self.game, "Button", (Display.ALIGN_L, Display.CENTER_H + 40), MenuItemType.SELECTOR, value=0 if self.button_on_off == 'on' else 1, options=['on', 'off']),
+            MenuItem(self.game, "Back", (Display.ALIGN_L, Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (self.save_options(), setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable())))
         ]
 
 
     def create_credits_menu(self) -> None:
         """Create the credits menu items."""
         self.credits = [
-            MenuItem(self.game, "CREDITS", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 150), MenuItemType.TITLE, size=70, font_big=True),
-            MenuItem(self.game, "Daniela Argeri ~~~ 219892", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 60), MenuItemType.BUTTON, selectable=False),
-            MenuItem(self.game, "Gianmarco Lavacca ~~~ 224558", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H - 10), MenuItemType.BUTTON, selectable=False),
-            MenuItem(self.game, "Stefania Zaninotto ~~~ 220952", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 40), MenuItemType.BUTTON, selectable=False),
-            MenuItem(self.game, "Back", (Assets.Display.ALIGN_L, Assets.Display.CENTER_H + 140), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable())))
+            MenuItem(self.game, "CREDITS", (Display.ALIGN_L, Display.CENTER_H - 150), MenuItemType.TITLE, size=70, font_big=True),
+            MenuItem(self.game, "Daniela Argeri ~~~ 219892", (Display.ALIGN_L, Display.CENTER_H - 60), MenuItemType.BUTTON, selectable=False),
+            MenuItem(self.game, "Gianmarco Lavacca ~~~ 224558", (Display.ALIGN_L, Display.CENTER_H - 10), MenuItemType.BUTTON, selectable=False),
+            MenuItem(self.game, "Back", (Display.ALIGN_L, Display.CENTER_H + 90), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable())))
         ]
 
 
@@ -468,7 +475,7 @@ class Menu:
             # Item was modified
             if current_item.handle_input(self.game, self.simulation[5].value):
                 # Update dependent settings when demo cave selection changes
-                if self.current_menu == self.simulation and self.simulation[5].value == 1 and (not self.simulation[3].text_input or int(self.simulation[3].text_input) != Assets.GameOptions.SEED_DEFAULTS[self.simulation[2].value]):
+                if self.current_menu == self.simulation and self.simulation[5].value == 1 and (not self.simulation[3].text_input or int(self.simulation[3].text_input) != GameOptions.SEED_DEFAULTS[self.simulation[2].value]):
                     self.set_default_seed()
                 # Update options if in options menu
                 elif self.current_menu == self.options:
@@ -487,7 +494,7 @@ class Menu:
 
     def load_options(self) -> None:
         """Load audio options from the configuration file."""
-        config_path = os.path.join(Assets.GAME_DIR, 'GameConfig', 'options.ini')
+        config_path = os.path.join(GAME_DIR, 'GameConfig', 'options.ini')
         # Set defaults if config file doesn't exist
         if not os.path.exists(config_path):
             self.volume = 100
@@ -529,7 +536,7 @@ class Menu:
 
     def save_options(self) -> None:
         """Save audio options to the configuration file."""
-        config_path = os.path.join(Assets.GAME_DIR, 'GameConfig', 'options.ini')
+        config_path = os.path.join(GAME_DIR, 'GameConfig', 'options.ini')
         config = configparser.ConfigParser()
         config['Options'] = {
             'volume': self.volume,
@@ -542,20 +549,20 @@ class Menu:
 
     def set_default_seed(self) -> None:
         """Set the default seed value based on current map selection."""
-        self.seed_input = str(Assets.GameOptions.SEED_DEFAULTS[self.simulation[2].value])
+        self.seed_input = str(GameOptions.SEED_DEFAULTS[self.simulation[2].value])
         self.simulation[3].text_input = self.seed_input
 
 
     def save_symSettings(self) -> None:
         """Save simulation settings to the configuration file."""
-        config_path = os.path.join(Assets.GAME_DIR, 'GameConfig', 'symSettings.ini')
+        config_path = os.path.join(GAME_DIR, 'GameConfig', 'symSettings.ini')
         config = configparser.ConfigParser()
         config['symSettings'] = {
-            'Mode': Assets.GameOptions.MISSION[self.simulation[1].value],  # Index into mission options
-            'Map_dimension': Assets.GameOptions.MAP_SIZE[self.simulation[2].value],  # Index into map options
+            'Mode': GameOptions.MISSION[self.simulation[1].value],  # Index into mission options
+            'Map_dimension': GameOptions.MAP_SIZE[self.simulation[2].value],  # Index into map options
             'Seed': self.simulation[3].text_input,
             'Drones': [3,4,5,6,7,8][self.simulation[4].value],  # Index into drone count options
-            'Prefab': Assets.GameOptions.PREFAB[self.simulation[5].value]  # Index into prefab options
+            'Prefab': GameOptions.PREFAB[self.simulation[5].value]  # Index into prefab options
         }
         with open(config_path, 'w') as f:
             config.write(f)
@@ -580,17 +587,17 @@ class Menu:
         self.game.display.blit(self.dark_background, (0, 0))
 
         # Create font once (reuse for all lines)
-        font = pygame.font.Font(Assets.Fonts.BIG.value, FONT_SIZE)
+        font = pygame.font.Font(Fonts.BIG.value, FONT_SIZE)
         
         # Calculate starting y-coordinate to center text vertically
         num_lines = len(text)
-        first_line_y = Assets.Display.CENTER_H - LINE_OFFSET * (num_lines - 1) / 2
+        first_line_y = Display.CENTER_H - LINE_OFFSET * (num_lines - 1) / 2
 
         # Draw each line
         for i, line_text in enumerate(text):
-            text_surface = font.render(line_text, True, Assets.Colors.WHITE.value)
+            text_surface = font.render(line_text, True, Colors.WHITE.value)
             rect = text_surface.get_rect()
-            rect.center = (Assets.Display.CENTER_W, first_line_y + LINE_OFFSET * i)
+            rect.center = (Display.CENTER_W, first_line_y + LINE_OFFSET * i)
             self.game.display.blit(text_surface, rect)
 
         # Update the display

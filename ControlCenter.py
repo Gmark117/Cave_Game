@@ -8,7 +8,8 @@ import time
 from typing import Optional, Tuple, List, Any
 
 import pygame
-import Assets
+from asset_config.gameplay import Display
+from asset_config.rendering import Colors, DroneColors, Fonts, RectHandle, RoverColors
 
 class ControlCenter:
     """UI component that renders mission status, timers and agent stats."""
@@ -29,17 +30,17 @@ class ControlCenter:
         self.num_rovers = 1 + (4 % num_drones)
 
         # Calculate surface origin
-        self.origin_x = Assets.Display.FULL_W - Assets.Display.LEGEND_WIDTH
+        self.origin_x = Display.FULL_W - Display.LEGEND_WIDTH
         self.origin_y = 0
         self.origin   = (self.origin_x,self.origin_y)
 
         # Calculate surface mid points
-        self.mid_x = self.origin_x + (Assets.Display.LEGEND_WIDTH / 2)
-        self.mid_y = Assets.Display.FULL_H / 2
+        self.mid_x = self.origin_x + (Display.LEGEND_WIDTH / 2)
+        self.mid_y = Display.FULL_H / 2
 
         # Define surface
-        self.control_surf = pygame.Surface((Assets.Display.LEGEND_WIDTH, Assets.Display.FULL_H), pygame.SRCALPHA)
-        self.control_surf.fill((*Assets.Colors.BLACK.value, 255))
+        self.control_surf = pygame.Surface((Display.LEGEND_WIDTH, Display.FULL_H), pygame.SRCALPHA)
+        self.control_surf.fill((*Colors.BLACK.value, 255))
 
         # Create dictionaries
         self.drone_dict()
@@ -74,49 +75,49 @@ class ControlCenter:
         self.drones = {
             'Blinky': {
                 'id': 0,
-                'color': Assets.DroneColors.RED.value,
+                'color': DroneColors.RED.value,
                 'battery': 10,
                 'status': 'Ready'
             },
             'Pinky': {
                 'id': 1,
-                'color': Assets.DroneColors.PINK.value,
+                'color': DroneColors.PINK.value,
                 'battery': 50,
                 'status': 'Homing'
             },
             'Inky': {
                 'id': 2,
-                'color': Assets.DroneColors.L_BLUE.value,
+                'color': DroneColors.L_BLUE.value,
                 'battery': 100,
                 'status': 'Charging'
             },
             'Clyde': {
                 'id': 3,
-                'color': Assets.DroneColors.ORANGE.value,
+                'color': DroneColors.ORANGE.value,
                 'battery': 100,
                 'status': 'Ready'
             },
             'Sue': {
                 'id': 4,
-                'color': Assets.DroneColors.PURPLE.value,
+                'color': DroneColors.PURPLE.value,
                 'battery': 100,
                 'status': 'Ready'
             },
             'Tim': {
                 'id': 5,
-                'color': Assets.DroneColors.BROWN.value,
+                'color': DroneColors.BROWN.value,
                 'battery': 100,
                 'status': 'Ready'
             },
             'Funky': {
                 'id': 6,
-                'color': Assets.DroneColors.GREEN.value,
+                'color': DroneColors.GREEN.value,
                 'battery': 100,
                 'status': 'Ready'
             },
             'Kinky': {
                 'id': 7,
-                'color': Assets.DroneColors.GOLD.value,
+                'color': DroneColors.GOLD.value,
                 'battery': 100,
                 'status': 'Ready'
             }
@@ -128,19 +129,19 @@ class ControlCenter:
         self.rovers = {
             'Huey' : {
                 'id': 0,
-                'color': Assets.RoverColors.RED.value,
+                'color': RoverColors.RED.value,
                 'battery': 2400,
                 'status': 'Ready'
             },
             'Dewey' : {
                 'id': 1,
-                'color': Assets.RoverColors.BLUE.value,
+                'color': RoverColors.BLUE.value,
                 'battery': 1400,
                 'status': 'Updating'
             },
             'Louie' : {
                 'id': 2,
-                'color': Assets.RoverColors.GREEN.value,
+                'color': RoverColors.GREEN.value,
                 'battery': 240,
                 'status': 'Ready'
             }
@@ -189,10 +190,16 @@ class ControlCenter:
 # Drawing methods
 # =============================================================================
 
-    def draw_control_center(self, drone_objects: List[Any], rover_objects: Optional[List[Any]] = None, show_terrain_heatmap: bool = True) -> None:
+    def draw_control_center(
+        self,
+        drone_objects: List[Any],
+        rover_objects: Optional[List[Any]] = None,
+        show_terrain_heatmap: bool = True,
+        selected_drone_heatmap_id: Optional[int] = None
+    ) -> None:
         """Render the entire control center onto `self.control_surf` and blit it."""
         # Clear control surface, draw content there, then blit once to window
-        self.control_surf.fill((*Assets.Colors.BLACK.value, 255))
+        self.control_surf.fill((*Colors.BLACK.value, 255))
         self.drone_toggle_rects.clear()
         self.heatmap_toggle_rect = None
 
@@ -206,7 +213,7 @@ class ControlCenter:
 
         self._draw_title()
         self._draw_statistics(show_terrain_heatmap)
-        self._draw_drone_section(drone_objects)
+        self._draw_drone_section(drone_objects, selected_drone_heatmap_id)
         self._draw_rover_section()
 
         self.game.window.blit(self.control_surf, self.origin)
@@ -218,7 +225,7 @@ class ControlCenter:
         surf = self._static_surfaces.get('title')
         if surf:
             # Ensure the title fits the legend: clamp or scale if necessary
-            legend_w = Assets.Display.LEGEND_WIDTH
+            legend_w = Display.LEGEND_WIDTH
             max_w = max(legend_w - 16, 8)
             if surf.get_width() > max_w:
                 scale = max_w / surf.get_width()
@@ -238,43 +245,47 @@ class ControlCenter:
     def _draw_statistics(self, show_terrain_heatmap: bool) -> None:
         """Render timer and overall statistics in the control panel."""
         # Draw time (update at most once per second)
-        met_texts = [('M.E.T.: ', Assets.Colors.GREY.value, 255),
-                     (self.format_timer(), Assets.Colors.WHITE.value, 255)]
-        met_surf = self._get_cached_text_surface('met', met_texts, 25, Assets.Fonts.BIG.value, ttl=1.0)
+        met_texts = [('M.E.T.: ', Colors.GREY.value, 255),
+                     (self.format_timer(), Colors.WHITE.value, 255)]
+        met_surf = self._get_cached_text_surface('met', met_texts, 25, Fonts.BIG.value, ttl=1.0)
         if met_surf:
-            self._blit_cached_surface(met_surf, self.origin_x, 120, Assets.RectHandle.MIDLEFT.value)
+            self._blit_cached_surface(met_surf, self.origin_x, 120, RectHandle.MIDLEFT.value)
 
         # Draw explored map percentage (only when value changes)
-        explored_texts = [('Explored: ', Assets.Colors.GREY.value, 255),
+        explored_texts = [('Explored: ', Colors.GREY.value, 255),
                           (f'{self.explored_percent}%', self.percent_color(self.explored_percent), 255)]
-        explored_surf = self._get_cached_text_surface(f'explored_{self.explored_percent}', explored_texts, 25, Assets.Fonts.BIG.value)
+        explored_surf = self._get_cached_text_surface(f'explored_{self.explored_percent}', explored_texts, 25, Fonts.BIG.value)
         if explored_surf:
-            self._blit_cached_surface(explored_surf, self.origin_x, 150, Assets.RectHandle.MIDLEFT.value)
+            self._blit_cached_surface(explored_surf, self.origin_x, 150, RectHandle.MIDLEFT.value)
 
         self._draw_heatmap_toggle(show_terrain_heatmap)
 
 
     def _draw_heatmap_toggle(self, enabled: bool) -> None:
         """Draw the global terrain heatmap toggle button."""
-        rect = pygame.Rect(Assets.Display.LEGEND_WIDTH - 46, 138, 34, 24)
-        self._draw_toggle_button(rect, 'H', enabled, Assets.Colors.EUCALYPTUS.value)
+        rect = pygame.Rect(Display.LEGEND_WIDTH - 46, 138, 34, 24)
+        self._draw_toggle_button(rect, 'H', enabled, Colors.EUCALYPTUS.value)
         self.heatmap_toggle_rect = rect.move(self.origin_x, self.origin_y)
 
 
-    def _draw_drone_section(self, drone_objects: List[Any]) -> None:
+    def _draw_drone_section(self, drone_objects: List[Any], selected_drone_heatmap_id: Optional[int]) -> None:
         """Render the drone section header and individual drone statuses."""
         # Draw subtitle
         surf = self._static_surfaces.get('drones')
         if surf:
             rect = surf.get_rect()
-            rect.centerx = Assets.Display.LEGEND_WIDTH // 2
+            rect.centerx = Display.LEGEND_WIDTH // 2
             rect.centery = 195
             self.control_surf.blit(surf, rect)
 
         for drone in self.drones:
             if self.drones[drone]['id'] < self.num_drones:
                 drone_id = self.drones[drone]['id']
-                self._draw_status(drone, drone_obj=drone_objects[drone_id])
+                self._draw_status(
+                    drone,
+                    drone_obj=drone_objects[drone_id],
+                    selected_drone_heatmap_id=selected_drone_heatmap_id
+                )
             else:
                 self._draw_status(drone, deployed=False)
 
@@ -285,7 +296,7 @@ class ControlCenter:
         surf = self._static_surfaces.get('rovers')
         if surf:
             rect = surf.get_rect()
-            rect.centerx = Assets.Display.LEGEND_WIDTH // 2
+            rect.centerx = Display.LEGEND_WIDTH // 2
             rect.centery = 725
             self.control_surf.blit(surf, rect)
 
@@ -296,7 +307,14 @@ class ControlCenter:
                 self._draw_status(rover, rover=True, deployed=False)
     
 
-    def _draw_status(self, label: str, rover: bool = False, deployed: bool = True, drone_obj: Any = None) -> None:
+    def _draw_status(
+        self,
+        label: str,
+        rover: bool = False,
+        deployed: bool = True,
+        drone_obj: Any = None,
+        selected_drone_heatmap_id: Optional[int] = None
+    ) -> None:
         """Render a single status line for a drone or rover identified by `label`."""
         # Get data
         if not rover:
@@ -327,28 +345,28 @@ class ControlCenter:
         self.control_surf.blit(name_surf, rect)
 
         if deployed and not rover and drone_obj is not None:
-            self._draw_drone_toggles(number, y_center, drone_obj)
+            self._draw_drone_toggles(number, y_center, drone_obj, selected_drone_heatmap_id)
         
         if deployed:
             # Define Status color
             match status:
                 case 'Ready'|'Done':
-                    status_color = Assets.Colors.GREEN.value
+                    status_color = Colors.GREEN.value
                 case 'Updating'|'Advancing'|'Sharing'|'Charging':
-                    status_color = Assets.Colors.YELLOW.value
+                    status_color = Colors.YELLOW.value
                 case 'Deployed'|'Homing':
-                    status_color = Assets.Colors.WHITE.value
+                    status_color = Colors.WHITE.value
                 case _:
-                    status_color = Assets.Colors.RED.value
+                    status_color = Colors.RED.value
             
             # Define Battery color
             battery_color = self.percent_color(battery, max_battery)
 
             # Blit data (cache and only re-render when battery/status changes)
             key = f'status_{"rover_"+label if rover else label}_{battery}_{status}'
-            data_surf = self._get_cached_status_surface(key, battery, status, battery_color, status_color, 25, Assets.Fonts.BIG.value, max_battery)
+            data_surf = self._get_cached_status_surface(key, battery, status, battery_color, status_color, 25, Fonts.BIG.value, max_battery)
             if data_surf:
-                self._blit_cached_surface(data_surf, self.origin_x, data_height + 60*number, Assets.RectHandle.MIDLEFT.value)
+                self._blit_cached_surface(data_surf, self.origin_x, data_height + 60*number, RectHandle.MIDLEFT.value)
         else:
             # Blit 'N/A'
             na_surf = self._static_fragments['N/A']
@@ -357,34 +375,37 @@ class ControlCenter:
             self.control_surf.blit(na_surf, rect)
 
 
-    def _draw_drone_toggles(self, drone_id: int, y_center: int, drone_obj: Any) -> None:
-        """Draw clickable path/vision toggle buttons for one drone row."""
+    def _draw_drone_toggles(self, drone_id: int, y_center: int, drone_obj: Any, selected_drone_heatmap_id: Optional[int]) -> None:
+        """Draw clickable path/vision/terrain toggle buttons for one drone row."""
         button_width = 34
         button_height = 24
         gap = 8
-        start_x = Assets.Display.LEGEND_WIDTH - ((button_width * 2) + gap + 12)
+        start_x = Display.LEGEND_WIDTH - ((button_width * 3) + (gap * 2) + 12)
         top = y_center - (button_height // 2)
 
         path_rect = pygame.Rect(start_x, top, button_width, button_height)
         vision_rect = pygame.Rect(start_x + button_width + gap, top, button_width, button_height)
+        terrain_rect = pygame.Rect(start_x + (button_width + gap) * 2, top, button_width, button_height)
 
         self._draw_toggle_button(path_rect, 'P', drone_obj.show_path, drone_obj.color)
         self._draw_toggle_button(vision_rect, 'V', drone_obj.show_vision, drone_obj.color)
+        self._draw_toggle_button(terrain_rect, 'T', selected_drone_heatmap_id == drone_id, drone_obj.color)
 
         self.drone_toggle_rects[(drone_id, 'path')] = path_rect.move(self.origin_x, self.origin_y)
         self.drone_toggle_rects[(drone_id, 'vision')] = vision_rect.move(self.origin_x, self.origin_y)
+        self.drone_toggle_rects[(drone_id, 'terrain')] = terrain_rect.move(self.origin_x, self.origin_y)
 
 
     def _draw_toggle_button(self, rect: 'pygame.Rect', label: str, enabled: bool, accent_color: Tuple[int, int, int]) -> None:
         """Draw a single toggle button in the control panel."""
-        bg_color = accent_color if enabled else Assets.Colors.GREY.value
-        text_color = Assets.Colors.BLACK.value if enabled else Assets.Colors.WHITE.value
+        bg_color = accent_color if enabled else Colors.GREY.value
+        text_color = Colors.BLACK.value if enabled else Colors.WHITE.value
 
         button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
         pygame.draw.rect(button_surf, (*bg_color, 128), button_surf.get_rect(), border_radius=6)
-        pygame.draw.rect(button_surf, (*Assets.Colors.WHITE.value, 128), button_surf.get_rect(), width=1, border_radius=6)
+        pygame.draw.rect(button_surf, (*Colors.WHITE.value, 128), button_surf.get_rect(), width=1, border_radius=6)
 
-        font = self._get_font(Assets.Fonts.BIG.value, 18)
+        font = self._get_font(Fonts.BIG.value, 18)
         text_surf = font.render(label, True, text_color).convert_alpha()
         text_surf.set_alpha(128)
         text_rect = text_surf.get_rect(center=rect.center)
@@ -392,25 +413,29 @@ class ControlCenter:
         self.control_surf.blit(button_surf, rect.topleft)
 
 
-    def handle_click(self, mouse_pos: Tuple[int, int], drone_objects: List[Any]) -> Optional[str]:
-        """Handle click events and return an action token.
+    def handle_click(self, mouse_pos: Tuple[int, int], drone_objects: List[Any]) -> Optional[Tuple[str, Optional[int]]]:
+        """Handle click events and return an action token with optional drone id.
 
         Returns:
-            'terrain_heatmap' when the heatmap toggle is clicked,
-            'drone_overlay' when a drone path/vision toggle is clicked,
+            ('terrain_heatmap', None) when the global heatmap toggle is clicked,
+            ('drone_heatmap', drone_id) when a per-drone heatmap toggle is clicked,
+            ('drone_overlay', drone_id) when a drone path/vision toggle is clicked,
             None when no control was clicked.
         """
         if self.heatmap_toggle_rect is not None and self.heatmap_toggle_rect.collidepoint(mouse_pos):
-            return 'terrain_heatmap'
+            return ('terrain_heatmap', None)
 
         for (drone_id, overlay_type), rect in self.drone_toggle_rects.items():
             if rect.collidepoint(mouse_pos):
                 drone = drone_objects[drone_id]
                 if overlay_type == 'path':
                     drone.toggle_path()
-                else:
+                    return ('drone_overlay', drone_id)
+                if overlay_type == 'vision':
                     drone.toggle_vision()
-                return 'drone_overlay'
+                    return ('drone_overlay', drone_id)
+                else:
+                    return ('drone_heatmap', drone_id)
         return None
             
 
@@ -466,10 +491,7 @@ class ControlCenter:
         entry = self._dynamic_cache.get(key)
         if entry:
             if entry.get('value') == value:
-                if ttl is None or (now - entry.get('time', 0)) >= ttl:
-                    # ttl expired -> re-render
-                    pass
-                else:
+                if ttl is not None and (now - entry.get('time', 0)) < ttl:
                     return entry['surf']
             # value changed -> re-render
         # Render new surface
@@ -499,7 +521,7 @@ class ControlCenter:
         col_w = sample.get_width()
 
         # Separator
-        sep_s = font_obj.render('|', True, Assets.Colors.WHITE.value).convert_alpha()
+        sep_s = font_obj.render('|', True, Colors.WHITE.value).convert_alpha()
         sep_s.set_alpha(128)
 
         # Status surface
@@ -553,14 +575,14 @@ class ControlCenter:
     def _pre_render_statics(self) -> None:
         """Prepare pre-rendered static surfaces used by the control panel."""
         # Pre-render title and section labels
-        title_font = self._get_font(Assets.Fonts.BIG.value, 35)
-        self._static_surfaces['title'] = title_font.render('Control Center', True, Assets.Colors.RED.value).convert_alpha()
-        sub_font = self._get_font(Assets.Fonts.BIG.value, 30)
-        self._static_surfaces['drones'] = sub_font.render('Drones', True, Assets.Colors.EUCALYPTUS.value).convert_alpha()
-        self._static_surfaces['rovers'] = sub_font.render('Rovers', True, Assets.Colors.EUCALYPTUS.value).convert_alpha()
+        title_font = self._get_font(Fonts.BIG.value, 35)
+        self._static_surfaces['title'] = title_font.render('Control Center', True, Colors.RED.value).convert_alpha()
+        sub_font = self._get_font(Fonts.BIG.value, 30)
+        self._static_surfaces['drones'] = sub_font.render('Drones', True, Colors.EUCALYPTUS.value).convert_alpha()
+        self._static_surfaces['rovers'] = sub_font.render('Rovers', True, Colors.EUCALYPTUS.value).convert_alpha()
 
         # Pre-render drone and rover name labels
-        name_font = self._get_font(Assets.Fonts.BIG.value, 25)
+        name_font = self._get_font(Fonts.BIG.value, 25)
         for name, info in self.drones.items():
             surf = name_font.render(name, True, info['color']).convert_alpha()
             self._static_surfaces[('drone_' + name)] = surf
@@ -568,11 +590,11 @@ class ControlCenter:
             surf = name_font.render(name, True, info['color']).convert_alpha()
             self._static_surfaces[('rover_' + name)] = surf
         # Pre-render small static fragments used in dynamic lines
-        small_font = self._get_font(Assets.Fonts.BIG.value, 25)
-        self._static_fragments['M.E.T.:           '] = small_font.render('M.E.T.:           ', True, Assets.Colors.GREY.value).convert_alpha()
-        self._static_fragments['Explored:     '] = small_font.render('Explored:     ', True, Assets.Colors.GREY.value).convert_alpha()
-        self._static_fragments['  |  '] = small_font.render('  |  ', True, Assets.Colors.WHITE.value).convert_alpha()
-        s = small_font.render('N/A', True, Assets.Colors.GREY.value).convert_alpha()
+        small_font = self._get_font(Fonts.BIG.value, 25)
+        self._static_fragments['M.E.T.:           '] = small_font.render('M.E.T.:           ', True, Colors.GREY.value).convert_alpha()
+        self._static_fragments['Explored:     '] = small_font.render('Explored:     ', True, Colors.GREY.value).convert_alpha()
+        self._static_fragments['  |  '] = small_font.render('  |  ', True, Colors.WHITE.value).convert_alpha()
+        s = small_font.render('N/A', True, Colors.GREY.value).convert_alpha()
         s.set_alpha(128)
         self._static_fragments['N/A'] = s
     
@@ -580,8 +602,8 @@ class ControlCenter:
     def percent_color(self, val: int, max_val: int = 100) -> Tuple[int, int, int]:
         """Return a color tuple representing a percentage (red/yellow/green)."""
         if val < max_val*20/100:
-            return Assets.Colors.RED.value
+            return Colors.RED.value
         elif val < max_val*80/100:
-            return Assets.Colors.YELLOW.value
+            return Colors.YELLOW.value
         else:
-            return Assets.Colors.GREEN.value
+            return Colors.GREEN.value

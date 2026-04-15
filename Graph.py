@@ -6,7 +6,8 @@ validation helpers (line-of-sight checks) used during exploration.
 
 from typing import Tuple, List, Any
 
-from Assets import wall_hit, check_pixel_color, Colors
+from asset_config.helpers import wall_hit, check_pixel_color
+from asset_config.rendering import Colors
 
 class Graph:
     def __init__(self, x_start: int, y_start: int, cave_mat: list) -> None:
