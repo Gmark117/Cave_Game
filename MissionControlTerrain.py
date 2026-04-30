@@ -359,10 +359,7 @@ class MissionControlTerrainMixin:
         """Blit the terrain heatmap overlay when a heatmap mode is enabled."""
         if not self.presentation.show_terrain_heatmap and self.presentation.selected_drone_heatmap_id is None:
             return
-        now = pygame.time.get_ticks() / 1000.0
-        if self.presentation.terrain_heatmap_dirty and (now - self.presentation.last_heatmap_refresh) >= self.presentation.heatmap_refresh_interval:
-            self._refresh_terrain_heatmap(self.presentation.selected_drone_heatmap_id)
-            self.presentation.last_heatmap_refresh = now
+        self._refresh_terrain_heatmap(self.presentation.selected_drone_heatmap_id)
         self.game.window.blit(self.presentation.terrain_heatmap_surf, (0, 0))
 
     def acquire_rover_target(self, rover_id: int, current_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:

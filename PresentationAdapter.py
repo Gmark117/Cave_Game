@@ -34,8 +34,6 @@ class PresentationAdapter:
         # Heatmap rendering state
         self.terrain_heatmap_dirty = True
         self.terrain_heatmap_surf = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
-        self.last_heatmap_refresh = 0.0
-        self.heatmap_refresh_interval = 0.25
 
     def toggle_terrain_heatmap(self) -> None:
         """Toggle global terrain heatmap visibility on/off."""
@@ -51,6 +49,11 @@ class PresentationAdapter:
             # Clicking different drone selects it
             self.selected_drone_heatmap_id = drone_id
         self.terrain_heatmap_dirty = True
+
+    def _set_all_drone_paths(self, drone_objects: List[Any], enabled: bool) -> None:
+        """Set the path overlay visibility for every drone in the current mission."""
+        for drone in drone_objects:
+            drone.show_path = enabled
 
     def handle_click(
         self,
@@ -72,6 +75,16 @@ class PresentationAdapter:
         action, drone_id = click_result
         if action == 'terrain_heatmap':
             self.toggle_terrain_heatmap()
+            if self.show_terrain_heatmap:
+                self.selected_drone_heatmap_id = None
+                self._set_all_drone_paths(drone_objects, False)
+            else:
+                self._set_all_drone_paths(drone_objects, True)
         elif action == 'drone_heatmap' and drone_id is not None:
             self.toggle_drone_heatmap(drone_id)
+            self.show_terrain_heatmap = False
+            if self.selected_drone_heatmap_id is not None:
+                self._set_all_drone_paths(drone_objects, False)
+            else:
+                self._set_all_drone_paths(drone_objects, True)
         # Note: 'drone_overlay' is handled by ControlCenter directly (it calls drone.toggle_path/toggle_vision)
