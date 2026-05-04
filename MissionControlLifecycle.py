@@ -76,7 +76,15 @@ class MissionControlLifecycleMixin:
                         pygame.quit()
                         sys.exit()
                     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        self.presentation.handle_click(event.pos, self.control_center, self.drones)
+                        # Check if stop button was clicked
+                        if self.stop_button_rect.collidepoint(event.pos):
+                            self.completed = True
+                            break
+                        else:
+                            self.presentation.handle_click(event.pos, self.control_center, self.drones)
+
+                if self.completed:
+                    break
 
                 self._share_terrain_with_rovers()
                 self.completed = self.is_mission_over()
@@ -84,3 +92,5 @@ class MissionControlLifecycleMixin:
                 pygame.display.update()
         finally:
             self._shutdown_mission(threads)
+            # Switch back to windowed mode
+            self.game.display = self.game.to_windowed()

@@ -109,6 +109,9 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         # Maximise the game window
         self.game.display = self.game.to_maximised()
 
+        # Initialize stop button (top-left corner)
+        self.stop_button_rect = pygame.Rect(10, 10, 80, 40)
+
         # Initialize presentation adapter for UI state and heatmap rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
         self.last_explored_update = 0.0
@@ -249,6 +252,20 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         """Draw the cave wall overlay (occludes floor but not icons)."""
         self.game.window.blit(self.cave_walls_png, (0, 0))
 
+    def draw_stop_button(self) -> None:
+        """Draw the stop button in the top-left corner."""
+        from asset_config.rendering import Colors, Fonts
+        
+        # Draw button background
+        pygame.draw.rect(self.game.window, Colors.RED.value, self.stop_button_rect)
+        pygame.draw.rect(self.game.window, Colors.WHITE.value, self.stop_button_rect, 2)
+        
+        # Draw button text
+        font = pygame.font.Font(Fonts.SMALL.value, 24)
+        text_surface = font.render("STOP", True, Colors.WHITE.value)
+        text_rect = text_surface.get_rect(center=self.stop_button_rect.center)
+        self.game.window.blit(text_surface, text_rect)
+
    
     def draw(self) -> None:
         """Render full scene in layered order.
@@ -285,3 +302,6 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
             self.presentation.show_terrain_heatmap,
             self.presentation.selected_drone_heatmap_id
         )
+
+        # Draw stop button
+        self.draw_stop_button()

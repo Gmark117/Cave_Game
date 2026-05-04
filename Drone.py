@@ -75,7 +75,7 @@ class Drone:
         self.speed_factor = 4
         self.scan_interval = 0.25
         self.last_scan_time = 0.0
-        self.scan_rays = 96
+        self.scan_rays = 48
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Tuple[int, int], float] = {}
 
@@ -326,6 +326,7 @@ class Drone:
 
     
     def mission_completed(self) -> bool:
+        """Check if the exploration mission is complete."""
         # Verify that the mission cannot be completed if it has never been explored
         if not self.explored:
             return False
