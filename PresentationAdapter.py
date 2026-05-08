@@ -1,6 +1,6 @@
 """Presentation layer adapter for UI state and event dispatch.
 
-Separates UI concerns from simulation logic by managing heatmap visibility,
+Separates UI concerns from simulation logic by managing SLAM map visibility,
 selected drone state, and click-event dispatch to control-center views.
 """
 
@@ -14,8 +14,8 @@ class PresentationAdapter:
     """Isolates UI state and click dispatch from simulation orchestration.
 
     Responsibilities:
-    - Manage heatmap visibility flags (global terrain and per-drone)
-    - Track which drone's heatmap is selected for detail view
+    - Manage SLAM map visibility flags (global and per-drone)
+    - Track which drone's SLAM map is selected for detail view
     - Dispatch click events from control-center to internal state updates
     - Provide clean interface for MissionControl to render UI without owning state
     """
@@ -27,21 +27,21 @@ class PresentationAdapter:
             map_w: Map width in pixels (for heatmap surface allocation).
             map_h: Map height in pixels (for heatmap surface allocation).
         """
-        # Heatmap visibility state
+        # SLAM map visibility state
         self.show_terrain_heatmap = False
         self.selected_drone_heatmap_id: Optional[int] = None
 
-        # Heatmap rendering state
+        # SLAM map rendering state
         self.terrain_heatmap_dirty = True
         self.terrain_heatmap_surf = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
 
     def toggle_terrain_heatmap(self) -> None:
-        """Toggle global terrain heatmap visibility on/off."""
+        """Toggle global SLAM map visibility on/off."""
         self.show_terrain_heatmap = not self.show_terrain_heatmap
         self.terrain_heatmap_dirty = True
 
     def toggle_drone_heatmap(self, drone_id: int) -> None:
-        """Toggle per-drone heatmap: show if different drone, hide if same drone."""
+        """Toggle per-drone SLAM map: show if different drone, hide if same drone."""
         if self.selected_drone_heatmap_id == drone_id:
             # Clicking same drone toggles it off
             self.selected_drone_heatmap_id = None

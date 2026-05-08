@@ -667,7 +667,7 @@
 
 ---
 
-## PHASE 6: Drift Modeling (Polish Phase - Optional)
+## PHASE 6: Drift Modeling
 
 ### 6.1 Add Position Tracking to Drone.__init__
 

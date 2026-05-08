@@ -264,7 +264,7 @@ class ControlCenter:
     def _draw_heatmap_toggle(self, enabled: bool) -> None:
         """Draw the global terrain heatmap toggle button."""
         rect = pygame.Rect(Display.LEGEND_WIDTH - 46, 138, 34, 24)
-        self._draw_toggle_button(rect, 'H', enabled, Colors.EUCALYPTUS.value)
+        self._draw_toggle_button(rect, 'S', enabled, Colors.EUCALYPTUS.value)
         self.heatmap_toggle_rect = rect.move(self.origin_x, self.origin_y)
 
 

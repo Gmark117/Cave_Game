@@ -12,6 +12,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pygame
 
+from SlamRenderer import SlamRenderer
+
 
 class MissionControlTerrainMixin:
     """Mixin that encapsulates terrain exchange and heatmap rendering."""
@@ -51,7 +53,7 @@ class MissionControlTerrainMixin:
                 self.presentation.terrain_heatmap_dirty = True
 
     def toggle_terrain_heatmap(self) -> None:
-        """Toggle visibility of the scanned terrain heatmap overlay."""
+        """Toggle visibility of the SLAM map overlay."""
         self.presentation.toggle_terrain_heatmap()
         if self.presentation.show_terrain_heatmap:
             self.presentation.selected_drone_heatmap_id = None
@@ -64,7 +66,7 @@ class MissionControlTerrainMixin:
                 drone.show_vision = True
 
     def toggle_drone_heatmap(self, drone_id: int) -> None:
-        """Toggle per-drone heatmap mode for a specific drone id."""
+        """Toggle per-drone SLAM map for a specific drone id."""
         if drone_id < 0 or drone_id >= len(self.drones):
             return
 
@@ -143,8 +145,46 @@ class MissionControlTerrainMixin:
         overlap_diff_ratio = np.count_nonzero(meaningful_delta) / overlap_count
         return overlap_diff_ratio >= self.min_share_overlap_diff_ratio
 
+    def _slam_maps_differ_enough(
+        self,
+        source_occ: np.ndarray,
+        source_conf: np.ndarray,
+        target_occ: np.ndarray,
+        target_conf: np.ndarray
+    ) -> bool:
+        """Return True when SLAM occupancy sharing adds meaningful info."""
+        stride = max(1, int(self.share_compare_stride))
+
+        src_conf = source_conf[::stride, ::stride]
+        tgt_conf = target_conf[::stride, ::stride]
+        src_occ = source_occ[::stride, ::stride]
+        tgt_occ = target_occ[::stride, ::stride]
+
+        src_known = src_conf > 0.0
+        if not np.any(src_known):
+            return False
+
+        tgt_known = tgt_conf > 0.0
+        src_known_count = int(np.count_nonzero(src_known))
+        if src_known_count == 0:
+            return False
+
+        new_info = src_known & (~tgt_known)
+        new_info_ratio = np.count_nonzero(new_info) / src_known_count
+        if new_info_ratio >= self.min_share_new_info_ratio:
+            return True
+
+        overlap = src_known & tgt_known
+        overlap_count = int(np.count_nonzero(overlap))
+        if overlap_count == 0:
+            return False
+
+        diff = src_occ != tgt_occ
+        overlap_diff_ratio = np.count_nonzero(diff & overlap) / overlap_count
+        return overlap_diff_ratio >= self.min_share_overlap_diff_ratio
+
     def _share_terrain_with_nearby_drones(self, drone_id: int) -> None:
-        """Check for nearby drones and exchange terrain data."""
+        """Check for nearby drones and exchange terrain and SLAM data."""
         drone = self.drones[drone_id]
         now = time.perf_counter()
 
@@ -171,14 +211,21 @@ class MissionControlTerrainMixin:
                     drone_roughness = drone.known_roughness.copy()
                     drone_confidence = drone.terrain_confidence.copy()
                 with drone.exploration_lock:
-                    drone_explored_alpha = pygame.surfarray.array_alpha(drone.floor_surf).copy()
                     drone_border = list(drone.border)
                 with other_drone.terrain_lock:
                     other_roughness = other_drone.known_roughness.copy()
                     other_confidence = other_drone.terrain_confidence.copy()
                 with other_drone.exploration_lock:
-                    other_explored_alpha = pygame.surfarray.array_alpha(other_drone.floor_surf).copy()
                     other_border = list(other_drone.border)
+
+                with drone.slam_lock:
+                    drone_occ = drone.slam_map.occupancy.copy()
+                    drone_conf = drone.slam_map.confidence.copy()
+                    drone_points = list(drone.slam_map.point_cloud)
+                with other_drone.slam_lock:
+                    other_occ = other_drone.slam_map.occupancy.copy()
+                    other_conf = other_drone.slam_map.confidence.copy()
+                    other_points = list(other_drone.slam_map.point_cloud)
 
                 should_other_receive = self._maps_differ_enough(
                     drone_roughness,
@@ -192,15 +239,35 @@ class MissionControlTerrainMixin:
                     drone_roughness,
                     drone_confidence
                 )
-                if not (should_other_receive or should_drone_receive):
+                should_other_receive_slam = self._slam_maps_differ_enough(
+                    drone_occ,
+                    drone_conf,
+                    other_occ,
+                    other_conf
+                )
+                should_drone_receive_slam = self._slam_maps_differ_enough(
+                    other_occ,
+                    other_conf,
+                    drone_occ,
+                    drone_conf
+                )
+
+                if not (should_other_receive or should_drone_receive or should_other_receive_slam or should_drone_receive_slam):
                     continue
 
                 if should_other_receive:
                     other_drone.merge_terrain_data(drone_roughness, drone_confidence)
-                    other_drone.merge_exploration_data(drone_explored_alpha, drone_border)
+                    other_drone.merge_exploration_data(None, drone_border)
                 if should_drone_receive:
                     drone.merge_terrain_data(other_roughness, other_confidence)
-                    drone.merge_exploration_data(other_explored_alpha, other_border)
+                    drone.merge_exploration_data(None, other_border)
+
+                if should_other_receive_slam:
+                    with other_drone.slam_lock:
+                        other_drone.slam_map.merge_from_arrays(drone_occ, drone_conf, drone_points)
+                if should_drone_receive_slam:
+                    with drone.slam_lock:
+                        drone.slam_map.merge_from_arrays(other_occ, other_conf, other_points)
 
                 self.presentation.terrain_heatmap_dirty = True
                 self.last_pair_share[pair_key] = now
@@ -257,110 +324,65 @@ class MissionControlTerrainMixin:
 
                     self.presentation.terrain_heatmap_dirty = True
 
-    def _refresh_terrain_heatmap(self, drone_id: Optional[int] = None) -> None:
-        """Rebuild the cached terrain heatmap surface."""
+    def _refresh_slam_map(self, drone_id: Optional[int] = None) -> None:
+        """Rebuild the cached SLAM map surface."""
         if drone_id is not None and 0 <= drone_id < len(self.drones):
             drone = self.drones[drone_id]
-            with drone.terrain_lock:
-                roughness = np.clip(drone.known_roughness.copy(), 0.0, 1.0)
-                confidence = np.clip(drone.terrain_confidence.copy(), 0.0, 1.0)
-            self._render_heatmap_from_maps(roughness, confidence)
-            return
-
-        entity_maps: List[Tuple[np.ndarray, np.ndarray]] = []
-
-        for drone in self.drones:
-            with drone.terrain_lock:
-                entity_maps.append((drone.known_roughness.copy(), drone.terrain_confidence.copy()))
-
-        for rover in self.rovers:
-            if rover is not None and hasattr(rover, 'known_roughness') and hasattr(rover, 'terrain_confidence'):
-                entity_maps.append((rover.known_roughness.copy(), rover.terrain_confidence.copy()))
-
-        if not entity_maps:
-            self.terrain_heatmap_surf.fill((0, 0, 0, 0))
-            self.terrain_heatmap_dirty = False
-            return
-
-        h, w = self.floor_mask.shape
-        common_known = self.floor_mask.copy()
-        weighted_num = np.zeros((h, w), dtype=np.float32)
-        weighted_den = np.zeros((h, w), dtype=np.float32)
-        min_conf = np.ones((h, w), dtype=np.float32)
-
-        for roughness_map, confidence_map in entity_maps:
-            eh = min(h, roughness_map.shape[0], confidence_map.shape[0])
-            ew = min(w, roughness_map.shape[1], confidence_map.shape[1])
-            if eh <= 0 or ew <= 0:
-                self.terrain_heatmap_surf.fill((0, 0, 0, 0))
-                self.terrain_heatmap_dirty = False
-                return
-
-            entity_conf = np.zeros((h, w), dtype=np.float32)
-            entity_rough = np.zeros((h, w), dtype=np.float32)
-            entity_conf[:eh, :ew] = np.clip(confidence_map[:eh, :ew], 0.0, 1.0)
-            entity_rough[:eh, :ew] = np.clip(roughness_map[:eh, :ew], 0.0, 1.0)
-
-            known = entity_conf > 0.0
-            common_known &= known
-            weighted_num += entity_rough * entity_conf
-            weighted_den += entity_conf
-            min_conf = np.minimum(min_conf, entity_conf)
-
-        roughness = np.zeros((h, w), dtype=np.float32)
-        confidence = np.zeros((h, w), dtype=np.float32)
-        valid = common_known
-        if np.any(valid):
-            roughness[valid] = weighted_num[valid] / np.maximum(weighted_den[valid], 1e-6)
-            confidence[valid] = min_conf[valid]
-
-        self._render_heatmap_from_maps(roughness, confidence)
-
-    def _render_heatmap_from_maps(self, roughness: np.ndarray, confidence: np.ndarray) -> None:
-        """Render a heatmap surface from roughness and confidence arrays."""
-        valid_mask = confidence > 0.0
-        if not np.any(valid_mask):
-            self.presentation.terrain_heatmap_surf.fill((0, 0, 0, 0))
+            with drone.slam_lock:
+                occ = drone.slam_map.occupancy.copy()
+                conf = drone.slam_map.confidence.copy()
+                points = list(drone.slam_map.point_cloud)
+                drone.slam_map.dirty = False
+            self.slam_renderer.render(occ, conf, points)
             self.presentation.terrain_heatmap_dirty = False
             return
 
-        ramp = np.clip(((roughness - 0.5) * 1.8) + 0.5, 0.0, 1.0)
-        band = np.clip((ramp * 5.0).astype(np.int8), 0, 4)
+        if not self.drones:
+            self.slam_renderer.surface.fill((0, 0, 0, 0))
+            self.presentation.terrain_heatmap_dirty = False
+            return
 
-        red = np.zeros_like(ramp, dtype=np.float32)
-        green = np.zeros_like(ramp, dtype=np.float32)
-        blue = np.zeros_like(ramp, dtype=np.float32)
+        h, w = self.floor_mask.shape
+        combined_occ = np.full((h, w), -1, dtype=np.int8)
+        combined_conf = np.zeros((h, w), dtype=np.float32)
+        combined_points: List[Tuple[int, int]] = []
 
-        red[band == 0], green[band == 0], blue[band == 0] = 30.0, 80.0, 235.0
-        red[band == 1], green[band == 1], blue[band == 1] = 45.0, 190.0, 70.0
-        red[band == 2], green[band == 2], blue[band == 2] = 245.0, 225.0, 60.0
-        red[band == 3], green[band == 3], blue[band == 3] = 245.0, 145.0, 40.0
-        red[band == 4], green[band == 4], blue[band == 4] = 235.0, 45.0, 40.0
+        for drone in self.drones:
+            with drone.slam_lock:
+                occ = drone.slam_map.occupancy
+                conf = drone.slam_map.confidence
+                combined_points.extend(drone.slam_map.point_cloud[-400:])
+                drone.slam_map.dirty = False
 
-        alpha = np.where(valid_mask, 35.0 + (confidence * 125.0), 0.0)
+            eh = min(h, occ.shape[0], conf.shape[0])
+            ew = min(w, occ.shape[1], conf.shape[1])
+            if eh <= 0 or ew <= 0:
+                continue
 
-        red = np.clip(red, 0.0, 255.0).astype(np.uint8)
-        green = np.clip(green, 0.0, 255.0).astype(np.uint8)
-        blue = np.clip(blue, 0.0, 255.0).astype(np.uint8)
-        alpha = np.clip(alpha, 0.0, 160.0).astype(np.uint8)
+            target_conf = combined_conf[:eh, :ew]
+            source_conf = conf[:eh, :ew]
+            higher_conf = source_conf > target_conf
+            combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
+            target_conf[higher_conf] = source_conf[higher_conf]
 
-        rgb_view = pygame.surfarray.pixels3d(self.presentation.terrain_heatmap_surf)
-        alpha_view = pygame.surfarray.pixels_alpha(self.presentation.terrain_heatmap_surf)
-        rgb_view[:, :, 0] = red.T
-        rgb_view[:, :, 1] = green.T
-        rgb_view[:, :, 2] = blue.T
-        alpha_view[:, :] = alpha.T
-        del rgb_view
-        del alpha_view
-
+        self.slam_renderer.render(combined_occ, combined_conf, combined_points)
         self.presentation.terrain_heatmap_dirty = False
 
     def draw_terrain_heatmap(self) -> None:
-        """Blit the terrain heatmap overlay when a heatmap mode is enabled."""
+        """Blit the SLAM map overlay when a map mode is enabled."""
         if not self.presentation.show_terrain_heatmap and self.presentation.selected_drone_heatmap_id is None:
             return
-        self._refresh_terrain_heatmap(self.presentation.selected_drone_heatmap_id)
-        self.game.window.blit(self.presentation.terrain_heatmap_surf, (0, 0))
+
+        any_dirty = self.presentation.terrain_heatmap_dirty
+        for drone in self.drones:
+            if getattr(drone, 'slam_map', None) is not None and drone.slam_map.dirty:
+                any_dirty = True
+                break
+
+        if any_dirty:
+            self._refresh_slam_map(self.presentation.selected_drone_heatmap_id)
+
+        self.game.window.blit(self.slam_renderer.surface, (0, 0))
 
     def acquire_rover_target(self, rover_id: int, current_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         """Choose and reserve a discovered rough-terrain target for a rover."""

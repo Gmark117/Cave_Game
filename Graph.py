@@ -6,8 +6,7 @@ validation helpers (line-of-sight checks) used during exploration.
 
 from typing import Tuple, List, Any
 
-from asset_config.helpers import wall_hit, check_pixel_color
-from asset_config.rendering import Colors
+from asset_config.helpers import wall_hit
 
 class Graph:
     def __init__(self, x_start: int, y_start: int, cave_mat: list) -> None:
@@ -40,9 +39,8 @@ class Graph:
                 return True
             return False
         else:
-            # Check pixel color on the provided surface (must be white),
-            # then ensure the map matrix has no wall and no crossing
-            if (check_pixel_color(surface, candidate_pos, Colors.WHITE.value) and not wall_hit(self.cave_mat, candidate_pos) and not self.cross_obs(*curr_pos, *candidate_pos)):
+            # Use the map matrix directly (surface color no longer drives validity).
+            if not wall_hit(self.cave_mat, candidate_pos) and not self.cross_obs(*curr_pos, *candidate_pos):
                 return True
             return False
     

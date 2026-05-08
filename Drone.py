@@ -14,9 +14,12 @@ from typing import List, Tuple, Optional
 import numpy as np
 import pygame
 
-from asset_config.helpers import next_cell_coords, check_pixel_color
+from asset_config.helpers import next_cell_coords
 from asset_config.rendering import Colors
 from Graph import Graph
+from RoughnessSampler import RoughnessSampler
+from SlamMap import SlamMap, FREE
+from VisionSensor import VisionSensor
 
 
 class Drone:
@@ -75,7 +78,7 @@ class Drone:
         self.speed_factor = 4
         self.scan_interval = 0.25
         self.last_scan_time = 0.0
-        self.scan_rays = 48
+        self.scan_rays = 60
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Tuple[int, int], float] = {}
 
@@ -83,6 +86,7 @@ class Drone:
         self.known_roughness = np.full(np.asarray(self.cave).shape, -1.0, dtype=np.float32)
         self.terrain_confidence = np.zeros(np.asarray(self.cave).shape, dtype=np.float32)
         self.terrain_lock = threading.Lock()
+        self.slam_lock = threading.Lock()
         self.exploration_lock = threading.Lock()
         self.last_share_time = 0.0
         self.share_interval = 0.5
@@ -95,6 +99,15 @@ class Drone:
         self.graph = Graph(*start_pos, cave)
         self.returning_home = False
         self.done = False
+        self.heading_deg = 0.0
+        self.last_pos = start_pos
+
+        # SLAM state
+        map_h = len(self.cave)
+        map_w = len(self.cave[0]) if map_h else 0
+        self.slam_map = SlamMap(map_h, map_w)
+        self.vision_sensor = VisionSensor(self.cave, fov_deg=60.0, num_rays=self.scan_rays, step=2)
+        self.roughness_sampler = RoughnessSampler(self.control.terrain_roughness, self.cave)
 
     
     def calculate_radius(self) -> int:
@@ -160,7 +173,9 @@ class Drone:
             return False
 
         for node in path:
+            prev = self.pos
             self.pos = node
+            self._update_heading(prev, self.pos)
             self.graph.add_node(node)
             if hasattr(self.control, 'mission_event'):
                 self.control.mission_event.wait(self.delay / self.speed_factor)
@@ -245,7 +260,9 @@ class Drone:
 
         # Follow the path step-by-step
         for node in path:
+            prev = self.pos
             self.pos = node
+            self._update_heading(prev, self.pos)
             self.graph.add_node(node)
             if hasattr(self.control, 'mission_event'):
                 # Use Event.wait for interruptible sleeping
@@ -265,7 +282,9 @@ class Drone:
         self.border.sort(key=self.get_distance)  # Sort border pixels by distance
 
         if not self.border:
-            return False
+            self._rebuild_frontiers()
+            if not self.border:
+                return False
 
         # Try multiple candidate border pixels (nearest first)
         now = time.perf_counter()
@@ -286,7 +305,9 @@ class Drone:
                 continue
 
             for node in path:
+                prev = self.pos
                 self.pos = node
+                self._update_heading(prev, self.pos)
                 self.graph.add_node(node)
                 if hasattr(self.control, 'mission_event'):
                     self.control.mission_event.wait(self.delay / self.speed_factor)
@@ -303,26 +324,51 @@ class Drone:
     
     
     def update_borders(self) -> None:
-        """Remove border pixels that are now explored.
+        """Rebuild frontier targets using SLAM data every 4 cells."""
+        self._rebuild_frontiers()
 
-        A border cell is considered explored if either:
-        - it is already painted on `floor_surf`, or
-        - local/shared terrain confidence marks it as known.
-        """
-        def is_explored(pixel: Tuple[int, int]) -> bool:
-            x, y = int(pixel[0]), int(pixel[1])
-            if y < 0 or y >= self.terrain_confidence.shape[0] or x < 0 or x >= self.terrain_confidence.shape[1]:
-                return True
-            if self.cave[y][x] != 0:
-                return True
-            explored_by_surface = self.floor_surf.get_at((x, y))[3] > 0
-            explored_by_terrain = float(self.terrain_confidence[y, x]) > 0.0
-            return explored_by_surface or explored_by_terrain
+    def _rebuild_frontiers(self, stride: int = 4, confidence_threshold: float = 0.6) -> None:
+        """Extract frontier cells from SLAM occupancy and terrain confidence."""
+        with self.slam_lock:
+            occ = self.slam_map.occupancy.copy()
+            conf = self.slam_map.confidence.copy()
+
+        h, w = occ.shape
+        frontiers: List[Tuple[int, int]] = []
+
+        for y in range(0, h, max(1, stride)):
+            for x in range(0, w, max(1, stride)):
+                if self.cave[y][x] != 0:
+                    continue
+
+                known = conf[y, x] >= confidence_threshold or float(self.terrain_confidence[y, x]) > 0.0
+                if not known:
+                    continue
+                if occ[y, x] != FREE:
+                    continue
+
+                unknown_neighbor = False
+                for ny in (y - 1, y, y + 1):
+                    for nx in (x - 1, x, x + 1):
+                        if nx == x and ny == y:
+                            continue
+                        if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                            continue
+                        if self.cave[ny][nx] != 0:
+                            continue
+                        known_neighbor = conf[ny, nx] >= confidence_threshold or float(self.terrain_confidence[ny, nx]) > 0.0
+                        if not known_neighbor:
+                            unknown_neighbor = True
+                            break
+                    if unknown_neighbor:
+                        break
+
+                if unknown_neighbor:
+                    frontiers.append((x, y))
 
         with self.exploration_lock:
-            self.border = [pixel for pixel in self.border if not is_explored(pixel)]
-        valid = set(self.border)
-        self.border_retry_until = {k: v for k, v in self.border_retry_until.items() if k in valid}
+            self.border = frontiers
+            self.border_retry_until = {}
 
     
     def mission_completed(self) -> bool:
@@ -353,18 +399,8 @@ class Drone:
 # =============================================================================
     
     def draw_path(self) -> None:
-        """Render the explored-floor overlay and the A* path on `floor_surf`.
-
-        - If `ray_points` contains a polygon, fill it to indicate explored area.
-        - Draw A* path lines stored in `self.graph.pos` when `show_path` is True.
-        - Draw a small starting-point marker and blit both overlays to the
-          main window.
-        """
+        """Render the A* path on `floor_surf` and blit it to the window."""
         with self.exploration_lock:
-            # Filled polygon of the last vision rays (gives a filled explored area)
-            if len(self.ray_points) > 2:
-                pygame.draw.polygon(self.floor_surf, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
-
             # Draw the A* path as a polyline
             for i in range(1, len(self.graph.pos)):
                 pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
@@ -404,7 +440,7 @@ class Drone:
         return None
 
 
-    def scan_terrain(self, num_rays: int = 24) -> None:
+    def scan_terrain(self, ray_hits: List[object]) -> None:
         """Sample terrain roughness along visible rays and update local terrain maps."""
         if not hasattr(self.control, 'terrain_roughness'):
             return
@@ -417,30 +453,11 @@ class Drone:
             return
         self.last_scan_time = now
 
-        samples = []
-        angle_increment = 2 * math.pi / num_rays
-        sample_step = max(2, self.radius // 12)
-        height = len(self.cave)
-        width = len(self.cave[0]) if height else 0
-
-        for i in range(num_rays):
-            angle = i * angle_increment
-            for length in range(0, self.radius + 1, sample_step):
-                sample_x = int(self.pos[0] + length * math.cos(angle))
-                sample_y = int(self.pos[1] + length * math.sin(angle))
-
-                if not (0 <= sample_x < width and 0 <= sample_y < height):
-                    break
-                if self.cave[sample_y][sample_x] != 0:
-                    break
-
-                base_roughness = float(terrain[sample_y, sample_x])
-                confidence = max(0.2, 1.0 - (length / max(1, self.radius)))
-                noise = rand.uniform(-0.03, 0.03)
-                samples.append((sample_x, sample_y, min(1.0, max(0.0, base_roughness + noise)), confidence))
-
-        # Update local terrain knowledge
+        self.roughness_sampler.terrain_roughness = terrain
+        samples = self.roughness_sampler.sample_from_rays(self.pos, ray_hits)
         self._record_local_terrain_scan(samples)
+        if hasattr(self.control, 'record_terrain_scan'):
+            self.control.record_terrain_scan(samples)
 
 
     def _record_local_terrain_scan(self, samples: List[Tuple[int, int, float, float]]) -> None:
@@ -517,25 +534,6 @@ class Drone:
             return
 
         with self.exploration_lock:
-            if other_explored_alpha is not None:
-                # Merge only explored alpha, but repaint with this drone color to avoid color bleed.
-                rgb_view = pygame.surfarray.pixels3d(self.floor_surf)
-                alpha_view = pygame.surfarray.pixels_alpha(self.floor_surf)
-
-                h = min(alpha_view.shape[1], other_explored_alpha.shape[1])
-                w = min(alpha_view.shape[0], other_explored_alpha.shape[0])
-                if h > 0 and w > 0:
-                    incoming_alpha = other_explored_alpha[:w, :h]
-                    mask = incoming_alpha > 0
-                    if np.any(mask):
-                        alpha_view[:w, :h][mask] = np.maximum(alpha_view[:w, :h][mask], incoming_alpha[mask])
-                        rgb_view[:w, :h, 0][mask] = self.color[0]
-                        rgb_view[:w, :h, 1][mask] = self.color[1]
-                        rgb_view[:w, :h, 2][mask] = self.color[2]
-
-                del rgb_view
-                del alpha_view
-
             if other_border:
                 merged = set(self.border)
                 for b in other_border:
@@ -553,35 +551,21 @@ class Drone:
         Uses `cast_ray` to collect hit points; if enough points are found a
         filled polygon is rendered to visually represent the agent's FOV.
         """
-        num_rays = 72  # Number of rays for 360-degree vision
-        angle_increment = 2 * math.pi / num_rays  # Incremental angle between rays
-        self.ray_points.clear()  # Clear previous ray points
+        ray_hits = self.vision_sensor.cast_cone(self.pos, self.heading_deg)
+        self.ray_points = [hit.end for hit in ray_hits]
 
-        # Loop through each ray to calculate its intersection with obstacles
-        for i in range(num_rays):
-            angle = i * angle_increment
-            intersection = self.cast_ray(self.pos, angle, self.radius)
+        with self.slam_lock:
+            self.slam_map.update_from_rays(self.pos, ray_hits)
+        self.scan_terrain(ray_hits)
 
-            if intersection:
-                # If the ray intersects an obstacle, add the intersection point
-                self.ray_points.append(intersection)
-            else:
-                # Otherwise add the far endpoint at max radius
-                end_x = self.pos[0] + self.radius * math.cos(angle)
-                end_y = self.pos[1] + self.radius * math.sin(angle)
-                self.ray_points.append((end_x, end_y))
-
-        self.scan_terrain(self.scan_rays)
-
-        # Draw the field of view as a polygon if there are enough intersection points
         if not self.show_vision:
             return
 
-        if len(self.ray_points) > 3:
-            pygame.draw.polygon(self.game.window, (*self.color, int(2 * self.alpha / 3)), self.ray_points)
+        if len(self.ray_points) > 1:
+            points = [self.pos] + self.ray_points
+            pygame.draw.polygon(self.game.window, (*self.color, 153), points)
         else:
-            # Fallback: draw an outline circle indicating vision radius
-            pygame.draw.circle(self.game.window, (*self.color, int(2 * self.alpha / 3)), (int(self.pos[0]), int(self.pos[1])), self.radius, 1)
+            pygame.draw.circle(self.game.window, (*self.color, 153), (int(self.pos[0]), int(self.pos[1])), 12, 1)
 
 
     def toggle_path(self) -> None:
@@ -599,3 +583,18 @@ class Drone:
         icon_width, icon_height = self.icon.get_size()
         icon_position = (int(self.pos[0] - icon_width // 2), int(self.pos[1] - icon_height // 2))
         self.game.window.blit(self.icon, icon_position)
+
+    def merge_slam_map(self, other_map: SlamMap) -> None:
+        """Merge another drone's SLAM map into this one."""
+        if other_map is None:
+            return
+        with self.slam_lock:
+            self.slam_map.merge_from(other_map)
+
+    def _update_heading(self, prev: Tuple[int, int], curr: Tuple[int, int]) -> None:
+        dx = curr[0] - prev[0]
+        dy = curr[1] - prev[1]
+        if dx == 0 and dy == 0:
+            return
+        angle = math.degrees(math.atan2(dx, -dy))
+        self.heading_deg = angle

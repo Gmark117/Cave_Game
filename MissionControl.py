@@ -19,9 +19,11 @@ from multiprocessing import shared_memory
 
 from asset_config.helpers import wall_hit
 from asset_config.media import Images
+from asset_config.rendering import Colors
 from AgentFactory import AgentFactory
 from ControlCenter import ControlCenter
 from PresentationAdapter import PresentationAdapter
+from SlamRenderer import SlamRenderer
 import AStarPathfinder
 from MissionControlTerrain import MissionControlTerrainMixin
 from MissionControlLifecycle import MissionControlLifecycleMixin
@@ -112,8 +114,9 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         # Initialize stop button (top-left corner)
         self.stop_button_rect = pygame.Rect(10, 10, 80, 40)
 
-        # Initialize presentation adapter for UI state and heatmap rendering
+        # Initialize presentation adapter for UI state and map rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
+        self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
         self.last_explored_update = 0.0
         self.explored_update_interval = 0.5
         
@@ -270,10 +273,10 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
     def draw(self) -> None:
         """Render full scene in layered order.
 
-        Layers: floor -> drone paths -> walls -> drone vision -> icons -> UI
+        Layers: SLAM map -> drone paths -> drone vision -> icons -> UI
         """
-        # Base map
-        self.draw_cave()
+        # Base canvas (no ground-truth map)
+        self.game.window.fill(Colors.BLACK.value)
         self.draw_terrain_heatmap()
         
         # Per-drone overlays: draw explored paths (under vision)
@@ -282,9 +285,6 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         for rover in self.rovers:
             rover.draw_path()
 
-        # Draw cave walls once
-        self.draw_walls()
-        
         # Draw drone visions on top of paths and icons
         for drone in self.drones:
             drone.draw_vision()
