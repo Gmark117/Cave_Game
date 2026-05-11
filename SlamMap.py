@@ -1,6 +1,8 @@
 """Hybrid SLAM map state: occupancy grid + sparse point cloud."""
 
-from typing import Iterable, List, Optional, Tuple
+from collections import deque
+from itertools import islice
+from typing import Deque, Iterable, List, Optional, Tuple
 import math
 
 import numpy as np
@@ -19,7 +21,7 @@ class SlamMap:
         self.max_range = max(1.0, float(math.hypot(map_w, map_h)))
         self.dirty = True
 
-        self.point_cloud: List[Tuple[int, int]] = []
+        self.point_cloud: Deque[Tuple[int, int]] = deque()
         self._point_set = set()
         self.max_points = max_points
 
@@ -113,6 +115,14 @@ class SlamMap:
             return True
         return float(self.confidence[y, x]) >= threshold
 
+    def recent_points(self, limit: int) -> List[Tuple[int, int]]:
+        """Return up to `limit` most-recent points from the cloud."""
+        n = max(0, int(limit))
+        if n == 0 or not self.point_cloud:
+            return []
+        # Use deque iteration from the right to avoid copying the full container.
+        return list(islice(reversed(self.point_cloud), n))
+
     def _mark_points(self, points: Iterable[Tuple[int, int]], occ_value: int, conf: float) -> bool:
         updated = False
         for x, y in points:
@@ -136,7 +146,7 @@ class SlamMap:
         self.point_cloud.append(point)
         self._point_set.add(point)
         if len(self.point_cloud) > self.max_points:
-            old = self.point_cloud.pop(0)
+            old = self.point_cloud.popleft()
             self._point_set.discard(old)
 
     def _line_points(self, x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:

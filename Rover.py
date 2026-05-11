@@ -13,7 +13,7 @@ from typing import Tuple, List, Optional
 
 import pygame
 
-from asset_config.helpers import next_cell_coords, check_pixel_color
+from asset_config.helpers import next_cell_coords
 from asset_config.rendering import Colors
 from Graph import Graph
 
@@ -69,7 +69,7 @@ class Rover:
         match self.map_size:
             case 'SMALL' : return 40
             case 'MEDIUM': return 20
-            case 'BIG'   : return 10
+            case 'LARGE'   : return 10
             case _       : return 20
 
 

@@ -27,25 +27,7 @@ The design goal is realism through constraint: agents do not start with omniscie
 
 ### Quick Start
 
-Create a virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Activate it on Windows PowerShell:
-
-```bash
-.venv\Scripts\Activate.ps1
-```
-
-Or on Windows CMD:
-
-```bash
-.venv\Scripts\activate.bat
-```
-
-Install dependencies:
+Install dependencies into your system Python:
 
 ```bash
 python -m pip install --upgrade pip
@@ -186,7 +168,7 @@ In menus:
 Simulation settings available in-game:
 
 - Objective: `Exploration` or `Search and Rescue`
-- Cave size: `Small`, `Medium`, `Big`
+- Cave size: `Small`, `Medium`, `Large`
 - Seed: custom numeric seed or the default for the selected cave size
 - Drones: from 3 to 8
 - Demo Cave: `Yes` or `No`

@@ -83,20 +83,17 @@ class MapGenerator:
         self.dir          = 0 # Initialize direction (updated during worm movement)
         self.set_starts()  # Set the starting positions of the worms
 
-        if self.settings.prefab: # Load existing map
-            self.bin_map = np.loadtxt(Images.CAVE_MATRIX.value)
-        else: # Generate new map
-            # Initialize binary map with all walls (1s)
-            self.bin_map = np.ones([self.height,self.width])
-            self.dig_map(self.NUM_PROCESSES)
+        # Initialize binary map with all walls (1s)
+        self.bin_map = np.ones([self.height, self.width])
+        self.dig_map(self.NUM_PROCESSES)
 
-            # Perform image processing on the generated map
-            self.process_map()
+        # Perform image processing on the generated map
+        self.process_map()
 
-            # Save and display the processed map
-            self.save_map()
-            self._extract_cave_layer(self.COLOR_WHITE, 'CAVE_WALLS')
-            self._extract_cave_layer(self.COLOR_BLACK, 'CAVE_FLOOR')
+        # Save and display the processed map
+        self.save_map()
+        self._extract_cave_layer(self.COLOR_WHITE, 'CAVE_WALLS')
+        self._extract_cave_layer(self.COLOR_BLACK, 'CAVE_FLOOR')
 
         self.build_terrain_roughness()
     

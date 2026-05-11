@@ -7,7 +7,6 @@ from typing import NoReturn
 from MapGenerator import MapGenerator
 from MissionControl import MissionControl
 from Menu import Menu
-from SimSettings import SimSettings
 
 class Game:
     """Main game class handling initialization, menus, and simulation."""
@@ -54,22 +53,12 @@ class Game:
         initializes mission control, runs the simulation (blocking until completion),
         then returns to the main menu.
         """
-        match self.menu.simulation[2].value:
-            case 0: map_dim = 'SMALL'
-            case 1: map_dim = 'MEDIUM'
-            case 2: map_dim = 'BIG'
+        self.sim_settings = self.menu.build_sim_settings()
 
-        sim_settings = SimSettings(
-            mission=self.menu.simulation[1].value,
-            map_dim=map_dim,
-            seed=int(self.menu.simulation[3].text_input) if self.menu.simulation[3].text_input else 0,
-            num_drones=[3,4,5,6,7,8][self.menu.simulation[4].value],
-            prefab=self.menu.simulation[5].value
-        )
+        self.cartographer = MapGenerator(self, self.sim_settings)
 
-        self.sim_settings = sim_settings
-        self.cartographer = MapGenerator(self, sim_settings)
         self.mission_control = MissionControl(self)
+        
         # Simulation runs here (blocks until completion)
 
     def check_events(self) -> None:

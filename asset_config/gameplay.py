@@ -19,7 +19,7 @@ class GameOptions:
     """Game configuration options."""
 
     MISSION = ["Exploration", "Search and Rescue"]
-    MAP_SIZE = ["Small", "Medium", "Big"]
+    MAP_SIZE = ["Small", "Medium", "Large"]
     PREFAB = ["No", "Yes"]
     VISION = [39, 19, 4]
     DRONE_ICON = [(30, 30), (20, 20), (10, 10)]

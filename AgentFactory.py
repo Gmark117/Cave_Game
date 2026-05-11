@@ -88,7 +88,7 @@ class AgentFactory:
                 return GameOptions.DRONE_ICON[0]
             case 'MEDIUM':
                 return GameOptions.DRONE_ICON[1]
-            case 'BIG':
+            case 'LARGE':
                 return GameOptions.DRONE_ICON[2]
             case _:
                 return GameOptions.DRONE_ICON[1]
@@ -101,7 +101,7 @@ class AgentFactory:
                 return GameOptions.ROVER_ICON[0]
             case 'MEDIUM':
                 return GameOptions.ROVER_ICON[1]
-            case 'BIG':
+            case 'LARGE':
                 return GameOptions.ROVER_ICON[2]
             case _:
                 return GameOptions.ROVER_ICON[1]

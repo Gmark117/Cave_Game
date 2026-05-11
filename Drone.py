@@ -9,7 +9,7 @@ import math
 import time
 import random as rand
 import threading
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 import numpy as np
 import pygame
@@ -58,8 +58,10 @@ class Drone:
 
         # Appearance / drawing
         self.color = color
-        self.alpha = 150
+        # Vision cone alpha set to 128 for semi-transparency
+        self.alpha = 128
         self.icon = icon
+        self.vision_overlay = pygame.Surface(self.game.window.get_size(), pygame.SRCALPHA)
 
         # State and lifecycle
         self.battery = 100
@@ -76,11 +78,15 @@ class Drone:
         self.show_path = True
         self.show_vision = True
         self.speed_factor = 4
-        self.scan_interval = 0.25
+        self.scan_interval = float(getattr(self.settings, 'slam_scan_interval', 0.25))
         self.last_scan_time = 0.0
-        self.scan_rays = 60
+        self.scan_rays = int(getattr(self.settings, 'slam_scan_rays', 60))
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Tuple[int, int], float] = {}
+        self.frontier_rebuild_cooldown = float(getattr(self.settings, 'frontier_rebuild_cooldown', 0.25))
+        self.last_frontier_rebuild = 0.0
+        self.frontier_stride = int(getattr(self.settings, 'frontier_stride', 4))
+        self.frontier_confidence_threshold = float(getattr(self.settings, 'frontier_confidence_threshold', 0.6))
 
         # Local terrain knowledge (distributed mapping)
         self.known_roughness = np.full(np.asarray(self.cave).shape, -1.0, dtype=np.float32)
@@ -105,7 +111,8 @@ class Drone:
         # SLAM state
         map_h = len(self.cave)
         map_w = len(self.cave[0]) if map_h else 0
-        self.slam_map = SlamMap(map_h, map_w)
+        max_points = int(getattr(self.settings, 'slam_point_cloud_max_points', 6000))
+        self.slam_map = SlamMap(map_h, map_w, max_points=max_points)
         self.vision_sensor = VisionSensor(self.cave, fov_deg=60.0, num_rays=self.scan_rays, step=2)
         self.roughness_sampler = RoughnessSampler(self.control.terrain_roughness, self.cave)
 
@@ -117,7 +124,7 @@ class Drone:
                 return 40
             case 'MEDIUM':
                 return 20
-            case 'BIG':
+            case 'LARGE':
                 return 10
             case _:
                 return 20
@@ -282,7 +289,7 @@ class Drone:
         self.border.sort(key=self.get_distance)  # Sort border pixels by distance
 
         if not self.border:
-            self._rebuild_frontiers()
+            self._maybe_rebuild_frontiers()
             if not self.border:
                 return False
 
@@ -325,7 +332,19 @@ class Drone:
     
     def update_borders(self) -> None:
         """Rebuild frontier targets using SLAM data every 4 cells."""
-        self._rebuild_frontiers()
+        self._maybe_rebuild_frontiers()
+
+    def _maybe_rebuild_frontiers(self) -> bool:
+        """Rebuild frontiers if the cooldown has elapsed."""
+        now = time.perf_counter()
+        if (now - self.last_frontier_rebuild) < self.frontier_rebuild_cooldown:
+            return False
+        self.last_frontier_rebuild = now
+        self._rebuild_frontiers(
+            stride=max(1, self.frontier_stride),
+            confidence_threshold=self.frontier_confidence_threshold
+        )
+        return True
 
     def _rebuild_frontiers(self, stride: int = 4, confidence_threshold: float = 0.6) -> None:
         """Extract frontier cells from SLAM occupancy and terrain confidence."""
@@ -334,37 +353,36 @@ class Drone:
             conf = self.slam_map.confidence.copy()
 
         h, w = occ.shape
-        frontiers: List[Tuple[int, int]] = []
+        cave_arr = np.asarray(self.cave)
+        terrain_conf = np.asarray(self.terrain_confidence)
+        floor_mask = cave_arr == 0
 
-        for y in range(0, h, max(1, stride)):
-            for x in range(0, w, max(1, stride)):
-                if self.cave[y][x] != 0:
+        known_mask = (conf >= confidence_threshold) | (terrain_conf > 0.0)
+        free_known = floor_mask & known_mask & (occ == FREE)
+        unknown = floor_mask & (~known_mask)
+
+        neighbor_unknown = np.zeros_like(unknown, dtype=bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
                     continue
+                ys_src = slice(max(0, -dy), h - max(0, dy))
+                ys_dst = slice(max(0, dy), h - max(0, -dy))
+                xs_src = slice(max(0, -dx), w - max(0, dx))
+                xs_dst = slice(max(0, dx), w - max(0, -dx))
+                neighbor_unknown[ys_dst, xs_dst] |= unknown[ys_src, xs_src]
 
-                known = conf[y, x] >= confidence_threshold or float(self.terrain_confidence[y, x]) > 0.0
-                if not known:
-                    continue
-                if occ[y, x] != FREE:
-                    continue
+        frontier_mask = free_known & neighbor_unknown
+        stride = max(1, int(stride))
+        if stride > 1:
+            sampled = frontier_mask[::stride, ::stride]
+            ys, xs = np.where(sampled)
+            ys = ys * stride
+            xs = xs * stride
+        else:
+            ys, xs = np.where(frontier_mask)
 
-                unknown_neighbor = False
-                for ny in (y - 1, y, y + 1):
-                    for nx in (x - 1, x, x + 1):
-                        if nx == x and ny == y:
-                            continue
-                        if nx < 0 or ny < 0 or nx >= w or ny >= h:
-                            continue
-                        if self.cave[ny][nx] != 0:
-                            continue
-                        known_neighbor = conf[ny, nx] >= confidence_threshold or float(self.terrain_confidence[ny, nx]) > 0.0
-                        if not known_neighbor:
-                            unknown_neighbor = True
-                            break
-                    if unknown_neighbor:
-                        break
-
-                if unknown_neighbor:
-                    frontiers.append((x, y))
+        frontiers = [(int(x), int(y)) for y, x in zip(ys, xs)]
 
         with self.exploration_lock:
             self.border = frontiers
@@ -416,30 +434,6 @@ class Drone:
         self.game.window.blit(self.start_surf, (self.start_pos[0] - 6, self.start_pos[1] - 6))
     
     
-    def cast_ray(self, start_pos: Tuple[float, float], angle: float, max_length: int) -> Optional[Tuple[float, float]]:
-        """Cast a radial ray and return the first collision point or None.
-
-        Steps along the ray by `step_size` pixels and samples the window
-        pixel color; returns the collision coordinates when a wall is
-        detected (black pixel), otherwise None if no hit within range.
-        """
-        step_size = 2  # Smaller step size for higher precision
-        for length in range(0, max_length, step_size):
-            end_x = start_pos[0] + length * math.cos(angle)
-            end_y = start_pos[1] + length * math.sin(angle)
-
-            # Ensure the ray stays within window bounds
-            if 0 <= end_x < self.game.window.get_width() and 0 <= end_y < self.game.window.get_height():
-                pixel_color = self.game.window.get_at((int(end_x), int(end_y)))
-                if pixel_color == (0, 0, 0, 255):  # Check for black (wall) color
-                    return (end_x, end_y)
-
-            # Break if the ray goes out of bounds
-            if not (0 <= end_x < self.game.window.get_width() and 0 <= end_y < self.game.window.get_height()):
-                break
-        return None
-
-
     def scan_terrain(self, ray_hits: List[object]) -> None:
         """Sample terrain roughness along visible rays and update local terrain maps."""
         if not hasattr(self.control, 'terrain_roughness'):
@@ -561,11 +555,14 @@ class Drone:
         if not self.show_vision:
             return
 
+        self.vision_overlay.fill((0, 0, 0, 0))
         if len(self.ray_points) > 1:
             points = [self.pos] + self.ray_points
-            pygame.draw.polygon(self.game.window, (*self.color, 153), points)
+            pygame.draw.polygon(self.vision_overlay, (*self.color, self.alpha), points)
         else:
-            pygame.draw.circle(self.game.window, (*self.color, 153), (int(self.pos[0]), int(self.pos[1])), 12, 1)
+            pygame.draw.circle(self.vision_overlay, (*self.color, self.alpha), (int(self.pos[0]), int(self.pos[1])), 12, 1)
+
+        self.game.window.blit(self.vision_overlay, (0, 0))
 
 
     def toggle_path(self) -> None:

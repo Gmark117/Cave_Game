@@ -44,4 +44,4 @@ class WormInputs(Enum):
 
     SMALL = [MapGen.STEP * 4, MapGen.STRENGTH * 4, MapGen.LIFE]
     MEDIUM = [MapGen.STEP * 2, MapGen.STRENGTH * 2, MapGen.LIFE * 4]
-    BIG = [MapGen.STEP, MapGen.STRENGTH, MapGen.LIFE * 15]
+    LARGE = [MapGen.STEP, MapGen.STRENGTH, MapGen.LIFE * 15]

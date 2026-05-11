@@ -15,6 +15,7 @@ from pathlib import Path
 from asset_config.gameplay import Display, GameOptions
 from asset_config.media import Audio, Images
 from asset_config.rendering import Colors, Fonts
+from SimSettings import SimSettings
 
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,7 @@ class MenuItem:
     # Input handling
     # -------------------------------------------------------------------------
 
-    def handle_input(self, game: Any, demo_cave: bool = True) -> bool:
+    def handle_input(self, game: Any) -> bool:
         """Handle input for the menu item. Returns True if value changed."""
         if self.item_type == MenuItemType.SELECTOR:
             # Move left/right without wraparound
@@ -252,27 +253,25 @@ class MenuItem:
                 return True
         elif self.item_type == MenuItemType.TEXT_INPUT and self.is_selected:
             # Pass demo_cave parameter to control input acceptance
-            return self._handle_text_input(demo_cave)
+            return self._handle_text_input()
         return False
 
 
-    def _handle_text_input(self, demo_cave: bool = True) -> bool:
+    def _handle_text_input(self) -> bool:
         """Handle text input for TEXT_INPUT items. Returns True if text changed."""
         keys = pygame.key.get_pressed()
         modified = False
 
-        # Only accept input when not using the demo cave
-        if not demo_cave:
-            # Handle number keys 0-9
-            for key in range(pygame.K_0, pygame.K_9 + 1):
-                if keys[key]:
-                    self.text_input += chr(key)
-                    modified = True
-
-            # Handle backspace for deletion
-            if keys[pygame.K_BACKSPACE] and self.text_input:
-                self.text_input = self.text_input[:-1]
+        # Handle number keys 0-9
+        for key in range(pygame.K_0, pygame.K_9 + 1):
+            if keys[key]:
+                self.text_input += chr(key)
                 modified = True
+
+        # Handle backspace for deletion
+        if keys[pygame.K_BACKSPACE] and self.text_input:
+            self.text_input = self.text_input[:-1]
+            modified = True
 
         return modified
 
@@ -305,6 +304,15 @@ class Menu:
     def __init__(self, game: Any) -> None:
         self.game = game
 
+        self.slam_defaults = SimSettings()
+        self.slam_scan_interval = self.slam_defaults.slam_scan_interval
+        self.slam_scan_rays = self.slam_defaults.slam_scan_rays
+        self.slam_point_cloud_max_points = self.slam_defaults.slam_point_cloud_max_points
+        self.slam_render_point_tail = self.slam_defaults.slam_render_point_tail
+        self.frontier_stride = self.slam_defaults.frontier_stride
+        self.frontier_confidence_threshold = self.slam_defaults.frontier_confidence_threshold
+        self.frontier_rebuild_cooldown = self.slam_defaults.frontier_rebuild_cooldown
+
         self.background = pygame.image.load(Images.CAVE.value)
         self.dark_background = pygame.image.load(Images.DARK_CAVE.value)
 
@@ -320,6 +328,7 @@ class Menu:
 
         self.create_main_menu()
         self.create_simulation_menu()
+        self.load_symSettings()
         self.create_options_menu()
         self.create_credits_menu()
 
@@ -350,7 +359,6 @@ class Menu:
             MenuItem(self.game, "Cave Size", (Display.ALIGN_L, Display.CENTER_H - 50), MenuItemType.SELECTOR, value=0, options=GameOptions.MAP_SIZE),
             MenuItem(self.game, "Seed", (Display.ALIGN_L, Display.CENTER_H - 10), MenuItemType.TEXT_INPUT, text_input=""),
             MenuItem(self.game, "Drones", (Display.ALIGN_L, Display.CENTER_H + 30), MenuItemType.SELECTOR, value=0, options=[3,4,5,6,7,8]),
-            MenuItem(self.game, "Demo Cave", (Display.ALIGN_L, Display.CENTER_H + 70), MenuItemType.SELECTOR, value=0, options=GameOptions.PREFAB),
             MenuItem(self.game, "Back", (Display.ALIGN_L, Display.CENTER_H + 120), MenuItemType.BUTTON, action=lambda: (setattr(self, 'current_menu', self.main), setattr(self, 'current_index', self._get_first_selectable()))),
             MenuItem(self.game, "Start Mission", (Display.ALIGN_L, Display.CENTER_H + 220), MenuItemType.BUTTON, action=self.start_mission, size=100, font_big=True)
         ]
@@ -473,12 +481,9 @@ class Menu:
         else:
             current_item = self.current_menu[self.current_index]
             # Item was modified
-            if current_item.handle_input(self.game, self.simulation[5].value):
-                # Update dependent settings when demo cave selection changes
-                if self.current_menu == self.simulation and self.simulation[5].value == 1 and (not self.simulation[3].text_input or int(self.simulation[3].text_input) != GameOptions.SEED_DEFAULTS[self.simulation[2].value]):
-                    self.set_default_seed()
+            if current_item.handle_input(self.game):
                 # Update options if in options menu
-                elif self.current_menu == self.options:
+                if self.current_menu == self.options:
                     self._update_options()
 
 
@@ -562,10 +567,87 @@ class Menu:
             'Map_dimension': GameOptions.MAP_SIZE[self.simulation[2].value],  # Index into map options
             'Seed': self.simulation[3].text_input,
             'Drones': [3,4,5,6,7,8][self.simulation[4].value],  # Index into drone count options
-            'Prefab': GameOptions.PREFAB[self.simulation[5].value]  # Index into prefab options
+        }
+        config['SLAM'] = {
+            'scan_interval': self.slam_scan_interval,
+            'scan_rays': self.slam_scan_rays,
+            'point_cloud_max_points': self.slam_point_cloud_max_points,
+            'render_point_tail': self.slam_render_point_tail,
+            'frontier_stride': self.frontier_stride,
+            'frontier_confidence_threshold': self.frontier_confidence_threshold,
+            'frontier_rebuild_cooldown': self.frontier_rebuild_cooldown
         }
         with open(config_path, 'w') as f:
             config.write(f)
+
+
+    def load_symSettings(self) -> None:
+        """Load simulation and SLAM settings from the configuration file."""
+        config_path = os.path.join(GAME_DIR, 'GameConfig', 'symSettings.ini')
+        config = configparser.ConfigParser()
+        if not os.path.exists(config_path):
+            return
+
+        config.read(config_path)
+        settings = config['symSettings'] if config.has_section('symSettings') else {}
+        slam = config['SLAM'] if config.has_section('SLAM') else {}
+
+        default_drones = [3, 4, 5, 6, 7, 8][self.simulation[4].value]
+        mission_name = str(settings.get('Mode', GameOptions.MISSION[self.simulation[1].value]))
+        map_name = str(settings.get('Map_dimension', GameOptions.MAP_SIZE[self.simulation[2].value]))
+        seed_text = str(settings.get('Seed', self.simulation[3].text_input or ''))
+
+        try:
+            drone_count = int(settings.get('Drones', default_drones))
+        except (TypeError, ValueError):
+            drone_count = default_drones
+
+        if mission_name in GameOptions.MISSION:
+            self.simulation[1].value = GameOptions.MISSION.index(mission_name)
+        if map_name in GameOptions.MAP_SIZE:
+            self.simulation[2].value = GameOptions.MAP_SIZE.index(map_name)
+        if seed_text:
+            self.simulation[3].text_input = seed_text
+            self.seed_input = seed_text
+        if drone_count in [3,4,5,6,7,8]:
+            self.simulation[4].value = [3,4,5,6,7,8].index(drone_count)
+
+        try:
+            self.slam_scan_interval = float(slam.get('scan_interval', self.slam_scan_interval))
+            self.slam_scan_rays = int(slam.get('scan_rays', self.slam_scan_rays))
+            self.slam_point_cloud_max_points = int(slam.get('point_cloud_max_points', self.slam_point_cloud_max_points))
+            self.slam_render_point_tail = int(slam.get('render_point_tail', self.slam_render_point_tail))
+            self.frontier_stride = int(slam.get('frontier_stride', self.frontier_stride))
+            self.frontier_confidence_threshold = float(slam.get('frontier_confidence_threshold', self.frontier_confidence_threshold))
+            self.frontier_rebuild_cooldown = float(slam.get('frontier_rebuild_cooldown', self.frontier_rebuild_cooldown))
+        except (TypeError, ValueError):
+            self.slam_scan_interval = self.slam_defaults.slam_scan_interval
+            self.slam_scan_rays = self.slam_defaults.slam_scan_rays
+            self.slam_point_cloud_max_points = self.slam_defaults.slam_point_cloud_max_points
+            self.slam_render_point_tail = self.slam_defaults.slam_render_point_tail
+            self.frontier_stride = self.slam_defaults.frontier_stride
+            self.frontier_confidence_threshold = self.slam_defaults.frontier_confidence_threshold
+            self.frontier_rebuild_cooldown = self.slam_defaults.frontier_rebuild_cooldown
+
+        if not seed_text:
+            self.set_default_seed()
+
+
+    def build_sim_settings(self) -> SimSettings:
+        """Assemble the current menu values into a `SimSettings` instance."""
+        return SimSettings(
+            mission=self.simulation[1].value,
+            map_dim=GameOptions.MAP_SIZE[self.simulation[2].value].upper(),
+            seed=int(self.simulation[3].text_input) if self.simulation[3].text_input else 0,
+            num_drones=[3,4,5,6,7,8][self.simulation[4].value],
+            slam_scan_interval=self.slam_scan_interval,
+            slam_scan_rays=self.slam_scan_rays,
+            slam_point_cloud_max_points=self.slam_point_cloud_max_points,
+            slam_render_point_tail=self.slam_render_point_tail,
+            frontier_stride=self.frontier_stride,
+            frontier_confidence_threshold=self.frontier_confidence_threshold,
+            frontier_rebuild_cooldown=self.frontier_rebuild_cooldown
+        )
 
 
     # -------------------------------------------------------------------------

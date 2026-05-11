@@ -6,6 +6,7 @@ focused on mission lifecycle and agent startup/shutdown.
 """
 
 import math
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -17,6 +18,28 @@ from SlamRenderer import SlamRenderer
 
 class MissionControlTerrainMixin:
     """Mixin that encapsulates terrain exchange and heatmap rendering."""
+
+    def build_debug_lines(self) -> List[str]:
+        """Build a small set of runtime debug lines for the control panel."""
+        now = time.perf_counter()
+        dirty_maps = sum(1 for drone in self.drones if getattr(drone, 'slam_map', None) is not None and drone.slam_map.dirty)
+        frontier_count = sum(len(getattr(drone, 'border', ())) for drone in self.drones)
+        selected_id = self.presentation.selected_drone_heatmap_id
+        selected_label = 'all/none selected' if selected_id is None else f'drone {selected_id}'
+
+        cooldown_remaining = 0.0
+        if self.drones:
+            cooldown_remaining = min(
+                max(0.0, drone.frontier_rebuild_cooldown - (now - drone.last_frontier_rebuild))
+                for drone in self.drones
+            )
+
+        return [
+            f'SLAM view: {selected_label}',
+            f'Dirty maps: {dirty_maps}',
+            f'Frontiers: {frontier_count}',
+            f'Frontier cooldown: {cooldown_remaining:.2f}s'
+        ]
 
     def record_terrain_scan(self, samples: List[Tuple[int, int, float, float]]) -> None:
         """Fuse drone terrain observations into the shared known-terrain maps."""
@@ -325,18 +348,11 @@ class MissionControlTerrainMixin:
                     self.presentation.terrain_heatmap_dirty = True
 
     def _refresh_slam_map(self, drone_id: Optional[int] = None) -> None:
-        """Rebuild the cached SLAM map surface."""
-        if drone_id is not None and 0 <= drone_id < len(self.drones):
-            drone = self.drones[drone_id]
-            with drone.slam_lock:
-                occ = drone.slam_map.occupancy.copy()
-                conf = drone.slam_map.confidence.copy()
-                points = list(drone.slam_map.point_cloud)
-                drone.slam_map.dirty = False
-            self.slam_renderer.render(occ, conf, points)
-            self.presentation.terrain_heatmap_dirty = False
-            return
-
+        """Rebuild the cached SLAM map surface.
+        
+        Renders occupancy map by default (show_terrain_heatmap=False).
+        Renders roughness heatmap when show_terrain_heatmap=True.
+        """
         if not self.drones:
             self.slam_renderer.surface.fill((0, 0, 0, 0))
             self.presentation.terrain_heatmap_dirty = False
@@ -346,12 +362,13 @@ class MissionControlTerrainMixin:
         combined_occ = np.full((h, w), -1, dtype=np.int8)
         combined_conf = np.zeros((h, w), dtype=np.float32)
         combined_points: List[Tuple[int, int]] = []
+        render_tail = int(getattr(self.settings, 'slam_render_point_tail', 400))
 
         for drone in self.drones:
             with drone.slam_lock:
                 occ = drone.slam_map.occupancy
                 conf = drone.slam_map.confidence
-                combined_points.extend(drone.slam_map.point_cloud[-400:])
+                combined_points.extend(drone.slam_map.recent_points(render_tail))
                 drone.slam_map.dirty = False
 
             eh = min(h, occ.shape[0], conf.shape[0])
@@ -365,24 +382,33 @@ class MissionControlTerrainMixin:
             combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
             target_conf[higher_conf] = source_conf[higher_conf]
 
-        self.slam_renderer.render(combined_occ, combined_conf, combined_points)
+        # Render based on toggle state
+        if self.presentation.show_terrain_heatmap:
+            # Terrain roughness heatmap mode (toggled ON)
+            self.slam_renderer.render(None, None, combined_points, draw_points=True, roughness=self.known_roughness, roughness_conf=self.terrain_confidence)
+        else:
+            # Occupancy map mode (default view)
+            self.slam_renderer.render(combined_occ, combined_conf, combined_points, draw_points=False)
         self.presentation.terrain_heatmap_dirty = False
 
     def draw_terrain_heatmap(self) -> None:
-        """Blit the SLAM map overlay when a map mode is enabled."""
-        if not self.presentation.show_terrain_heatmap and self.presentation.selected_drone_heatmap_id is None:
+        """Blit the SLAM map overlay: occupancy (default) or roughness heatmap (when toggled)."""
+        # Always render the occupancy/roughness map (never skip)
+        if not self.drones:
             return
 
         any_dirty = self.presentation.terrain_heatmap_dirty
+
         for drone in self.drones:
             if getattr(drone, 'slam_map', None) is not None and drone.slam_map.dirty:
                 any_dirty = True
                 break
 
         if any_dirty:
-            self._refresh_slam_map(self.presentation.selected_drone_heatmap_id)
+            self._refresh_slam_map()
 
         self.game.window.blit(self.slam_renderer.surface, (0, 0))
+
 
     def acquire_rover_target(self, rover_id: int, current_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         """Choose and reserve a discovered rough-terrain target for a rover."""

@@ -18,7 +18,6 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import shared_memory
 
 from asset_config.helpers import wall_hit
-from asset_config.media import Images
 from asset_config.rendering import Colors
 from AgentFactory import AgentFactory
 from ControlCenter import ControlCenter
@@ -61,7 +60,6 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         if terrain_roughness_src.shape != np.asarray(self.map_matrix).shape:
             terrain_roughness_src = np.zeros(np.asarray(self.map_matrix).shape, dtype=np.float32)
         self.terrain_roughness = terrain_roughness_src
-        self.cave_png     = pygame.image.load(Images.CAVE_MAP.value).convert_alpha() # Load cave map image
         self.floor_cells = max(1, int(np.count_nonzero(np.asarray(self.map_matrix) == 0)))
         self.known_roughness = np.full(np.asarray(self.map_matrix).shape, -1.0, dtype=np.float32)
         self.terrain_confidence = np.zeros(np.asarray(self.map_matrix).shape, dtype=np.float32)
@@ -98,8 +96,6 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         
         self.delay = 1/15 # Set a delay for frame updates
 
-        # Load cave wall images
-        self.cave_walls_png = pygame.image.load(Images.CAVE_WALLS.value).convert_alpha()
 
         # Initialize mission settings (0 for exploration, 1 for search & rescue)
         self.mission   = self.settings.mission
@@ -127,6 +123,14 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         # Build the drones and the rovers
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
+
+        # Show occupancy map (default) with paths/vision, terrain heatmap off until toggled
+        self.presentation.show_terrain_heatmap = False
+        self.presentation.selected_drone_heatmap_id = None
+        self.presentation.terrain_heatmap_dirty = True
+        for drone in self.drones:
+            drone.show_path = True
+            drone.show_vision = True
 
         # Print them on the map
         self.draw()
@@ -246,15 +250,6 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
 # Graph class for path validation and obstacle checking
 # =============================================================================
 
-    def draw_cave(self) -> None:
-        """Draw the base cave map (underlays and floor)."""
-        self.game.window.blit(self.cave_png, (0, 0))
-
-    
-    def draw_walls(self) -> None:
-        """Draw the cave wall overlay (occludes floor but not icons)."""
-        self.game.window.blit(self.cave_walls_png, (0, 0))
-
     def draw_stop_button(self) -> None:
         """Draw the stop button in the top-left corner."""
         from asset_config.rendering import Colors, Fonts
@@ -296,11 +291,13 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
                 self.rovers[i].draw_icon()
 
         # Control center UI
+        debug_lines = self.build_debug_lines()
         self.control_center.draw_control_center(
             self.drones,
             self.rovers,
             self.presentation.show_terrain_heatmap,
-            self.presentation.selected_drone_heatmap_id
+            self.presentation.selected_drone_heatmap_id,
+            debug_lines
         )
 
         # Draw stop button

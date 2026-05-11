@@ -195,7 +195,8 @@ class ControlCenter:
         drone_objects: List[Any],
         rover_objects: Optional[List[Any]] = None,
         show_terrain_heatmap: bool = True,
-        selected_drone_heatmap_id: Optional[int] = None
+        selected_drone_heatmap_id: Optional[int] = None,
+        debug_lines: Optional[List[str]] = None
     ) -> None:
         """Render the entire control center onto `self.control_surf` and blit it."""
         # Clear control surface, draw content there, then blit once to window
@@ -215,9 +216,9 @@ class ControlCenter:
         self._draw_statistics(show_terrain_heatmap)
         self._draw_drone_section(drone_objects, selected_drone_heatmap_id)
         self._draw_rover_section()
+        self._draw_debug_panel(debug_lines)
 
         self.game.window.blit(self.control_surf, self.origin)
-        # Debug rectangles removed
         
 
     def _draw_title(self) -> None:
@@ -264,7 +265,7 @@ class ControlCenter:
     def _draw_heatmap_toggle(self, enabled: bool) -> None:
         """Draw the global terrain heatmap toggle button."""
         rect = pygame.Rect(Display.LEGEND_WIDTH - 46, 138, 34, 24)
-        self._draw_toggle_button(rect, 'S', enabled, Colors.EUCALYPTUS.value)
+        self._draw_toggle_button(rect, 'H', enabled, Colors.EUCALYPTUS.value)
         self.heatmap_toggle_rect = rect.move(self.origin_x, self.origin_y)
 
 
@@ -305,6 +306,28 @@ class ControlCenter:
                 self._draw_status(rover, rover=True)
             else:
                 self._draw_status(rover, rover=True, deployed=False)
+
+
+    def _draw_debug_panel(self, debug_lines: Optional[List[str]]) -> None:
+        """Render a compact debug panel at the bottom of the control center."""
+        if not debug_lines:
+            return
+
+        debug_title = self._static_surfaces.get('debug_title')
+        if debug_title is None:
+            title_font = self._get_font(Fonts.BIG.value, 24)
+            debug_title = title_font.render('Debug', True, Colors.GREY.value).convert_alpha()
+            self._static_surfaces['debug_title'] = debug_title
+
+        title_rect = debug_title.get_rect()
+        title_rect.midleft = (8, 925)
+        self.control_surf.blit(debug_title, title_rect)
+
+        for i, line in enumerate(debug_lines[:4]):
+            texts = [('  ', Colors.GREY.value, 255), (line, Colors.WHITE.value, 255)]
+            surf = self._get_cached_text_surface(f'debug_{i}_{line}', texts, 18, Fonts.BIG.value)
+            if surf:
+                self._blit_cached_surface(surf, self.origin_x, 950 + (i * 22), RectHandle.MIDLEFT.value)
     
 
     def _draw_status(
