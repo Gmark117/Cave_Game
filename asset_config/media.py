@@ -23,6 +23,8 @@ class Images(Enum):
     GAME_ICON_BG = GAME_DIR / "Assets" / "Images" / "drone_BG.jpg"
     ROVER = GAME_DIR / "Assets" / "Images" / "rover_top.png"
     DRONE = GAME_DIR / "Assets" / "Images" / "drone_top.png"
+    DEBUG_ICON = GAME_DIR / "Assets" / "Images" / "debug_bug.png"
+    SYSTEM_ICON = GAME_DIR / "Assets" / "Images" / "system_screen.png"
 
     CAVE_MAP = GAME_DIR / "Assets" / "Map" / "map.png"
     CAVE_MATRIX = GAME_DIR / "Assets" / "Map" / "map_matrix.txt"

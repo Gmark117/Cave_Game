@@ -22,6 +22,6 @@ class GameOptions:
     MAP_SIZE = ["Small", "Medium", "Large"]
     PREFAB = ["No", "Yes"]
     VISION = [39, 19, 4]
-    DRONE_ICON = [(30, 30), (20, 20), (10, 10)]
+    DRONE_ICON = [(25, 25), (17, 17), (10, 10)]
     ROVER_ICON = [(40, 40), (25, 25), (10, 10)]
     SEED_DEFAULTS = [5, 19, 837]
