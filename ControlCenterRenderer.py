@@ -128,8 +128,10 @@ class ControlCenterRenderer:
     def draw_tab_button(
         self, cc: Any, rect: "pygame.Rect", tab_name: str, active: bool
     ) -> None:
-        bg_color = Colors.WHITE.value
-        alpha_bg = 230 if active else 180
+        # Match other toggles: use white when active, grey when inactive
+        bg_color = Colors.WHITE.value if active else Colors.GREY.value
+        # Slightly more transparent when inactive to match toggle buttons
+        alpha_bg = 230 if active else 128
 
         button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
         pygame.draw.rect(
@@ -162,7 +164,10 @@ class ControlCenterRenderer:
         if tab_name in cc._tab_sprites:
             img = cc._tab_sprites[tab_name]
             iw, ih = img.get_size()
-            target.blit(img, ((w - iw) // 2, (h - ih) // 2))
+            x = (w - iw) // 2
+            y = (h - ih) // 2
+            # Blit the image only; outlined variants are baked into PNGs.
+            target.blit(img, (x, y))
             return
 
         if tab_name == "drones":
@@ -318,26 +323,55 @@ class ControlCenterRenderer:
         accent_color: Tuple[int, int, int],
     ) -> None:
         bg_color = accent_color if enabled else Colors.GREY.value
-        text_color = Colors.BLACK.value if enabled else Colors.WHITE.value
 
         button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(
-            button_surf, (*bg_color, 128), button_surf.get_rect(), border_radius=6
-        )
-        pygame.draw.rect(
-            button_surf,
-            (*Colors.WHITE.value, 128),
-            button_surf.get_rect(),
-            width=1,
-            border_radius=6,
-        )
+        # For terrain toggle ('T') we don't draw the rounded background;
+        # render a standalone square icon instead. For other toggles, keep
+        # the existing rounded background style.
+        if label.upper() != "T":
+            pygame.draw.rect(
+                button_surf, (*bg_color, 128), button_surf.get_rect(), border_radius=6
+            )
+            pygame.draw.rect(
+                button_surf,
+                (*Colors.WHITE.value, 128),
+                button_surf.get_rect(),
+                width=1,
+                border_radius=6,
+            )
 
-        font = cc._get_font(Fonts.BIG.value, 18)
-        text_surf = font.render(label, True, text_color).convert_alpha()
-        text_surf.set_alpha(128)
-        button_surf.blit(
-            text_surf, text_surf.get_rect(center=button_surf.get_rect().center)
-        )
+        # Special-case terrain toggle: draw an outer square with optional inner square
+        if label.upper() == "T":
+            w, h = button_surf.get_size()
+            # Draw a centered square icon inside the rectangular button area.
+            # Determine square side length and center it.
+            pad = max(2, min(w, h) // 8)
+            side = min(w, h) - (pad * 2)
+            cx = w // 2
+            cy = h // 2
+            square_rect = pygame.Rect(0, 0, side, side)
+            square_rect.center = (cx, cy)
+
+            # Draw outer square outline (no rounded corners) with semi-transparency
+            pygame.draw.rect(button_surf, (*Colors.WHITE.value, 128), square_rect, width=1)
+
+            if enabled:
+                # Inner filled square when toggled ON, inset slightly, semi-transparent
+                inner_inset = max(3, side // 6)
+                inner_side = side - (inner_inset * 2)
+                inner_rect = pygame.Rect(0, 0, inner_side, inner_side)
+                inner_rect.center = (cx, cy)
+                pygame.draw.rect(button_surf, (*accent_color, 128), inner_rect)
+        else:
+            # Default behavior: draw label text
+            text_color = Colors.BLACK.value if enabled else Colors.WHITE.value
+            font = cc._get_font(Fonts.BIG.value, 18)
+            text_surf = font.render(label, True, text_color).convert_alpha()
+            text_surf.set_alpha(128)
+            button_surf.blit(
+                text_surf, text_surf.get_rect(center=button_surf.get_rect().center)
+            )
+
         cc.control_surf.blit(button_surf, rect.topleft)
 
     def draw_section_header(self, cc: Any, key: str) -> None:

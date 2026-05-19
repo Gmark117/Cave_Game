@@ -78,32 +78,45 @@ class MissionControlTerrainMixin:
     def toggle_terrain_heatmap(self) -> None:
         """Toggle visibility of the SLAM map overlay."""
         self.presentation.toggle_terrain_heatmap()
-        if self.presentation.show_terrain_heatmap:
-            self.presentation.selected_drone_heatmap_id = None
-            for drone in self.drones:
-                drone.show_path = False
-                drone.show_vision = False
-        else:
-            for drone in self.drones:
-                drone.show_path = True
-                drone.show_vision = True
+        # Update path/vision visibility based on both toggles
+        self._update_visibility_state()
 
     def toggle_drone_heatmap(self, drone_id: int) -> None:
         """Toggle per-drone SLAM map for a specific drone id."""
         if drone_id < 0 or drone_id >= len(self.drones):
             return
-
         self.presentation.toggle_drone_heatmap(drone_id)
+        # Update path/vision visibility based on both toggles
+        self._update_visibility_state()
+
+    def _update_visibility_state(self) -> None:
+        """Update drone path/vision visibility based on heatmap and per-drone toggle states.
         
-        if self.presentation.selected_drone_heatmap_id is None:
-            for drone in self.drones:
-                drone.show_path = True
-                drone.show_vision = True
+        Per-drone mode (T on):
+        - Show selected drone's path/vision
+        - Hide other drones' path/vision
+        
+        Combined mode (T off):
+        - Show all paths/vision if no overlay (H off, T off)
+        - Hide all paths/vision if heatmap is on (H on, T off)
+        """
+        selected_id = self.presentation.selected_drone_heatmap_id
+        
+        if selected_id is not None:
+            # Per-drone mode: show only selected drone's vision always,
+            # and show its path only when in occupancy view (global heatmap off).
+            show_path_for_selected = not self.presentation.show_terrain_heatmap
+            for i, drone in enumerate(self.drones):
+                drone.show_vision = (i == selected_id)
+                drone.show_path = (i == selected_id) and show_path_for_selected
         else:
-            self.presentation.show_terrain_heatmap = False
+            # Combined mode: show all or hide all based on heatmap toggle
+            show_overlays = not self.presentation.show_terrain_heatmap
             for drone in self.drones:
-                drone.show_path = False
-                drone.show_vision = False
+                drone.show_path = show_overlays
+                drone.show_vision = show_overlays
+
+
 
     def _has_line_of_sight(self, a: Tuple[int, int], b: Tuple[int, int]) -> bool:
         """Return True when segment a->b does not cross cave walls."""
@@ -352,6 +365,7 @@ class MissionControlTerrainMixin:
         
         Renders occupancy map by default (show_terrain_heatmap=False).
         Renders roughness heatmap when show_terrain_heatmap=True.
+        If a per-drone heatmap is selected, renders only that drone's SLAM data.
         """
         if not self.drones:
             self.slam_renderer.surface.fill((0, 0, 0, 0))
@@ -359,36 +373,75 @@ class MissionControlTerrainMixin:
             return
 
         h, w = self.floor_mask.shape
-        combined_occ = np.full((h, w), -1, dtype=np.int8)
-        combined_conf = np.zeros((h, w), dtype=np.float32)
-        combined_points: List[Tuple[int, int]] = []
         render_tail = int(getattr(self.settings, 'slam_render_point_tail', 400))
-
-        for drone in self.drones:
+        
+        # Check if a specific drone's heatmap is selected
+        selected_id = self.presentation.selected_drone_heatmap_id
+        if selected_id is not None and 0 <= selected_id < len(self.drones):
+            # Render only the selected drone's SLAM data
+            drone = self.drones[selected_id]
+            
             with drone.slam_lock:
-                occ = drone.slam_map.occupancy
-                conf = drone.slam_map.confidence
-                combined_points.extend(drone.slam_map.recent_points(render_tail))
+                occ = drone.slam_map.occupancy.copy()
+                conf = drone.slam_map.confidence.copy()
+                points = drone.slam_map.recent_points(render_tail)
                 drone.slam_map.dirty = False
-
-            eh = min(h, occ.shape[0], conf.shape[0])
-            ew = min(w, occ.shape[1], conf.shape[1])
-            if eh <= 0 or ew <= 0:
-                continue
-
-            target_conf = combined_conf[:eh, :ew]
-            source_conf = conf[:eh, :ew]
-            higher_conf = source_conf > target_conf
-            combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
-            target_conf[higher_conf] = source_conf[higher_conf]
-
-        # Render based on toggle state
-        if self.presentation.show_terrain_heatmap:
-            # Terrain roughness heatmap mode (toggled ON)
-            self.slam_renderer.render(None, None, combined_points, draw_points=True, roughness=self.known_roughness, roughness_conf=self.terrain_confidence)
+            
+            # Pad or trim to match floor dimensions
+            padded_occ = np.full((h, w), -1, dtype=np.int8)
+            padded_conf = np.zeros((h, w), dtype=np.float32)
+            
+            eh = min(h, occ.shape[0])
+            ew = min(w, occ.shape[1])
+            if eh > 0 and ew > 0:
+                padded_occ[:eh, :ew] = occ[:eh, :ew]
+                padded_conf[:eh, :ew] = conf[:eh, :ew]
+            
+            # Render based on toggle state
+            if self.presentation.show_terrain_heatmap:
+                # For per-drone heatmap, use that drone's terrain data if available
+                drone_roughness = getattr(drone, 'known_roughness', None)
+                drone_confidence = getattr(drone, 'terrain_confidence', None)
+                if drone_roughness is not None and drone_confidence is not None:
+                    self.slam_renderer.render(None, None, points, draw_points=True, roughness=drone_roughness, roughness_conf=drone_confidence)
+                else:
+                    # Fallback to global terrain data
+                    self.slam_renderer.render(None, None, points, draw_points=True, roughness=self.known_roughness, roughness_conf=self.terrain_confidence)
+            else:
+                # Occupancy map mode for selected drone
+                self.slam_renderer.render(padded_occ, padded_conf, points, draw_points=False)
         else:
-            # Occupancy map mode (default view)
-            self.slam_renderer.render(combined_occ, combined_conf, combined_points, draw_points=False)
+            # Render combined SLAM data from all drones
+            combined_occ = np.full((h, w), -1, dtype=np.int8)
+            combined_conf = np.zeros((h, w), dtype=np.float32)
+            combined_points: List[Tuple[int, int]] = []
+
+            for drone in self.drones:
+                with drone.slam_lock:
+                    occ = drone.slam_map.occupancy
+                    conf = drone.slam_map.confidence
+                    combined_points.extend(drone.slam_map.recent_points(render_tail))
+                    drone.slam_map.dirty = False
+
+                eh = min(h, occ.shape[0], conf.shape[0])
+                ew = min(w, occ.shape[1], conf.shape[1])
+                if eh <= 0 or ew <= 0:
+                    continue
+
+                target_conf = combined_conf[:eh, :ew]
+                source_conf = conf[:eh, :ew]
+                higher_conf = source_conf > target_conf
+                combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
+                target_conf[higher_conf] = source_conf[higher_conf]
+
+            # Render based on toggle state
+            if self.presentation.show_terrain_heatmap:
+                # Terrain roughness heatmap mode (toggled ON)
+                self.slam_renderer.render(None, None, combined_points, draw_points=True, roughness=self.known_roughness, roughness_conf=self.terrain_confidence)
+            else:
+                # Occupancy map mode (default view)
+                self.slam_renderer.render(combined_occ, combined_conf, combined_points, draw_points=False)
+        
         self.presentation.terrain_heatmap_dirty = False
 
     def draw_terrain_heatmap(self) -> None:

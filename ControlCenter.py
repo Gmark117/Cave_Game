@@ -13,6 +13,7 @@ from asset_config.gameplay import Display
 from asset_config.rendering import Colors, DroneColors, Fonts, RectHandle, RoverColors
 from asset_config.media import Images
 from ControlCenterRenderer import ControlCenterRenderer
+from pathlib import Path
 
 
 @dataclass
@@ -703,7 +704,11 @@ class ControlCenter:
     ) -> None:
         """Load one tab sprite without failing the other icons."""
         try:
-            image = pygame.image.load(str(image_path)).convert_alpha()
+            # Prefer an outlined version if present (generated icons)
+            p = Path(str(image_path))
+            outlined = p.with_name(p.stem + "_outlined" + p.suffix)
+            load_path = outlined if outlined.exists() else p
+            image = pygame.image.load(str(load_path)).convert_alpha()
         except Exception:
             return
         self._tab_sprites[tab_name] = pygame.transform.smoothscale(image, size)
