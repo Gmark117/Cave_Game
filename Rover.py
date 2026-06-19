@@ -1,33 +1,29 @@
 """Rover agent for the Cave Explorer simulation.
 
-This module defines the `Rover` class which behaves similarly to a
-`Drone` but with different battery and visualization settings. The
-class provides movement helpers and simple drawing utilities used by
-`MissionControl` when rendering and stepping the simulation.
+This module defines rover movement and mission state. Pygame drawing is
+delegated to `RoverRenderer`.
 """
 
-import math
-import time
 import random as rand
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, TYPE_CHECKING
 
-import pygame
-
-from asset_config.helpers import next_cell_coords
-from asset_config.rendering import Colors
 from Graph import Graph
+from mapping.terrain_knowledge import TerrainKnowledge
+from rendering.agent_renderer import RoverRenderer
+
+if TYPE_CHECKING:
+    import pygame
 
 
 class Rover:
     """Simple ground rover agent used for map exploration visualization.
 
-    The rover stores runtime state (position, battery, path surface)
-    and provides drawing helpers. Types are intentionally permissive
-    to avoid circular imports with `Game`/`MissionControl`.
+    The rover stores runtime state and delegates Pygame drawing to its
+    renderer. Types are intentionally permissive to avoid circular imports.
     """
 
     def __init__(self, game: object, control: object, id: int, start_pos: Tuple[int, int],
-                 color: Tuple[int, int, int], icon: pygame.Surface, cave: list) -> None:
+                 color: Tuple[int, int, int], icon: 'pygame.Surface', cave: list) -> None:
         self.game     = game
         self.settings = game.sim_settings
         self.cave     = cave
@@ -46,9 +42,6 @@ class Rover:
         self.battery  = 2400
         self.status = 'Ready'
         
-        # Transparent surface used to track the explored path
-        self.floor_surf = pygame.Surface((self.game.width,self.game.height), pygame.SRCALPHA)
-        self.floor_surf.fill((*Colors.WHITE.value, 0))
         self.ray_points = []  # Initialize the list for rays
         self.delay      = self.control.delay
 
@@ -62,6 +55,8 @@ class Rover:
         self.pos       = start_pos
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
+        self.terrain_knowledge = TerrainKnowledge(cave)
+        self.renderer  = RoverRenderer(self)
 
     # Define the radius based on the map size
     def calculate_radius(self) -> int:
@@ -74,7 +69,12 @@ class Rover:
 
 
     def move(self) -> None:
-        """Plan and follow terrain-aware routes toward scanned rough areas."""
+        """Run the provisional rover policy while rover motion is disabled.
+
+        This implementation predates the distributed-knowledge contract.
+        Replace its mission-global target and routing inputs with rover-local
+        received knowledge before enabling rover worker threads.
+        """
         if self.current_path:
             self.status = 'Advancing'
             self.pos = self.current_path.pop(0)
@@ -109,26 +109,29 @@ class Rover:
 
 
     def draw_path(self) -> None:
-        """Render the rover route history on its own transparent surface."""
-        if not self.show_path:
-            return
+        """Compatibility wrapper for path rendering."""
+        self.renderer.draw_path()
 
-        for i in range(1, len(self.graph.pos)):
-            pygame.draw.line(self.floor_surf, (*self.color, 180), self.graph.pos[i], self.graph.pos[i - 1], 2)
-        self.game.window.blit(self.floor_surf, (0, 0))
-
-
-#  ____   ____      _  __        __ ___  _   _   ____ 
-# |  _ \ |  _ \    / \ \ \      / /|_ _|| \ | | / ___|
-# | | | || |_) |  / _ \ \ \ /\ / /  | | |  \| || |  _
-# | |_| ||  _ <  / ___ \ \ V  V /   | | | |\  || |_| |
-# |____/ |_| \_\/_/   \_\ \_/\_/   |___||_| \_| \____|
-
-    # Draw the rover icon
     def draw_icon(self) -> None:
-        """Blit the rover icon centered at current position onto the window."""
-        icon_width, icon_height = self.icon.get_size()  # Get dimensions of the icon
-        icon_position = (int(self.pos[0] - icon_width // 2), int(self.pos[1] - icon_height // 2))  # Center the icon
+        """Compatibility wrapper for icon rendering."""
+        self.renderer.draw_icon()
 
-        # Blit the drone icon at the calculated position
-        self.game.window.blit(self.icon, icon_position)
+    @property
+    def floor_surf(self):
+        """Legacy access to the renderer-owned path surface."""
+        return self.renderer.path_surface
+
+    @property
+    def known_roughness(self):
+        """Compatibility access to local terrain roughness."""
+        return self.terrain_knowledge.roughness
+
+    @property
+    def terrain_confidence(self):
+        """Compatibility access to local terrain confidence."""
+        return self.terrain_knowledge.confidence
+
+    @property
+    def terrain_lock(self):
+        """Compatibility access to the local terrain lock."""
+        return self.terrain_knowledge.lock

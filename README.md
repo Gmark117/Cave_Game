@@ -9,7 +9,9 @@ The codebase is organized around a simple control chain: `main.py` creates the g
 - `MapGenerator.py` builds the cave using multiprocessing and shared memory.
 - `Drone.py` models local exploration, vision, and terrain knowledge.
 - `Rover.py` acts as a mobile or stationary support agent depending on mission setup.
-- `AStarPathfinder.py` computes paths through the generated map.
+- `mapping/terrain_knowledge.py` owns terrain arrays, synchronization, snapshots, observation fusion, and merging.
+- `navigation/pathfinding.py` owns pathfinding workers, shared memory, and mission-facing route requests.
+- `AStarPathfinder.py` contains the drone and terrain-weighted A* algorithms.
 - `Graph.py` tracks valid movement and exploration connectivity.
 - `ControlCenter.py` renders simulation status and control widgets.
 - `PresentationAdapter.py` keeps UI state and presentation toggles isolated from mission logic.
@@ -40,6 +42,15 @@ Run the simulation:
 python main.py
 ```
 
+Run the automated test suite:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+See [`TESTING.md`](TESTING.md) for the test matrix, placement rules, and manual
+smoke checklist.
+
 ## System Architecture
 
 The runtime flow is intentionally layered so that each file owns one part of the simulation lifecycle.
@@ -48,18 +59,33 @@ The runtime flow is intentionally layered so that each file owns one part of the
 
 1. `main.py` instantiates `Game` and starts the application.
 2. `Game.py` creates the UI window, handles menu navigation, and collects mission settings.
-3. When the player starts a mission, `Game` prepares a `SimSettings` object and hands control to `MissionControl`.
-4. `MissionControl` generates agents, initializes terrain state, launches worker threads, and enters the main loop.
+3. When the player starts a mission, `Game` prepares `SimSettings`, generates the cave, and constructs `MissionControl`.
+4. `Game` calls `MissionControl.run()`, which creates agents and runtime resources, launches worker threads, and enters the main loop.
+5. A restart request cleanly shuts down that controller and constructs a new
+   one over the same settings and generated cave.
 
 ### Mission Orchestration
 
-`MissionControl` is the central coordinator during play. It owns the active agents, the simulation clock, mission completion checks, and the render loop integration. The main thread stays responsible for window events and frame updates, while per-agent threads handle movement and local sensing.
+`MissionControl` is the central coordinator during play. Construction prepares mission state without starting the simulation; `run()` explicitly owns runtime initialization and teardown. The main thread handles window events, sensing, and frame updates, while per-agent threads handle movement and nearby data sharing.
+
+The compact square-icon control ends the run and returns to the menu. The
+circular-arrow control restarts through the same cleanup path, then `Game`
+creates fresh agents, mapping state, timers, threads, and pathfinding resources
+without regenerating the cave. The pause/play control freezes agent movement,
+mission updates, and elapsed mission time while keeping rendering and input
+responsive.
 
 That separation matters because the simulation mixes three different execution models:
 
 - The main Pygame loop handles input, timing, and rendering.
 - Drone and rover behavior can run concurrently in worker threads.
 - Cave generation uses multiprocessing so the map can be carved efficiently at startup.
+
+The main loop targets 15 FPS. `FrameProfiler` records smoothed frame, wait,
+sharing, sensing, rendering, and display durations, which are exposed in the
+control-center debug panel. SLAM surfaces rebuild at most every 0.1 seconds,
+and rover terrain exchange runs at most every 0.5 seconds; cached visuals are
+still blitted every frame.
 
 ### Agent Responsibilities
 
@@ -69,7 +95,7 @@ That separation matters because the simulation mixes three different execution m
 
 ### Support Systems
 
-`AStarPathfinder.py` is used when an agent needs an actual route through the map rather than a simple local step. `Graph.py` stores and validates the exploration structure so movement can respect the cave geometry. `ControlCenter.py` and `PresentationAdapter.py` separate the visible UI from mission state so display logic does not leak into the simulation core.
+`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `AStarPathfinder.py` contains the algorithms themselves. `Graph.py` stores and validates exploration connectivity, while `ControlCenter.py` and `PresentationAdapter.py` keep UI concerns outside the simulation core.
 
 ## Runtime and Data Flow
 
@@ -78,7 +104,7 @@ The simulation works as a feedback loop:
 1. The map is generated.
 2. Agents are placed into the world.
 3. Drones move and scan.
-4. Each drone updates only its own local terrain knowledge.
+4. Each drone updates its local terrain knowledge and the mission telemetry aggregate.
 5. Nearby agents exchange data when the mission rules allow it.
 6. The UI aggregates that knowledge into a shared visualization.
 7. Mission completion is checked continuously until all requirements are satisfied.
@@ -87,9 +113,17 @@ That flow is important because the game does not use a single global terrain ora
 
 ### Distributed Terrain Knowledge
 
-Terrain is represented as per-agent local state. A drone maintains a roughness map plus a confidence map so it can distinguish between weak observations and repeated measurements. This allows the system to merge data by confidence instead of treating every observation equally.
+Terrain state is represented by `TerrainKnowledge`. Mission control, every drone, and every rover own separate instances containing roughness, confidence, a floor mask, and synchronization. Drones update their local instance while the same observations are separately recorded in the mission aggregate for telemetry and combined rendering.
 
-The consequence is that exploration is not just about movement; it is about producing higher-quality information over time. A drone can revisit terrain, improve its confidence, and later contribute a stronger view of that region when sharing occurs.
+Snapshots provide detached data for rendering and path planning. Sharing decides when knowledge moves between agents, while `TerrainKnowledge.merge_from()` provides the single confidence-weighted merge rule.
+
+The distributed-semantics contract is:
+
+- Agent-local knowledge drives active agent decisions.
+- Mission-global terrain is telemetry and UI aggregation only.
+- Sharing is the only mechanism that transfers local knowledge between agents.
+- Rover movement remains disabled. Its existing target and route code is
+  provisional and must use rover-local received knowledge before activation.
 
 ### Proximity-Based Sharing
 
@@ -133,16 +167,17 @@ This is why the game feels like an exploration system rather than a simple sprit
 
 The rendering path is deliberately separated from mission logic.
 
-`ControlCenter.py` is responsible for the mission status display, agent statistics, and interaction widgets. `PresentationAdapter.py` keeps the current presentation state isolated so toggles like the terrain heatmap or per-drone overlays do not contaminate the core simulation model.
+`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. `ControlCenter.py` is responsible for the mission status display, agent statistics, and interaction widgets. `PresentationAdapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
 
 Rendering is layered so the visual output stays readable:
 
-1. Cave background
-2. Heatmap or terrain overlays
-3. Agent paths and vision
-4. Agent sprites and UI elements
+1. Black canvas and SLAM or terrain surface
+2. Agent paths
+3. Drone vision
+4. Agent icons
+5. Control center and stop button
 
-This layered approach is easier to reason about than a monolithic draw function because each visual concern has its own place in the pipeline.
+`MissionControl.draw()` remains as a compatibility wrapper, but runtime code delegates directly to `MissionRenderer.draw()`.
 
 ## Configuration and Assets
 

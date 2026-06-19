@@ -57,9 +57,11 @@ class Game:
 
         self.cartographer = MapGenerator(self, self.sim_settings)
 
-        self.mission_control = MissionControl(self)
-        
-        # Simulation runs here (blocks until completion)
+        while True:
+            self.mission_control = MissionControl(self)
+            self.mission_control.run()
+            if self.mission_control.restart_requested is not True:
+                break
 
     def check_events(self) -> None:
         """Check player inputs and update key flags."""

@@ -309,6 +309,8 @@ class Menu:
         self.slam_scan_rays = self.slam_defaults.slam_scan_rays
         self.slam_point_cloud_max_points = self.slam_defaults.slam_point_cloud_max_points
         self.slam_render_point_tail = self.slam_defaults.slam_render_point_tail
+        self.slam_render_interval = self.slam_defaults.slam_render_interval
+        self.rover_share_interval = self.slam_defaults.rover_share_interval
         self.frontier_stride = self.slam_defaults.frontier_stride
         self.frontier_confidence_threshold = self.slam_defaults.frontier_confidence_threshold
         self.frontier_rebuild_cooldown = self.slam_defaults.frontier_rebuild_cooldown
@@ -573,6 +575,8 @@ class Menu:
             'scan_rays': self.slam_scan_rays,
             'point_cloud_max_points': self.slam_point_cloud_max_points,
             'render_point_tail': self.slam_render_point_tail,
+            'render_interval': self.slam_render_interval,
+            'rover_share_interval': self.rover_share_interval,
             'frontier_stride': self.frontier_stride,
             'frontier_confidence_threshold': self.frontier_confidence_threshold,
             'frontier_rebuild_cooldown': self.frontier_rebuild_cooldown
@@ -617,6 +621,8 @@ class Menu:
             self.slam_scan_rays = int(slam.get('scan_rays', self.slam_scan_rays))
             self.slam_point_cloud_max_points = int(slam.get('point_cloud_max_points', self.slam_point_cloud_max_points))
             self.slam_render_point_tail = int(slam.get('render_point_tail', self.slam_render_point_tail))
+            self.slam_render_interval = float(slam.get('render_interval', self.slam_render_interval))
+            self.rover_share_interval = float(slam.get('rover_share_interval', self.rover_share_interval))
             self.frontier_stride = int(slam.get('frontier_stride', self.frontier_stride))
             self.frontier_confidence_threshold = float(slam.get('frontier_confidence_threshold', self.frontier_confidence_threshold))
             self.frontier_rebuild_cooldown = float(slam.get('frontier_rebuild_cooldown', self.frontier_rebuild_cooldown))
@@ -625,6 +631,8 @@ class Menu:
             self.slam_scan_rays = self.slam_defaults.slam_scan_rays
             self.slam_point_cloud_max_points = self.slam_defaults.slam_point_cloud_max_points
             self.slam_render_point_tail = self.slam_defaults.slam_render_point_tail
+            self.slam_render_interval = self.slam_defaults.slam_render_interval
+            self.rover_share_interval = self.slam_defaults.rover_share_interval
             self.frontier_stride = self.slam_defaults.frontier_stride
             self.frontier_confidence_threshold = self.slam_defaults.frontier_confidence_threshold
             self.frontier_rebuild_cooldown = self.slam_defaults.frontier_rebuild_cooldown
@@ -644,6 +652,8 @@ class Menu:
             slam_scan_rays=self.slam_scan_rays,
             slam_point_cloud_max_points=self.slam_point_cloud_max_points,
             slam_render_point_tail=self.slam_render_point_tail,
+            slam_render_interval=self.slam_render_interval,
+            rover_share_interval=self.rover_share_interval,
             frontier_stride=self.frontier_stride,
             frontier_confidence_threshold=self.frontier_confidence_threshold,
             frontier_rebuild_cooldown=self.frontier_rebuild_cooldown

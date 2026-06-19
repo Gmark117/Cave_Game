@@ -28,18 +28,20 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def with_surfarrays(surface: 'pygame.Surface'):
-    """Context manager yielding `(rgb_arr, alpha_arr)` surfarray views.
+    """Yield editable RGB/alpha arrays and commit them on exit.
 
-    Ensures the surfarray views are released (deleted) when exiting the
-    context to avoid locking the `pygame.Surface`.
+    Copies avoid leaking a surface lock through the caller's `with` bindings.
+    Updated pixels are written back before the context exits.
     """
-    rgb_arr = pygame.surfarray.pixels3d(surface)
-    alpha_arr = pygame.surfarray.pixels_alpha(surface)
+    rgb_arr = pygame.surfarray.array3d(surface)
+    alpha_arr = pygame.surfarray.array_alpha(surface)
+    yield rgb_arr, alpha_arr
+    pygame.surfarray.blit_array(surface, rgb_arr)
+    alpha_view = pygame.surfarray.pixels_alpha(surface)
     try:
-        yield rgb_arr, alpha_arr
+        alpha_view[:] = alpha_arr
     finally:
-        del rgb_arr
-        del alpha_arr
+        del alpha_view
 
 
 def apply_cv_brush(sub: np.ndarray, cx: float, cy: float, mode_choice: int, stren: int, rng=None) -> None:

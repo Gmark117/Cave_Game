@@ -92,6 +92,8 @@ class ControlCenter:
         """
         self.game = game
         self.tic = None
+        self.paused_at = None
+        self.paused_duration = 0.0
         self.explored_percent = 100
 
         # Get number of deployed drones and rovers
@@ -252,6 +254,20 @@ class ControlCenter:
 
     def start_timer(self) -> None:
         self.tic = time.perf_counter()
+        self.paused_at = None
+        self.paused_duration = 0.0
+
+    def pause_timer(self) -> None:
+        """Freeze elapsed mission time until the timer is resumed."""
+        if self.tic is not None and self.paused_at is None:
+            self.paused_at = time.perf_counter()
+
+    def resume_timer(self) -> None:
+        """Resume elapsed mission time without counting the paused interval."""
+        if self.paused_at is None:
+            return
+        self.paused_duration += time.perf_counter() - self.paused_at
+        self.paused_at = None
 
     def format_timer(self) -> str:
         """
@@ -269,10 +285,15 @@ class ControlCenter:
             '01:05'
         """
         # If timer not started yet, show 00:00
-        if not self.tic:
+        if self.tic is None:
             return "00:00"
         # Use integer seconds to avoid rounding artifacts during the first second
-        elapsed = int(time.perf_counter() - self.tic)
+        now = (
+            self.paused_at
+            if self.paused_at is not None
+            else time.perf_counter()
+        )
+        elapsed = int(now - self.tic - self.paused_duration)
         if elapsed < 0:
             elapsed = 0
         minutes, seconds = divmod(elapsed, 60)
