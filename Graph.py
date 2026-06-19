@@ -4,7 +4,7 @@
 validation helpers (line-of-sight checks) used during exploration.
 """
 
-from typing import Tuple, List, Any
+from typing import Tuple, List
 
 from asset_config.helpers import wall_hit
 
@@ -24,25 +24,16 @@ class Graph:
         self.pos.append(pos)
     
     
-    def is_valid(self, surface: Any, curr_pos: Tuple[int, int], candidate_pos: Tuple[int, int], step: bool = False) -> bool:
-        """Return True if `candidate_pos` is a valid traversal target.
-
-        If `step` is True, perform a cheaper check appropriate for
-        incremental steps (only collision and crossing checks). When
-        `step` is False the method also verifies the surface pixel color
-        (e.g., that the candidate is a walkable/floor pixel).
-        """
-        if step:
-            # Check if the candidate position does not hit a wall
-            # and the straight line from curr_pos to candidate_pos does not cross walls
-            if (not wall_hit(self.cave_mat, candidate_pos) and not self.cross_obs(*curr_pos, *candidate_pos)):
-                return True
-            return False
-        else:
-            # Use the map matrix directly (surface color no longer drives validity).
-            if not wall_hit(self.cave_mat, candidate_pos) and not self.cross_obs(*curr_pos, *candidate_pos):
-                return True
-            return False
+    def is_valid(
+        self,
+        curr_pos: Tuple[int, int],
+        candidate_pos: Tuple[int, int],
+    ) -> bool:
+        """Return True when the target and route do not intersect walls."""
+        return (
+            not wall_hit(self.cave_mat, candidate_pos)
+            and not self.cross_obs(*curr_pos, *candidate_pos)
+        )
     
     
     def cross_obs(self, x1: int, y1: int, x2: int, y2: int) -> bool:

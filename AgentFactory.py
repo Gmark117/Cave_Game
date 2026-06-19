@@ -8,7 +8,6 @@ import math
 import random as rand
 from typing import Tuple
 
-import numpy as np
 import pygame
 
 from asset_config.gameplay import GameOptions
@@ -69,8 +68,6 @@ class AgentFactory:
                 control.rover_icon,
                 control.map_matrix,
             )
-            rover.known_roughness = np.full(np.asarray(control.map_matrix).shape, -1.0, dtype=np.float32)
-            rover.terrain_confidence = np.zeros(np.asarray(control.map_matrix).shape, dtype=np.float32)
             control.rovers.append(rover)
 
     @staticmethod

@@ -1,45 +1,39 @@
-"""Mission orchestration: spawn agents, manage threads and pathfinding pool.
+"""Mission orchestration and runtime resource setup.
 
-`MissionControl` sets up shared memory for worker pathfinders, creates
-the drone/rover agents, and runs the main loop that updates and draws
-the simulation. Type hints clarify public method contracts.
+Constructing `MissionControl` prepares mission state only. Calling `run()`
+initializes the mission window, agents, pathfinding resources, and worker
+threads before entering the main loop.
 """
 
-import math
-import os
 import random as rand
 import threading
-import logging
 from typing import List, Tuple, Any, Optional
 
 import numpy as np
 import pygame
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import shared_memory
 
 from asset_config.helpers import wall_hit
-from asset_config.rendering import Colors
 from AgentFactory import AgentFactory
 from ControlCenter import ControlCenter
+from mapping.terrain_knowledge import TerrainKnowledge
+from mission.frame_timing import FrameProfiler
+from navigation.pathfinding import PathfindingService
 from PresentationAdapter import PresentationAdapter
 from SlamRenderer import SlamRenderer
-import AStarPathfinder
+from rendering.mission_renderer import MissionRenderer
 from MissionControlTerrain import MissionControlTerrainMixin
 from MissionControlLifecycle import MissionControlLifecycleMixin
-
-
-logger = logging.getLogger(__name__)
 
 
 class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
     """Orchestrates the simulation mission.
 
-    Responsible for creating agents (drones, rovers), preparing a
-    shared-memory map for worker pathfinders, running per-drone threads,
-    and driving the main rendering/update loop until the mission ends.
+    Construction is side-effect-light and does not start threads, processes,
+    shared memory, or the mission loop. Runtime resources are created by
+    `run()` through `_initialize_runtime()`.
     """
     def __init__(self, game: Any) -> None:
-        """Initialize mission control and start the mission loop.
+        """Prepare mission state without starting the mission.
 
         Args:
             game: The `Game` instance owning this mission (typed as `Any`
@@ -60,11 +54,9 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         if terrain_roughness_src.shape != np.asarray(self.map_matrix).shape:
             terrain_roughness_src = np.zeros(np.asarray(self.map_matrix).shape, dtype=np.float32)
         self.terrain_roughness = terrain_roughness_src
-        self.floor_cells = max(1, int(np.count_nonzero(np.asarray(self.map_matrix) == 0)))
-        self.known_roughness = np.full(np.asarray(self.map_matrix).shape, -1.0, dtype=np.float32)
-        self.terrain_confidence = np.zeros(np.asarray(self.map_matrix).shape, dtype=np.float32)
-        self.terrain_lock = threading.Lock()
-        self.floor_mask = (np.asarray(self.map_matrix) == 0)
+        # Mission aggregate for telemetry and combined UI rendering only.
+        # Active agent decisions must use their own local knowledge.
+        self.terrain_knowledge = TerrainKnowledge(self.map_matrix)
         self.rover_assignment_lock = threading.Lock()
         self.rover_assignments = {}
         self.completed_rover_targets = set()
@@ -72,27 +64,29 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         self.min_share_overlap_diff_ratio = 0.18
         self.min_share_roughness_delta = 0.12
         self.share_compare_stride = 8
-        self.pair_share_cooldown = 1.2
-        self.last_pair_share: dict[Tuple[int, int], float] = {}
         # Temporary switch: keep rovers stationary
         self.rover_motion_enabled = False
 
-        # Create shared-memory copy of the map for worker processes
-        self.map_shm: Optional[shared_memory.SharedMemory] = None
-        self.map_shape: Optional[Tuple[int, int]] = None
-        try:
-            arr = np.array(self.map_matrix, dtype=np.uint8)
-            self.map_shape = arr.shape
-            shm = shared_memory.SharedMemory(create=True, size=arr.nbytes)
-            shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
-            shm_arr[:] = arr[:]
-            # SharedMemory object used by worker processes (A* tasks)
-            self.map_shm = shm
-        except (OSError, ValueError, BufferError) as exc:
-            # If shared memory cannot be created, worker pathfinding will be disabled
-            logger.warning("Shared memory setup failed; process-pool pathfinding disabled: %s", exc)
-            self.map_shm = None
-            self.map_shape = None
+        # Runtime resources are initialized explicitly by run().
+        self.pathfinding = PathfindingService(
+            self.map_matrix,
+            self.settings.num_drones,
+        )
+        self.mission_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+        self.is_paused = False
+        self.clock: Optional[pygame.time.Clock] = None
+        self.drones = []
+        self.rovers = []
+        self.num_drones = self.settings.num_drones
+        self.num_rovers = 0
+        self.control_center: Optional[ControlCenter] = None
+        self._runtime_initialized = False
+        self._running = False
+        self._has_run = False
+        self.restart_requested = False
+        self.frame_profiler = FrameProfiler()
         
         self.delay = 1/15 # Set a delay for frame updates
 
@@ -101,18 +95,11 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         self.mission   = self.settings.mission
         self.completed = False # Track whether the mission is completed
 
-        # Initialise control center for displaying mission status
-        self.control_center = ControlCenter(game, self.settings.num_drones)
-
-        # Maximise the game window
-        self.game.display = self.game.to_maximised()
-
-        # Initialize stop button (top-left corner)
-        self.stop_button_rect = pygame.Rect(10, 10, 80, 40)
-
         # Initialize presentation adapter for UI state and map rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
         self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
+        self._init_terrain_services()
+        self.renderer = MissionRenderer(self)
         self.last_explored_update = 0.0
         self.explored_update_interval = 0.5
         
@@ -120,11 +107,24 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         self.start_point = None
         self.set_start_point()
 
-        # Build the drones and the rovers
+    def _initialize_runtime(self) -> None:
+        """Create window, agents, pathfinding resources, and first frame."""
+        if self._runtime_initialized:
+            return
+
+        self.completed = False
+        self.mission_event.clear()
+        self.pause_event.set()
+        self.is_paused = False
+        self.game.display = self.game.to_maximised()
+        self.control_center = ControlCenter(
+            self.game,
+            self.settings.num_drones,
+        )
+
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
 
-        # Show occupancy map (default) with paths/vision, terrain heatmap off until toggled
         self.presentation.show_terrain_heatmap = False
         self.presentation.selected_drone_heatmap_id = None
         self.presentation.terrain_heatmap_dirty = True
@@ -132,30 +132,18 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
             drone.show_path = True
             drone.show_vision = True
 
-        # Print them on the map
-        self.draw()
+        self.clock = pygame.time.Clock()
+        self._setup_pathfinding_resources()
+        self._runtime_initialized = True
 
-        # Show the map and the robots at step 0 for 1 second
+        self.update_sensors()
+        self.renderer.draw()
         pygame.display.update()
         pygame.time.wait(1000)
 
-        # Create an event to stop the threads when the mission is complete
-        self.mission_event = threading.Event()
-        # Clock used to control main loop FPS
-        self.clock = pygame.time.Clock()
-
-        # Create process pool for pathfinding and start mission
-        cpu = (os.cpu_count() or 1)
-        # Reserve one CPU for the main process when possible
-        if cpu > 1:
-            max_workers = min(self.settings.num_drones, cpu - 1)
-        else:
-            max_workers = 1
-        self.pool = ProcessPoolExecutor(max_workers=max_workers)
-        # Semaphore to bound concurrent submissions to the pool (prevents over-submission)
-        self.pool_sem = threading.Semaphore(max_workers)
-
-        self.start_mission()
+    def _setup_pathfinding_resources(self) -> None:
+        """Compatibility wrapper for pathfinding resource initialization."""
+        self.pathfinding.start()
 
 
     def set_start_point(self) -> None:
@@ -189,6 +177,8 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         """
         # Continue moving the drone until mission event is set or the drone completes its mission
         while not self.mission_event.is_set() and not self.drones[drone_id].mission_completed():
+            if not self._wait_until_resumed():
+                break
             self.drones[drone_id].move()  # Move the drone
             
             # Periodically share terrain data with nearby drones
@@ -200,105 +190,134 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
 
 
     def compute_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Submit pathfinding job to the process pool and return the path.
-
-        If shared memory wasn't created at startup this returns an empty
-        list. The method blocks until the worker returns the path.
-        """
-        if self.map_shm is None or self.map_shape is None:
-            return []
-        acquired = False
-        try:
-            # Block submission when the pool is saturated to avoid queue buildup
-            self.pool_sem.acquire()
-            acquired = True
-            fut = self.pool.submit(AStarPathfinder.compute_path, self.map_shm.name, self.map_shape, start, goal)
-            result = fut.result()
-            return result
-        except (RuntimeError, ValueError, OSError) as exc:
-            logger.warning("Pathfinding pool request failed for %s -> %s: %s", start, goal, exc)
-            return []
-        finally:
-            if acquired:
-                self.pool_sem.release()
+        """Compute a drone path through the pathfinding service."""
+        return self.pathfinding.compute_path(start, goal)
 
 
     def compute_rover_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Compute a terrain-aware path for rovers without affecting drone A*."""
-        with self.terrain_lock:
-            known_roughness = self.known_roughness.copy()
-            terrain_confidence = self.terrain_confidence.copy()
-        cave_map = np.asarray(self.map_matrix, dtype=np.uint8)
-        return AStarPathfinder.compute_weighted_path(cave_map, known_roughness, terrain_confidence, start, goal)
+        """Compute a provisional rover path using mission terrain telemetry.
+
+        Rover motion is disabled until its policy is defined. Before enabling
+        it, route planning must consume the rover's own received knowledge.
+        """
+        terrain = self.terrain_knowledge.snapshot()
+        return self.pathfinding.compute_weighted_path(
+            terrain.roughness,
+            terrain.confidence,
+            start,
+            goal,
+        )
 
 
     def toggle_terrain_heatmap(self) -> None:
         """Toggle terrain heatmap visibility via presentation adapter."""
         self.presentation.toggle_terrain_heatmap()
+        self._update_visibility_state()
 
     def toggle_drone_heatmap(self, drone_id: int) -> None:
         """Toggle per-drone heatmap visibility via presentation adapter."""
+        if drone_id < 0 or drone_id >= len(self.drones):
+            return
         self.presentation.toggle_drone_heatmap(drone_id)
+        self._update_visibility_state()
 
     def rover_thread(self, rover_id: int) -> None:
         """Drive rover movement using the terrain-aware weighted planner."""
         while not self.mission_event.is_set():
+            if not self._wait_until_resumed():
+                break
             self.rovers[rover_id].move()
             self.mission_event.wait(self.delay)
 
-# =============================================================================
-# Graph class for path validation and obstacle checking
-# =============================================================================
+    def _wait_until_resumed(self) -> bool:
+        """Block an agent while paused and return False when shutting down."""
+        while not self.mission_event.is_set():
+            if self.pause_event.wait(0.05):
+                return True
+        return False
+
+    def toggle_pause(self) -> None:
+        """Toggle mission updates and agent movement between paused and running."""
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.pause_event.clear()
+            if self.control_center is not None:
+                self.control_center.pause_timer()
+            return
+
+        self.pause_event.set()
+        if self.control_center is not None:
+            self.control_center.resume_timer()
+
+    def update_sensors(self) -> None:
+        """Update every drone's SLAM and terrain knowledge."""
+        for drone in self.drones:
+            drone.update_sensors()
 
     def draw_stop_button(self) -> None:
-        """Draw the stop button in the top-left corner."""
-        from asset_config.rendering import Colors, Fonts
-        
-        # Draw button background
-        pygame.draw.rect(self.game.window, Colors.RED.value, self.stop_button_rect)
-        pygame.draw.rect(self.game.window, Colors.WHITE.value, self.stop_button_rect, 2)
-        
-        # Draw button text
-        font = pygame.font.Font(Fonts.SMALL.value, 24)
-        text_surface = font.render("STOP", True, Colors.WHITE.value)
-        text_rect = text_surface.get_rect(center=self.stop_button_rect.center)
-        self.game.window.blit(text_surface, text_rect)
+        """Compatibility wrapper for stop-button rendering."""
+        self.renderer.draw_stop_button()
 
-   
     def draw(self) -> None:
-        """Render full scene in layered order.
+        """Compatibility wrapper for complete mission rendering."""
+        self.renderer.draw()
 
-        Layers: SLAM map -> drone paths -> drone vision -> icons -> UI
-        """
-        # Base canvas (no ground-truth map)
-        self.game.window.fill(Colors.BLACK.value)
-        self.draw_terrain_heatmap()
-        
-        # Per-drone overlays: draw explored paths (under vision)
-        for drone in self.drones:
-            drone.draw_path()
-        for rover in self.rovers:
-            rover.draw_path()
+    @property
+    def stop_button_rect(self) -> pygame.Rect:
+        """Legacy access to the renderer-owned stop-button hit area."""
+        return self.renderer.stop_button_rect
 
-        # Draw drone visions on top of paths and icons
-        for drone in self.drones:
-            drone.draw_vision()
+    @property
+    def restart_button_rect(self) -> pygame.Rect:
+        """Expose the renderer-owned restart-button hit area."""
+        return self.renderer.restart_button_rect
 
-        # Draw all icons (drones and rovers)
-        for i, drone in enumerate(self.drones):
-            drone.draw_icon()
-            if i < len(self.rovers):
-                self.rovers[i].draw_icon()
+    @property
+    def pause_button_rect(self) -> pygame.Rect:
+        """Expose the renderer-owned pause/play-button hit area."""
+        return self.renderer.pause_button_rect
 
-        # Control center UI
-        debug_lines = self.build_debug_lines()
-        self.control_center.draw_control_center(
-            self.drones,
-            self.rovers,
-            self.presentation.show_terrain_heatmap,
-            self.presentation.selected_drone_heatmap_id,
-            debug_lines
-        )
+    @property
+    def map_shm(self) -> Any:
+        """Legacy access to pathfinding shared memory."""
+        return self.pathfinding.map_shm
 
-        # Draw stop button
-        self.draw_stop_button()
+    @property
+    def map_shape(self) -> Optional[Tuple[int, int]]:
+        """Legacy access to the shared pathfinding map shape."""
+        return self.pathfinding.map_shape
+
+    @property
+    def pool(self) -> Any:
+        """Legacy access to the pathfinding worker pool."""
+        return self.pathfinding.pool
+
+    @property
+    def pool_sem(self) -> Any:
+        """Legacy access to the pathfinding submission semaphore."""
+        return self.pathfinding.pool_sem
+
+    @property
+    def known_roughness(self) -> np.ndarray:
+        """Compatibility access to mission terrain roughness."""
+        return self.terrain_knowledge.roughness
+
+    @property
+    def terrain_confidence(self) -> np.ndarray:
+        """Compatibility access to mission terrain confidence."""
+        return self.terrain_knowledge.confidence
+
+    @property
+    def terrain_lock(self) -> Any:
+        """Compatibility access to the mission terrain lock."""
+        return self.terrain_knowledge.lock
+
+    @property
+    def floor_mask(self) -> np.ndarray:
+        """Compatibility access to the mission cave floor mask."""
+        return self.terrain_knowledge.floor_mask
+
+    @property
+    def floor_cells(self) -> int:
+        """Compatibility access to the mission floor-cell count."""
+        return max(1, self.terrain_knowledge.floor_cells)

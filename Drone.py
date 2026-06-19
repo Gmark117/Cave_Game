@@ -1,35 +1,28 @@
 """Drone agent for the Cave Explorer simulation.
 
-Provides the `Drone` class which implements simple frontier exploration
-and vision rendering. Type hints are added for clarity while keeping
-runtime imports permissive to avoid circular dependencies.
+Provides the `Drone` state object and compatibility facade. Exploration,
+sensing, and drawing are delegated to focused controller/renderer classes.
 """
 
-import math
-import time
 import random as rand
 import threading
-from typing import List, Tuple
+from typing import List, Tuple, TYPE_CHECKING
 
 import numpy as np
-import pygame
 
-from asset_config.helpers import next_cell_coords
-from asset_config.rendering import Colors
 from Graph import Graph
-from RoughnessSampler import RoughnessSampler
-from SlamMap import SlamMap, FREE
-from VisionSensor import VisionSensor
+from SlamMap import SlamMap
+from agents.drone_movement import DroneMovementController
+from mapping.drone_sensor import DroneSensorController
+from mapping.terrain_knowledge import TerrainKnowledge, TerrainSnapshot
+from rendering.agent_renderer import DroneRenderer
+
+if TYPE_CHECKING:
+    import pygame
 
 
 class Drone:
-    """Autonomous aerial agent that explores the cave using frontier search.
-
-    The `Drone` maintains a local exploration graph, a transparent surface
-    storing explored areas, and methods to move, cast vision rays and
-    render its state. Types are kept permissive for `game` and `control`
-    to avoid circular imports.
-    """
+    """Autonomous agent state shared by movement, mapping, and rendering."""
 
     def __init__(self, game, control, id: int, start_pos: Tuple[int, int],
                  color: Tuple[int, int, int], icon: 'pygame.Surface', cave: list) -> None:
@@ -61,41 +54,24 @@ class Drone:
         # Vision cone alpha set to 128 for semi-transparency
         self.alpha = 128
         self.icon = icon
-        self.vision_overlay = pygame.Surface(self.game.window.get_size(), pygame.SRCALPHA)
 
         # State and lifecycle
         self.battery = 100
         self.statuses = ['Ready', 'Deployed', 'Sharing', 'Homing', 'Charging', 'Done']
         self.explored = False
 
-        # Transparent surface used to track the explored path
-        self.floor_surf = pygame.Surface((self.game.width, self.game.height), pygame.SRCALPHA)
-        self.floor_surf.fill((*Colors.WHITE.value, 0))
         self.ray_points = []
         self.delay = self.control.delay
 
-        # Rendering / motion configuration
+        # Presentation and traversal configuration
         self.show_path = True
         self.show_vision = True
         self.speed_factor = 4
-        self.scan_interval = float(getattr(self.settings, 'slam_scan_interval', 0.25))
-        self.last_scan_time = 0.0
-        self.scan_rays = int(getattr(self.settings, 'slam_scan_rays', 60))
-        self.border_retry_cooldown = 1.5
-        self.border_retry_until: dict[Tuple[int, int], float] = {}
-        self.frontier_rebuild_cooldown = float(getattr(self.settings, 'frontier_rebuild_cooldown', 0.25))
-        self.last_frontier_rebuild = 0.0
-        self.frontier_stride = int(getattr(self.settings, 'frontier_stride', 4))
-        self.frontier_confidence_threshold = float(getattr(self.settings, 'frontier_confidence_threshold', 0.6))
 
         # Local terrain knowledge (distributed mapping)
-        self.known_roughness = np.full(np.asarray(self.cave).shape, -1.0, dtype=np.float32)
-        self.terrain_confidence = np.zeros(np.asarray(self.cave).shape, dtype=np.float32)
-        self.terrain_lock = threading.Lock()
+        self.terrain_knowledge = TerrainKnowledge(self.cave)
         self.slam_lock = threading.Lock()
         self.exploration_lock = threading.Lock()
-        self.last_share_time = 0.0
-        self.share_interval = 0.5
 
         # Exploration bookkeeping
         self.border = []
@@ -106,15 +82,15 @@ class Drone:
         self.returning_home = False
         self.done = False
         self.heading_deg = 0.0
-        self.last_pos = start_pos
 
         # SLAM state
         map_h = len(self.cave)
         map_w = len(self.cave[0]) if map_h else 0
         max_points = int(getattr(self.settings, 'slam_point_cloud_max_points', 6000))
         self.slam_map = SlamMap(map_h, map_w, max_points=max_points)
-        self.vision_sensor = VisionSensor(self.cave, fov_deg=60.0, num_rays=self.scan_rays, step=2)
-        self.roughness_sampler = RoughnessSampler(self.control.terrain_roughness, self.cave)
+        self.movement_controller = DroneMovementController(self)
+        self.sensor_controller = DroneSensorController(self)
+        self.renderer = DroneRenderer(self)
 
     
     def calculate_radius(self) -> int:
@@ -131,389 +107,88 @@ class Drone:
         
     
     def move(self) -> None:
-        """Main movement loop invoked by `MissionControl` threads.
-
-        Repeatedly attempts to find a new frontier direction; if none are
-        available, tries to reach a stored border pixel using pathfinding.
-        """
-        if self.done:
-            return
-
-        # Once exploration is exhausted, return to the start point
-        if self.returning_home or (self.explored and not self.border):
-            self.returning_home = True
-            if self.reach_start_point():
-                self.done = True
-            return
-
-        node_found = False
-        while not node_found:
-            try:
-                # Find all valid directions
-                valid_dirs, valid_targets, chosen_target = self.find_new_node()
-            except AssertionError:
-                # If no valid directions, update borders and try to reach the nearest border
-                self.update_borders()
-                node_found = self.reach_border()
-                if not node_found:
-                    # Yield control to avoid busy-looping in dead-ends
-                    return
-            else:
-                # Otherwise move in one of the valid directions
-                node_found = self.explore(valid_dirs, valid_targets, chosen_target)
+        """Compatibility wrapper for the exploration state machine."""
+        self.movement_controller.move()
 
 
     def reach_start_point(self) -> bool:
-        """Return the drone to `start_pos` using A* pathfinding.
-
-        Returns True when the drone is back at the starting position,
-        otherwise False.
-        """
-        if self.pos == self.start_pos:
-            return True
-
-        path: List[Tuple[int, int]] = []
-        if hasattr(self.control, 'compute_path'):
-            path = self.control.compute_path(self.pos, self.start_pos)
-
-        if not path:
-            return False
-
-        for node in path:
-            prev = self.pos
-            self.pos = node
-            self._update_heading(prev, self.pos)
-            self.graph.add_node(node)
-            if hasattr(self.control, 'mission_event'):
-                self.control.mission_event.wait(self.delay / self.speed_factor)
-            else:
-                time.sleep(self.delay / self.speed_factor)
-
-        return self.pos == self.start_pos
+        """Compatibility wrapper for homing behavior."""
+        return self.movement_controller.reach_start_point()
     
     
     def find_new_node(self) -> Tuple[List[int], List[Tuple[int, int]], Tuple[int, int]]:
-        """Scan 360 degrees and return (valid_dirs, valid_targets, chosen_target).
-
-        Raises `AssertionError` if no valid directions exist.
-        """
-        # 360-degree radar scan
-        directions = 360
-
-        # Initialize all possible directions and target positions
-        all_dirs = list(range(directions)) 
-        targets  = []
-        dir_res  = int(360/len(all_dirs))  # Resolution for each direction
-
-        # Initialize target positions
-        for _ in range(len(all_dirs)):
-            targets.append([0,0])
-
-        # Blacklist directions that are not valid
-        dir_blacklist = []
-        for i in all_dirs:
-            # Calculate the target pixel in the current direction
-            targets[i][0], targets[i][1] = next_cell_coords(*self.pos, self.radius + 1, i*dir_res)
-            
-            # Check if the target is valid 
-            if not self.graph.is_valid(self.floor_surf, self.pos, (*targets[i],)):
-                # Add invalid directions to blacklist
-                dir_blacklist.append(i)
-
-        # Filter valid directions
-        valid_dirs    = [dir for dir in all_dirs if dir not in dir_blacklist]
-        valid_targets = [(*targets[valid_dir],) for valid_dir in valid_dirs]
-
-        # Assert that there is at least one valid direction to proceed
-        assert valid_dirs
-
-        # Randomly choose a valid direction and target
-        self.dir = rand.choice(valid_dirs)
-        target = next_cell_coords(*self.pos, self.step, self.dir)
-        while not self.graph.is_valid(self.floor_surf, self.pos, target, step=True):
-            valid_dirs.remove(self.dir)
-            valid_targets.remove((*targets[self.dir],))
-            assert valid_dirs
-            self.dir = rand.choice(valid_dirs)
-            target = next_cell_coords(*self.pos, self.step, self.dir)
-        return valid_dirs, valid_targets, target
+        """Compatibility wrapper for local direction selection."""
+        return self.movement_controller.find_new_node()
 
 
     def explore(self, valid_dirs: List[int], valid_targets: List[Tuple[int, int]], chosen_target: Tuple[int, int]) -> bool:
-        """Attempt exploration toward `chosen_target`.
-
-        Uses `MissionControl.compute_path` when available. Returns True on
-        successful traversal, False if no path was found.
-        """
-        # Flag to indicate whether the exploration has begun
-        self.explored = True
-        # Log the direction chosen
-        self.dir_log.append(self.dir)
-        # Add unexplored pixels to the border list (each pixel only added once)
-        self.border.extend(valid_targets)
-        # Use set to deduplicate; convert back to list of tuples
-        self.border = list(set(self.border))
-        # Remove the explored direction
-        valid_dirs.remove(self.dir)
-
-        # Compute path to chosen target using MissionControl worker pool
-        path = []
-        if hasattr(self.control, 'compute_path'):
-            path = self.control.compute_path(self.pos, chosen_target)
-
-        # If no path found, return False to trigger boundary handling
-        if not path:
-            return False
-
-        # Follow the path step-by-step
-        for node in path:
-            prev = self.pos
-            self.pos = node
-            self._update_heading(prev, self.pos)
-            self.graph.add_node(node)
-            if hasattr(self.control, 'mission_event'):
-                # Use Event.wait for interruptible sleeping
-                self.control.mission_event.wait(self.delay / self.speed_factor)
-            else:
-                time.sleep(self.delay / self.speed_factor)
-
-        return True
+        """Compatibility wrapper for exploration traversal."""
+        return self.movement_controller.explore(
+            valid_dirs,
+            valid_targets,
+            chosen_target,
+        )
     
     
     def reach_border(self) -> bool:
-        """Use A* to reach the nearest saved border pixel.
-
-        Returns True if a path was followed to the border pixel, False
-        otherwise.
-        """
-        self.border.sort(key=self.get_distance)  # Sort border pixels by distance
-
-        if not self.border:
-            self._maybe_rebuild_frontiers()
-            if not self.border:
-                return False
-
-        # Try multiple candidate border pixels (nearest first)
-        now = time.perf_counter()
-        for target in list(self.border):
-            if target == self.pos:
-                continue
-            retry_at = self.border_retry_until.get(target, 0.0)
-            if now < retry_at:
-                continue
-
-            path: List[Tuple[int, int]] = []
-            if hasattr(self.control, 'compute_path'):
-                path = self.control.compute_path(self.pos, target)
-
-            # Accept only meaningful paths (more than current position)
-            if not path or len(path) <= 1:
-                self.border_retry_until[target] = now + self.border_retry_cooldown
-                continue
-
-            for node in path:
-                prev = self.pos
-                self.pos = node
-                self._update_heading(prev, self.pos)
-                self.graph.add_node(node)
-                if hasattr(self.control, 'mission_event'):
-                    self.control.mission_event.wait(self.delay / self.speed_factor)
-                else:
-                    time.sleep(self.delay / self.speed_factor)
-
-            # Reached candidate; remove it from border and continue exploration
-            if target in self.border:
-                self.border.remove(target)
-            self.border_retry_until.pop(target, None)
-            return True
-
-        return False
+        """Compatibility wrapper for frontier navigation."""
+        return self.movement_controller.reach_border()
     
     
     def update_borders(self) -> None:
-        """Rebuild frontier targets using SLAM data every 4 cells."""
-        self._maybe_rebuild_frontiers()
+        """Compatibility wrapper for frontier rebuilding."""
+        self.movement_controller.update_borders()
 
     def _maybe_rebuild_frontiers(self) -> bool:
-        """Rebuild frontiers if the cooldown has elapsed."""
-        now = time.perf_counter()
-        if (now - self.last_frontier_rebuild) < self.frontier_rebuild_cooldown:
-            return False
-        self.last_frontier_rebuild = now
-        self._rebuild_frontiers(
-            stride=max(1, self.frontier_stride),
-            confidence_threshold=self.frontier_confidence_threshold
-        )
-        return True
+        """Compatibility wrapper for cooldown-limited frontier rebuilding."""
+        return self.movement_controller.maybe_rebuild_frontiers()
 
     def _rebuild_frontiers(self, stride: int = 4, confidence_threshold: float = 0.6) -> None:
-        """Extract frontier cells from SLAM occupancy and terrain confidence."""
-        with self.slam_lock:
-            occ = self.slam_map.occupancy.copy()
-            conf = self.slam_map.confidence.copy()
-
-        h, w = occ.shape
-        cave_arr = np.asarray(self.cave)
-        terrain_conf = np.asarray(self.terrain_confidence)
-        floor_mask = cave_arr == 0
-
-        known_mask = (conf >= confidence_threshold) | (terrain_conf > 0.0)
-        free_known = floor_mask & known_mask & (occ == FREE)
-        unknown = floor_mask & (~known_mask)
-
-        neighbor_unknown = np.zeros_like(unknown, dtype=bool)
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                ys_src = slice(max(0, -dy), h - max(0, dy))
-                ys_dst = slice(max(0, dy), h - max(0, -dy))
-                xs_src = slice(max(0, -dx), w - max(0, dx))
-                xs_dst = slice(max(0, dx), w - max(0, -dx))
-                neighbor_unknown[ys_dst, xs_dst] |= unknown[ys_src, xs_src]
-
-        frontier_mask = free_known & neighbor_unknown
-        stride = max(1, int(stride))
-        if stride > 1:
-            sampled = frontier_mask[::stride, ::stride]
-            ys, xs = np.where(sampled)
-            ys = ys * stride
-            xs = xs * stride
-        else:
-            ys, xs = np.where(frontier_mask)
-
-        frontiers = [(int(x), int(y)) for y, x in zip(ys, xs)]
-
-        with self.exploration_lock:
-            self.border = frontiers
-            self.border_retry_until = {}
+        """Compatibility wrapper for frontier extraction."""
+        self.movement_controller.rebuild_frontiers(
+            stride,
+            confidence_threshold,
+        )
 
     
     def mission_completed(self) -> bool:
-        """Check if the exploration mission is complete."""
-        # Verify that the mission cannot be completed if it has never been explored
-        if not self.explored:
-            return False
-
-        # Exploration finished: trigger homing, then complete only at start
-        if not self.border and not self.done:
-            self.returning_home = True
-            return False
-
-        if self.done:
-            print(f"Drone {self.id} has completed the mission!")
-            return True  # Mission completed
-
-        return False
+        """Compatibility wrapper for movement completion state."""
+        return self.movement_controller.mission_completed()
     
     
     def get_distance(self, target: Tuple[int, int]) -> float:
-        dist = math.dist(self.pos, target)
-        # Discard targets within the current vision circle by returning a large value
-        return float(self.game.width) if dist <= self.radius else dist
+        """Compatibility wrapper for frontier distance ordering."""
+        return self.movement_controller.get_distance(target)
 
-# =============================================================================
-# Drone drawing methods (vision and path)
-# =============================================================================
-    
     def draw_path(self) -> None:
-        """Render the A* path on `floor_surf` and blit it to the window."""
-        with self.exploration_lock:
-            # Draw the A* path as a polyline
-            for i in range(1, len(self.graph.pos)):
-                pygame.draw.line(self.floor_surf, (*self.color, 255), self.graph.pos[i], self.graph.pos[i - 1], 2)
-
-        # Draw the starting point marker
-        self.start_surf = pygame.Surface((12, 12), pygame.SRCALPHA)
-        pygame.draw.circle(self.start_surf, (*Colors.BLUE.value, 255), (6, 6), 6)
-
-        # Blit the explored path surface and the starting point onto the game window
-        if self.show_path:
-            with self.exploration_lock:
-                self.game.window.blit(self.floor_surf, (0, 0))
-        self.game.window.blit(self.start_surf, (self.start_pos[0] - 6, self.start_pos[1] - 6))
+        """Compatibility wrapper for path rendering."""
+        self.renderer.draw_path()
     
     
+    def update_sensors(self) -> None:
+        """Update local SLAM and terrain knowledge without rendering."""
+        self.sensor_controller.update()
+
     def scan_terrain(self, ray_hits: List[object]) -> None:
-        """Sample terrain roughness along visible rays and update local terrain maps."""
-        if not hasattr(self.control, 'terrain_roughness'):
-            return
-        terrain = self.control.terrain_roughness
-        if terrain.shape != np.asarray(self.cave).shape:
-            return
+        """Compatibility wrapper for terrain sampling from supplied ray hits."""
+        self.sensor_controller.scan_terrain(ray_hits)
 
-        now = time.perf_counter()
-        if (now - self.last_scan_time) < self.scan_interval:
-            return
-        self.last_scan_time = now
-
-        self.roughness_sampler.terrain_roughness = terrain
-        samples = self.roughness_sampler.sample_from_rays(self.pos, ray_hits)
-        self._record_local_terrain_scan(samples)
-        if hasattr(self.control, 'record_terrain_scan'):
-            self.control.record_terrain_scan(samples)
-
-
-    def _record_local_terrain_scan(self, samples: List[Tuple[int, int, float, float]]) -> None:
-        """Fuse terrain observations into this drone's local knowledge maps."""
-        if not samples:
-            return
-        
-        with self.terrain_lock:
-            for x, y, roughness, confidence in samples:
-                xi = int(x)
-                yi = int(y)
-                if yi < 0 or yi >= self.known_roughness.shape[0] or xi < 0 or xi >= self.known_roughness.shape[1]:
-                    continue
-                if self.cave[yi][xi] != 0:
-                    continue
-                
-                obs_conf = float(np.clip(confidence, 0.05, 1.0))
-                obs_roughness = float(np.clip(roughness, 0.0, 1.0))
-                prev_conf = float(self.terrain_confidence[yi, xi])
-                prev_value = float(self.known_roughness[yi, xi]) if prev_conf > 0 else obs_roughness
-                total_conf = prev_conf + obs_conf
-                blended = ((prev_value * prev_conf) + (obs_roughness * obs_conf)) / total_conf
-                
-                self.known_roughness[yi, xi] = blended
-                self.terrain_confidence[yi, xi] = min(1.0, total_conf)
+    def _record_local_terrain_scan(
+        self, samples: List[Tuple[int, int, float, float]]
+    ) -> None:
+        """Compatibility wrapper for local terrain fusion."""
+        self.sensor_controller.record_local_scan(samples)
     
     def merge_terrain_data(self, other_roughness: np.ndarray, other_confidence: np.ndarray) -> None:
-        """Merge terrain data from another drone into this drone's maps.
-        
-        Uses weighted averaging: cells with higher confidence in either map
-        are weighted more heavily.
-        """
+        """Compatibility wrapper for terrain-knowledge merging."""
         if other_roughness is None or other_confidence is None:
             return
-        
-        with self.terrain_lock:
-            h = min(self.known_roughness.shape[0], other_roughness.shape[0])
-            w = min(self.known_roughness.shape[1], other_roughness.shape[1])
-            if h <= 0 or w <= 0:
-                return
-
-            target_rough = self.known_roughness[:h, :w]
-            target_conf = self.terrain_confidence[:h, :w]
-            source_rough = np.clip(other_roughness[:h, :w], 0.0, 1.0)
-            source_conf = np.clip(other_confidence[:h, :w], 0.0, 1.0)
-            floor = (np.asarray(self.cave)[:h, :w] == 0)
-
-            valid = floor & (source_conf > 0.0)
-            if not np.any(valid):
-                return
-
-            self_conf_vals = target_conf[valid]
-            source_conf_vals = source_conf[valid]
-            source_rough_vals = source_rough[valid]
-            self_rough_vals = target_rough[valid]
-
-            base_self = np.where(self_conf_vals > 0.0, self_rough_vals, source_rough_vals)
-            total = self_conf_vals + source_conf_vals
-            blended = ((base_self * self_conf_vals) + (source_rough_vals * source_conf_vals)) / np.maximum(total, 1e-6)
-
-            target_rough[valid] = blended
-            target_conf[valid] = np.minimum(1.0, total)
+        self.terrain_knowledge.merge_from(
+            TerrainSnapshot(
+                np.asarray(other_roughness, dtype=np.float32),
+                np.asarray(other_confidence, dtype=np.float32),
+            )
+        )
 
     def merge_exploration_data(
         self,
@@ -539,30 +214,13 @@ class Drone:
         self.update_borders()
 
     
+    def draw_vision_overlay(self) -> None:
+        """Compatibility wrapper for vision-overlay rendering."""
+        self.renderer.draw_vision_overlay()
+
     def draw_vision(self) -> None:
-        """Render the drone's vision cone by casting multiple sensor rays.
-
-        Uses `cast_ray` to collect hit points; if enough points are found a
-        filled polygon is rendered to visually represent the agent's FOV.
-        """
-        ray_hits = self.vision_sensor.cast_cone(self.pos, self.heading_deg)
-        self.ray_points = [hit.end for hit in ray_hits]
-
-        with self.slam_lock:
-            self.slam_map.update_from_rays(self.pos, ray_hits)
-        self.scan_terrain(ray_hits)
-
-        if not self.show_vision:
-            return
-
-        self.vision_overlay.fill((0, 0, 0, 0))
-        if len(self.ray_points) > 1:
-            points = [self.pos] + self.ray_points
-            pygame.draw.polygon(self.vision_overlay, (*self.color, self.alpha), points)
-        else:
-            pygame.draw.circle(self.vision_overlay, (*self.color, self.alpha), (int(self.pos[0]), int(self.pos[1])), 12, 1)
-
-        self.game.window.blit(self.vision_overlay, (0, 0))
+        """Compatibility alias for the pure vision-overlay draw method."""
+        self.draw_vision_overlay()
 
 
     def toggle_path(self) -> None:
@@ -576,10 +234,84 @@ class Drone:
       
     
     def draw_icon(self) -> None:
-        """Blit the drone `icon` centered on the agent position."""
-        icon_width, icon_height = self.icon.get_size()
-        icon_position = (int(self.pos[0] - icon_width // 2), int(self.pos[1] - icon_height // 2))
-        self.game.window.blit(self.icon, icon_position)
+        """Compatibility wrapper for icon rendering."""
+        self.renderer.draw_icon()
+
+    @property
+    def floor_surf(self):
+        """Legacy access to the renderer-owned path surface."""
+        return self.renderer.path_surface
+
+    @property
+    def vision_overlay(self):
+        """Legacy access to the renderer-owned vision surface."""
+        return self.renderer.vision_surface
+
+    @property
+    def known_roughness(self) -> np.ndarray:
+        """Compatibility access to local terrain roughness."""
+        return self.terrain_knowledge.roughness
+
+    @property
+    def terrain_confidence(self) -> np.ndarray:
+        """Compatibility access to local terrain confidence."""
+        return self.terrain_knowledge.confidence
+
+    @property
+    def terrain_lock(self):
+        """Compatibility access to the local terrain lock."""
+        return self.terrain_knowledge.lock
+
+    @property
+    def border_retry_cooldown(self) -> float:
+        return self.movement_controller.border_retry_cooldown
+
+    @border_retry_cooldown.setter
+    def border_retry_cooldown(self, value: float) -> None:
+        self.movement_controller.border_retry_cooldown = value
+
+    @property
+    def border_retry_until(self) -> dict[Tuple[int, int], float]:
+        return self.movement_controller.border_retry_until
+
+    @border_retry_until.setter
+    def border_retry_until(
+        self,
+        value: dict[Tuple[int, int], float],
+    ) -> None:
+        self.movement_controller.border_retry_until = value
+
+    @property
+    def frontier_rebuild_cooldown(self) -> float:
+        return self.movement_controller.frontier_rebuild_cooldown
+
+    @frontier_rebuild_cooldown.setter
+    def frontier_rebuild_cooldown(self, value: float) -> None:
+        self.movement_controller.frontier_rebuild_cooldown = value
+
+    @property
+    def last_frontier_rebuild(self) -> float:
+        return self.movement_controller.last_frontier_rebuild
+
+    @last_frontier_rebuild.setter
+    def last_frontier_rebuild(self, value: float) -> None:
+        self.movement_controller.last_frontier_rebuild = value
+
+    @property
+    def frontier_stride(self) -> int:
+        return self.movement_controller.frontier_stride
+
+    @frontier_stride.setter
+    def frontier_stride(self, value: int) -> None:
+        self.movement_controller.frontier_stride = value
+
+    @property
+    def frontier_confidence_threshold(self) -> float:
+        return self.movement_controller.frontier_confidence_threshold
+
+    @frontier_confidence_threshold.setter
+    def frontier_confidence_threshold(self, value: float) -> None:
+        self.movement_controller.frontier_confidence_threshold = value
 
     def merge_slam_map(self, other_map: SlamMap) -> None:
         """Merge another drone's SLAM map into this one."""
@@ -589,9 +321,5 @@ class Drone:
             self.slam_map.merge_from(other_map)
 
     def _update_heading(self, prev: Tuple[int, int], curr: Tuple[int, int]) -> None:
-        dx = curr[0] - prev[0]
-        dy = curr[1] - prev[1]
-        if dx == 0 and dy == 0:
-            return
-        angle = math.degrees(math.atan2(dx, -dy))
-        self.heading_deg = angle
+        """Compatibility wrapper for heading updates."""
+        self.movement_controller.update_heading(prev, curr)

@@ -13,6 +13,8 @@ class SimSettings:
     slam_scan_rays: int = 60
     slam_point_cloud_max_points: int = 6000
     slam_render_point_tail: int = 400
+    slam_render_interval: float = 0.1
+    rover_share_interval: float = 0.5
     frontier_stride: int = 4
     frontier_confidence_threshold: float = 0.6
     frontier_rebuild_cooldown: float = 0.25

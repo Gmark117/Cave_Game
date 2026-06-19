@@ -16,9 +16,10 @@ class Colors(Enum):
     GREENDARK = (117, 132, 104)
     YELLOW = (255, 255, 51)
     RED = (255, 0, 0)
-    GREEN = (51, 255, 51)
+    GREEN = (32, 162, 32)
     GREY = (100, 100, 100)
     BLUE = (0, 0, 153)
+    OCHRE = (213, 133, 33)
 
 
 class DroneColors(Enum):
