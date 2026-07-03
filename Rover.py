@@ -9,6 +9,7 @@ from typing import Tuple, List, Optional, TYPE_CHECKING
 
 from Graph import Graph
 from mapping.terrain_knowledge import TerrainKnowledge
+from mission.service_dependencies import RoverNavigationDependencies
 from rendering.agent_renderer import RoverRenderer
 
 if TYPE_CHECKING:
@@ -27,10 +28,13 @@ class Rover:
         self.game     = game
         self.settings = game.sim_settings
         self.cave     = cave
-        self.control  = control
+        self.navigation = RoverNavigationDependencies(
+            rover_targets=control.rover_targets,
+            compute_rover_path=control.compute_rover_path,
+        )
          
         self.id       = id # Unique identifier of the drone
-        self.map_size = self.settings.map_dim # Map dimension
+        self.map_size = self.settings.mission_config.map_dim # Map dimension
         self.radius   = self.calculate_radius() # Radius that represent the field of view # 39
         self.step     = 10 # Step of the drone
         self.dir      = rand.randint(0,359)
@@ -43,7 +47,7 @@ class Rover:
         self.status = 'Ready'
         
         self.ray_points = []  # Initialize the list for rays
-        self.delay      = self.control.delay
+        self.delay      = control.delay
 
         self.show_path    = True
         self.speed_factor = 4
@@ -83,55 +87,25 @@ class Rover:
 
             if not self.current_path:
                 self.status = 'Done'
-                if hasattr(self.control, 'release_rover_target'):
-                    self.control.release_rover_target(self.id, completed=True)
+                self.navigation.rover_targets.release(
+                    self.id,
+                    completed=True,
+                )
                 self.target = None
             return
 
         self.status = 'Updating'
-        if not hasattr(self.control, 'acquire_rover_target') or not hasattr(self.control, 'compute_rover_path'):
-            return
-
-        target = self.control.acquire_rover_target(self.id, self.pos)
+        target = self.navigation.rover_targets.acquire(self.id, self.pos)
         if target is None:
             self.status = 'Ready'
             return
 
-        path = self.control.compute_rover_path(self.pos, target)
+        path = self.navigation.compute_rover_path(self.pos, target)
         if len(path) <= 1:
-            self.control.release_rover_target(self.id, completed=False)
+            self.navigation.rover_targets.release(self.id, completed=False)
             self.status = 'Ready'
             return
 
         self.target = target
         self.current_path = path[1:]
         self.status = 'Advancing'
-
-
-    def draw_path(self) -> None:
-        """Compatibility wrapper for path rendering."""
-        self.renderer.draw_path()
-
-    def draw_icon(self) -> None:
-        """Compatibility wrapper for icon rendering."""
-        self.renderer.draw_icon()
-
-    @property
-    def floor_surf(self):
-        """Legacy access to the renderer-owned path surface."""
-        return self.renderer.path_surface
-
-    @property
-    def known_roughness(self):
-        """Compatibility access to local terrain roughness."""
-        return self.terrain_knowledge.roughness
-
-    @property
-    def terrain_confidence(self):
-        """Compatibility access to local terrain confidence."""
-        return self.terrain_knowledge.confidence
-
-    @property
-    def terrain_lock(self):
-        """Compatibility access to the local terrain lock."""
-        return self.terrain_knowledge.lock

@@ -13,7 +13,9 @@ The codebase is organized around a simple control chain: `main.py` creates the g
 - `navigation/pathfinding.py` owns pathfinding workers, shared memory, and mission-facing route requests.
 - `AStarPathfinder.py` contains the drone and terrain-weighted A* algorithms.
 - `Graph.py` tracks valid movement and exploration connectivity.
-- `ControlCenter.py` renders simulation status and control widgets.
+- `ControlCenter.py` is the UI façade, `ControlCenterController.py` owns timer
+  and input state, and `ControlCenterRenderer.py` owns Pygame layout and
+  drawing.
 - `PresentationAdapter.py` keeps UI state and presentation toggles isolated from mission logic.
 - `asset_config/` contains the enums and constants that keep gameplay, rendering, media, and map generation consistent.
 
@@ -59,7 +61,8 @@ The runtime flow is intentionally layered so that each file owns one part of the
 
 1. `main.py` instantiates `Game` and starts the application.
 2. `Game.py` creates the UI window, handles menu navigation, and collects mission settings.
-3. When the player starts a mission, `Game` prepares `SimSettings`, generates the cave, and constructs `MissionControl`.
+3. When the player starts a mission, `Game` prepares an immutable nested
+   `SimulationConfig`, generates the cave, and constructs `MissionControl`.
 4. `Game` calls `MissionControl.run()`, which creates agents and runtime resources, launches worker threads, and enters the main loop.
 5. A restart request cleanly shuts down that controller and constructs a new
    one over the same settings and generated cave.
@@ -73,7 +76,10 @@ circular-arrow control restarts through the same cleanup path, then `Game`
 creates fresh agents, mapping state, timers, threads, and pathfinding resources
 without regenerating the cave. The pause/play control freezes agent movement,
 mission updates, and elapsed mission time while keeping rendering and input
-responsive.
+responsive. PAUSE closes a worker barrier and returns only after every agent
+thread reaches a safe checkpoint; PLAY releases the barrier. Behavioral
+cooldowns use a pause-aware simulation clock, so wall time spent paused does
+not change sensing, sharing, or frontier timing.
 
 That separation matters because the simulation mixes three different execution models:
 
@@ -116,6 +122,13 @@ That flow is important because the game does not use a single global terrain ora
 Terrain state is represented by `TerrainKnowledge`. Mission control, every drone, and every rover own separate instances containing roughness, confidence, a floor mask, and synchronization. Drones update their local instance while the same observations are separately recorded in the mission aggregate for telemetry and combined rendering.
 
 Snapshots provide detached data for rendering and path planning. Sharing decides when knowledge moves between agents, while `TerrainKnowledge.merge_from()` provides the single confidence-weighted merge rule.
+
+Local occupancy mapping follows the same ownership pattern. Each `SlamMap`
+privately owns its occupancy grid, confidence grid, point cloud, lock, and
+monotonic version. Sensing updates it through methods; sharing, frontier
+selection, and rendering consume detached `SlamSnapshot` values. Rendering
+tracks consumed versions so an update arriving during frame composition
+remains pending for the next refresh.
 
 The distributed-semantics contract is:
 
@@ -167,7 +180,7 @@ This is why the game feels like an exploration system rather than a simple sprit
 
 The rendering path is deliberately separated from mission logic.
 
-`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. `ControlCenter.py` is responsible for the mission status display, agent statistics, and interaction widgets. `PresentationAdapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
+`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. The control-center façade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `PresentationAdapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
 
 Rendering is layered so the visual output stays readable:
 
@@ -177,14 +190,17 @@ Rendering is layered so the visual output stays readable:
 4. Agent icons
 5. Control center and stop button
 
-`MissionControl.draw()` remains as a compatibility wrapper, but runtime code delegates directly to `MissionRenderer.draw()`.
+Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 
 ## Configuration and Assets
 
 The project keeps its runtime settings and visual assets in predictable locations.
 
 - `GameConfig/options.ini` stores audio and user preference settings.
-- `GameConfig/symSettings.ini` stores the last selected simulation parameters.
+- `GameConfig/simulation.ini` stores mission, SLAM, sharing, frontier, and
+  rendering configuration in separate sections.
+- `GameConfig/symSettings.ini` is the untouched legacy fallback used only when
+  `simulation.ini` is absent.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
 - `asset_config/` provides typed constants and enums so gameplay values, colors, asset paths, and map-generation parameters stay consistent across modules.
 

@@ -1,7 +1,9 @@
 import unittest
+from dataclasses import FrozenInstanceError
 
 from POI import POI
 from SimSettings import SimSettings
+from SimulationConfig import SimulationConfig, SlamConfig
 from asset_config.gameplay import GameOptions
 from asset_config.helpers import next_cell_coords, wall_hit
 from asset_config.media import Audio, Images
@@ -40,6 +42,15 @@ class HelperAndModelTests(unittest.TestCase):
         self.assertEqual(settings.num_drones, 6)
         self.assertEqual(settings.slam_scan_rays, 24)
         self.assertEqual(settings.frontier_stride, 2)
+
+    def test_nested_simulation_config_is_immutable_and_validated(self) -> None:
+        settings = SimulationConfig(slam=SlamConfig(scan_rays=24))
+
+        self.assertEqual(settings.slam.scan_rays, 24)
+        with self.assertRaises(FrozenInstanceError):
+            settings.slam.scan_rays = 12
+        with self.assertRaises(ValueError):
+            SlamConfig(scan_rays=0)
 
     def test_configuration_resources_and_options_are_available(self) -> None:
         self.assertEqual(GameOptions.MAP_SIZE, ["Small", "Medium", "Large"])

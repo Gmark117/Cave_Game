@@ -28,17 +28,6 @@ class MapGen:
     DEFAULT_NUM_PROCESSES = 8
 
 
-class Brush(Enum):
-    """Brush types for drawing."""
-
-    ROUND = 0
-    ELLIPSE = 1
-    CHAOTIC = 2
-    DIAMOND = 3
-    OCTAGON = 4
-    RECTANGULAR = 5
-
-
 class WormInputs(Enum):
     """Map generation parameters for different cave sizes."""
 

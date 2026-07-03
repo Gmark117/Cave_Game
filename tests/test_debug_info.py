@@ -1,34 +1,32 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
-
 from mission.frame_timing import FrameProfiler
 from mission.debug_info import MissionDebugInfo
+from mission.service_dependencies import MissionDebugDependencies
 
 
 class MissionDebugInfoTests(unittest.TestCase):
     def test_build_lines_summarizes_current_mapping_state(self) -> None:
-        drones = [
+        snapshots = [
             SimpleNamespace(
-                slam_map=SimpleNamespace(dirty=True),
-                border=[(1, 1), (2, 2)],
+                frontiers=((1, 1), (2, 2)),
                 frontier_rebuild_cooldown=1.5,
                 last_frontier_rebuild=9.5,
             ),
             SimpleNamespace(
-                slam_map=SimpleNamespace(dirty=False),
-                border=[(3, 3)],
+                frontiers=((3, 3),),
                 frontier_rebuild_cooldown=2.0,
                 last_frontier_rebuild=9.0,
             ),
         ]
-        control = SimpleNamespace(
-            drones=drones,
+        dependencies = MissionDebugDependencies(
+            get_drones=lambda: [object(), object()],
             presentation=SimpleNamespace(selected_drone_heatmap_id=1),
+            dirty_map_count=lambda: 1,
+            simulation_time=lambda: 10.0,
         )
 
-        with patch("mission.debug_info.time.perf_counter", return_value=10.0):
-            lines = MissionDebugInfo(control).build_lines()
+        lines = MissionDebugInfo(dependencies).build_lines(snapshots)
 
         self.assertEqual(
             lines,
@@ -51,13 +49,15 @@ class MissionDebugInfoTests(unittest.TestCase):
                 "render": 0.03,
             },
         )
-        control = SimpleNamespace(
-            drones=[],
+        dependencies = MissionDebugDependencies(
+            get_drones=lambda: [],
             presentation=SimpleNamespace(selected_drone_heatmap_id=None),
+            dirty_map_count=lambda: 0,
+            simulation_time=lambda: 10.0,
             frame_profiler=profiler,
         )
 
-        lines = MissionDebugInfo(control).build_lines()
+        lines = MissionDebugInfo(dependencies).build_lines()
 
         self.assertEqual(
             lines[-3:],

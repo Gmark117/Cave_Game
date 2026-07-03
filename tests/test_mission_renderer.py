@@ -9,6 +9,9 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
+from agents.drone_runtime_state import DroneSnapshot
+from asset_config.rendering import Colors
+from mission.service_dependencies import MissionRendererDependencies
 from rendering.mission_renderer import MissionRenderer
 
 
@@ -24,34 +27,95 @@ class RecordingAgentRenderer:
     def __init__(self, prefix: str, events) -> None:
         self.prefix = prefix
         self.events = events
+        self.path_snapshot = None
+        self.vision_snapshot = None
+        self.icon_snapshot = None
 
-    def draw_path(self) -> None:
+    def draw_path(self, snapshot=None) -> None:
+        self.path_snapshot = snapshot
         self.events.append(f"{self.prefix}_path")
 
-    def draw_vision_overlay(self) -> None:
+    def draw_vision_overlay(self, snapshot) -> None:
+        self.vision_snapshot = snapshot
         self.events.append(f"{self.prefix}_vision")
 
-    def draw_icon(self) -> None:
+    def draw_icon(self, snapshot=None) -> None:
+        self.icon_snapshot = snapshot
         self.events.append(f"{self.prefix}_icon")
 
 
 class MissionRendererTests(unittest.TestCase):
+    @staticmethod
+    def make_dependencies(control) -> MissionRendererDependencies:
+        return MissionRendererDependencies(
+            get_window=lambda: control.game.window,
+            slam_view=getattr(control, "slam_view", SimpleNamespace(draw=lambda: None)),
+            debug_info=getattr(
+                control,
+                "debug_info",
+                SimpleNamespace(build_lines=lambda snapshots: []),
+            ),
+            get_control_center=lambda: getattr(control, "control_center", None),
+            get_drones=lambda: getattr(control, "drones", []),
+            get_rovers=lambda: getattr(control, "rovers", []),
+            presentation=getattr(
+                control,
+                "presentation",
+                SimpleNamespace(
+                    show_terrain_heatmap=False,
+                    selected_drone_heatmap_id=None,
+                ),
+            ),
+            is_paused=lambda: getattr(control, "is_paused", False),
+        )
+
     def test_draw_uses_stable_scene_layer_order(self) -> None:
         events = []
+        drone_snapshot = DroneSnapshot(
+            position=(2, 3),
+            direction=0,
+            direction_history=(),
+            path_history=((2, 3),),
+            frontiers=(),
+            returning_home=False,
+            done=False,
+            explored=True,
+            heading_deg=0.0,
+            ray_points=(),
+            battery=100,
+            show_path=True,
+            show_vision=True,
+            frontier_rebuild_cooldown=0.25,
+            last_frontier_rebuild=0.0,
+        )
+        drone_renderer = RecordingAgentRenderer("drone", events)
         drone = SimpleNamespace(
-            renderer=RecordingAgentRenderer("drone", events),
+            id=0,
+            color=(1, 2, 3),
+            snapshot=Mock(return_value=drone_snapshot),
+            renderer=drone_renderer,
         )
         rover = SimpleNamespace(
+            id=0,
+            color=(4, 5, 6),
+            battery=2400,
+            status="Ready",
             renderer=RecordingAgentRenderer("rover", events),
         )
         slam_view = SimpleNamespace(
             draw=lambda: events.append("slam"),
         )
+        build_debug_lines = Mock(
+            side_effect=lambda snapshots: events.append("debug") or ["line"],
+        )
         debug_info = SimpleNamespace(
-            build_lines=lambda: events.append("debug") or ["line"],
+            build_lines=build_debug_lines,
+        )
+        draw_control_center = Mock(
+            side_effect=lambda *args: events.append("control_center"),
         )
         control_center = SimpleNamespace(
-            draw_control_center=lambda *args: events.append("control_center"),
+            draw_control_center=draw_control_center,
         )
         control = SimpleNamespace(
             game=SimpleNamespace(window=RecordingWindow(events)),
@@ -65,7 +129,7 @@ class MissionRendererTests(unittest.TestCase):
                 selected_drone_heatmap_id=None,
             ),
         )
-        renderer = MissionRenderer(control)
+        renderer = MissionRenderer(self.make_dependencies(control))
         renderer.draw_stop_button = Mock(
             side_effect=lambda: events.append("stop"),
         )
@@ -95,6 +159,17 @@ class MissionRendererTests(unittest.TestCase):
                 "pause",
             ],
         )
+        control_center_args = draw_control_center.call_args.args
+        self.assertIsNot(control_center_args[0][0], drone)
+        self.assertIsNot(control_center_args[1][0], rover)
+        drone.snapshot.assert_called_once_with()
+        self.assertIs(drone_renderer.path_snapshot, drone_snapshot)
+        self.assertIs(drone_renderer.vision_snapshot, drone_snapshot)
+        self.assertIs(drone_renderer.icon_snapshot, drone_snapshot)
+        self.assertIs(
+            build_debug_lines.call_args.args[0][0],
+            drone_snapshot,
+        )
 
     def test_mission_button_rects_and_pixels_are_renderer_owned(self) -> None:
         window = pygame.Surface((170, 70), pygame.SRCALPHA)
@@ -102,7 +177,7 @@ class MissionRendererTests(unittest.TestCase):
             game=SimpleNamespace(window=window),
             is_paused=False,
         )
-        renderer = MissionRenderer(control)
+        renderer = MissionRenderer(self.make_dependencies(control))
 
         renderer.draw_stop_button()
         renderer.draw_restart_button()
@@ -128,8 +203,14 @@ class MissionRendererTests(unittest.TestCase):
             )
         )
         self.assertEqual(window.get_at((15, 15))[:3], (255, 0, 0))
-        self.assertEqual(window.get_at((63, 15))[:3], (230, 190, 100))
-        self.assertEqual(window.get_at((111, 15))[:3], (0, 0, 153))
+        self.assertEqual(
+            window.get_at((63, 15))[:3],
+            Colors.BLUE.value,
+        )
+        self.assertEqual(
+            window.get_at((111, 15))[:3],
+            Colors.OCHRE.value,
+        )
         self.assertEqual(
             window.get_at(renderer.stop_button_rect.center)[:3],
             (255, 255, 255),
@@ -146,7 +227,7 @@ class MissionRendererTests(unittest.TestCase):
         self.assertGreater(int(np.count_nonzero(white_restart_pixels)), 40)
         self.assertEqual(
             window.get_at(renderer.pause_button_rect.center)[:3],
-            (0, 0, 153),
+            Colors.OCHRE.value,
         )
         self.assertGreater(
             int(np.count_nonzero(pygame.surfarray.array_alpha(window))),
@@ -159,10 +240,11 @@ class MissionRendererTests(unittest.TestCase):
             game=SimpleNamespace(window=window),
             is_paused=True,
         )
-        renderer = MissionRenderer(control)
+        renderer = MissionRenderer(self.make_dependencies(control))
 
         renderer.draw_pause_button()
 
+        self.assertEqual(window.get_at((111, 15))[:3], Colors.GREEN.value)
         self.assertEqual(
             window.get_at(renderer.pause_button_rect.center)[:3],
             (255, 255, 255),

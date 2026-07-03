@@ -4,7 +4,7 @@ This guide follows the project from the executable entry point into the
 mission loop, agent threads, sensing, SLAM, terrain sharing, pathfinding, and
 UI rendering. It is intended as a first-read map for a new developer.
 
-Generated from the current worktree on 2026-06-19.
+Generated from the current worktree on 2026-06-21.
 
 ## 1. Big Picture
 
@@ -18,19 +18,22 @@ flowchart TD
     Main["main.py<br/>Game() and Game.run()"]
     Game["Game<br/>window, events, menu shell"]
     Menu["Menu<br/>settings, options, start action"]
-    Settings["SimSettings<br/>mission, map size, seed, drones, SLAM tuning"]
+    Settings["SimulationConfig<br/>mission, SLAM, sharing, frontier, rendering"]
     MapGen["MapGenerator<br/>multiprocess cave generation"]
     Mission["MissionControl<br/>mission setup and agent coordination"]
     Lifecycle["MissionControlLifecycleMixin<br/>threads, events, run loop, shutdown"]
     Factory["AgentFactory<br/>build_drones(), build_rovers()"]
-    Drones["Drone objects<br/>movement, local terrain, SLAM state"]
+    Drones["Drone objects<br/>movement and owned collaborators"]
+    Runtime["DroneRuntimeState<br/>lock, Graph, detached snapshots"]
     Movement["DroneMovementController<br/>exploration, frontiers, homing"]
+    Slam["SlamMap<br/>private grids, lock, snapshots, versions"]
     Rovers["Rover objects<br/>terrain-aware support state"]
     Knowledge["TerrainKnowledge<br/>roughness, confidence, lock, snapshots, merge"]
     Navigation["PathfindingService<br/>shared map, worker pool, route API"]
     Path["AStarPathfinder<br/>A* algorithms"]
-    Terrain["MissionControlTerrainMixin facade<br/>terrain, sharing, SLAM view services"]
-    UI["ControlCenter + PresentationAdapter<br/>controls, tabs, overlay state"]
+    Terrain["Focused mission services<br/>fusion, sharing, rover targets, SLAM view, debug"]
+    UI["ControlCenter façade + controller<br/>timer, tabs, action tokens"]
+    ControlRender["ControlCenterRenderer<br/>Pygame layout, caches, hit map"]
     Render["SlamRenderer<br/>occupancy or terrain heatmap surface"]
     SceneRender["MissionRenderer<br/>complete frame composition"]
     AgentsRender["DroneRenderer + RoverRenderer<br/>agent paths, vision, icons"]
@@ -44,7 +47,9 @@ flowchart TD
     Mission --> Lifecycle
     Mission --> Factory
     Factory --> Drones
+    Drones --> Runtime
     Drones --> Movement
+    Drones --> Slam
     Factory --> Rovers
     Mission --> Knowledge
     Drones --> Knowledge
@@ -53,6 +58,7 @@ flowchart TD
     Navigation --> Path
     Mission --> Terrain
     Mission --> UI
+    UI --> ControlRender
     Terrain --> Render
     Lifecycle --> SceneRender
     SceneRender --> Render
@@ -92,7 +98,7 @@ sequenceDiagram
         Menu->>Game: blit_screen()
     end
     Menu->>Menu: start_mission()
-    Menu->>Menu: save_symSettings()
+    Menu->>Menu: save_simulation_settings()
     Menu->>Game: start_mission()
     Game->>Menu: build_sim_settings()
     Game->>Map: MapGenerator(self, sim_settings)
@@ -114,35 +120,41 @@ Primary startup classes:
 - `Game`
   - `__init__(self) -> None`: initializes Pygame, sets window state, creates `Menu`.
   - `run(self) -> NoReturn`: repeatedly calls `self.menu.display()`.
-  - `start_mission(self) -> None`: builds `SimSettings`, creates one `MapGenerator`, then constructs and runs fresh `MissionControl` instances while restart is requested.
+  - `start_mission(self) -> None`: builds `SimulationConfig`, creates one `MapGenerator`, then constructs and runs fresh `MissionControl` instances while restart is requested.
   - `check_events(self) -> None`: converts Pygame events into key flags consumed by menus.
   - `blit_screen(self) -> None`: blits the internal display to the window and resets key flags.
 
 - `Menu`
-  - `display(self) -> None`: nested menu loop for input, draw, and blit.
-  - `build_sim_settings(self) -> SimSettings`: converts selected menu values into the runtime settings dataclass.
+  - `display(self) -> None`: stable game-facing menu loop.
+  - `build_sim_settings(self) -> SimulationConfig`: combines selected menu values with the immutable nested runtime configuration.
   - `start_mission(self) -> None`: saves settings and calls `Game.start_mission()`.
+  - delegates navigation to `MenuController`, drawing to `MenuRenderer`,
+    INI persistence to `MenuSettingsRepository`, and mixer operations to
+    `MenuAudioService`.
 
 ## 3. Menu and Settings Flow
 
-`Menu` owns the interactive setup screens and persists configuration through
-`configparser`.
+`Menu` is the façade used by `Game`. Typed row models describe each screen,
+while focused collaborators own navigation, rendering, persistence, and audio.
 
 ```mermaid
 flowchart TD
     Display["Menu.display()"]
     Events["Game.check_events()"]
-    Input["Menu._handle_global_input()"]
-    Item["MenuItem.handle_input(game)"]
-    Draw["Menu._draw()"]
+    Input["MenuController.handle_input(game)"]
+    Models["Typed menu rows"]
+    Draw["MenuRenderer.draw()"]
     Blit["Game.blit_screen()"]
     Start["Menu.start_mission()"]
-    Save["save_symSettings()"]
+    Save["MenuSettingsRepository.save_simulation()"]
+    Audio["MenuAudioService"]
     Build["build_sim_settings()"]
     GameStart["Game.start_mission()"]
 
     Display --> Events --> Input
-    Input --> Item
+    Models --> Input
+    Models --> Draw
+    Input --> Audio
     Input -->|"selected Start Mission"| Start
     Start --> Save --> GameStart --> Build
     Display --> Draw --> Blit
@@ -150,18 +162,32 @@ flowchart TD
 
 Important types and arguments:
 
-- `MenuItem.__init__(game, label, position, item_type, action=None, value=None, options=None, size=35, font_big=False, alignment='midleft', selectable=None, text_input=None)`
-  - stores per-row state for title, button, selector, text input, or slider rows.
-- `MenuItem.handle_input(game) -> bool`
-  - consumes `LEFT_KEY`, `RIGHT_KEY`, number keys, and backspace.
-  - returns `True` when the item value changed.
+- `TitleItem`, `ButtonItem`, `SelectorItem`, `TextInputItem`, `SliderItem`
+  - typed definitions replace the former optional-field `MenuItem`.
+- `MenuController`
+  - owns active screen, selected row, navigation, named actions, and value
+    changes. Both top-row and numpad digits enter seed values.
+- `MenuRenderer`
+  - owns menu backgrounds, fonts, layout, arrows, sliders, and loading-screen
+    drawing.
+- `MenuSettingsRepository`
+  - writes `simulation.ini`, prefers it when present, and imports the legacy
+    `symSettings.ini` only when the new file is absent.
+- `MenuAudioService`
+  - owns mixer initialization, music transitions, volume, and button sounds.
+- `SimulationConfig`
+  - immutable root containing `MissionConfig`, `SlamConfig`, `SharingConfig`,
+    `FrontierConfig`, and `RenderingConfig`.
 - `SimSettings`
-  - dataclass fields: `mission`, `map_dim`, `seed`, `num_drones`, `slam_scan_interval`, `slam_scan_rays`, `slam_point_cloud_max_points`, `slam_render_point_tail`, `slam_render_interval`, `rover_share_interval`, `frontier_stride`, `frontier_confidence_threshold`, `frontier_rebuild_cooldown`.
+  - compatibility constructor for older flat callers; runtime code consumes
+    nested configuration sections directly.
 
 Libraries used here:
 
 - `pygame` and `pygame.mixer`: rendering, input, fonts, audio.
-- `configparser`: reads/writes `GameConfig/options.ini` and `GameConfig/symSettings.ini`.
+- `configparser`: reads/writes `GameConfig/options.ini` and
+  `GameConfig/simulation.ini`, with read-only legacy import from
+  `GameConfig/symSettings.ini`.
 - `pathlib.Path` and `os`: asset and config paths.
 
 ## 4. Cave Generation Flow
@@ -172,46 +198,50 @@ map and roughness map that all later systems use.
 ```mermaid
 flowchart TD
     Init["MapGenerator.__init__(game, settings)"]
-    Starts["set_starts()"]
-    Bin["bin_map = all walls"]
-    Dig["dig_map(proc_num)"]
+    Gen["CaveGenerator.generate(progress)"]
+    Starts["build_worm_starts(width, height, rng)"]
+    Bin["initial map = all walls"]
+    Runner["WormProcessRunner.run(...)"]
     Shm["safe_shm_create(init_map)"]
     Workers["start_worms(shm_name, worker_count, worm_x, worm_y, worm_inputs, seed_base, targets, height, width)"]
     Worm["worm(...)<br/>carves shared map"]
     Monitor["monitor_worms(proc_list, update_callback)"]
-    Copy["copy shared map to self.bin_map"]
-    Process["process_map()"]
-    Save["save_map()"]
-    Layers["_extract_cave_layer(color_to_remove, output_key)"]
-    Rough["build_terrain_roughness()"]
+    Copy["copy shared map"]
+    Process["CavePostProcessor.process(...)"]
+    Rough["TerrainRoughnessGenerator.generate(...)"]
+    Save["MapArtifactWriter.write(bin_map)"]
 
-    Init --> Starts --> Bin --> Dig
-    Dig --> Shm --> Workers --> Worm --> Monitor --> Copy
-    Copy --> Process --> Save --> Layers --> Rough
+    Init --> Gen --> Starts --> Bin --> Runner
+    Runner --> Shm --> Workers --> Worm --> Monitor --> Copy
+    Copy --> Process --> Rough --> Save
 ```
 
-Key methods:
+Key types:
 
 - `MapGenerator.__init__(game, settings) -> None`
-  - stores display dimensions, creates deterministic `np.random.Generator`, derives `worm_inputs`, initializes `bin_map`, runs generation, saves assets, and builds `terrain_roughness`.
+  - remains the runtime facade used by `Game`.
+  - supplies loading callbacks, delegates generation, writes artifacts, and
+    exposes `bin_map`, `terrain_roughness`, `worm_x`, and `worm_y`.
 
-- `dig_map(self, proc_num: int) -> None`
-  - limits workers to `os.cpu_count()`.
-  - creates a shared-memory map using `safe_shm_create(init_map)`.
-  - starts worker processes with `start_worms(...)`.
-  - waits via `monitor_worms(proc_list, update_callback)`.
-  - copies the shared-memory result into `self.bin_map`.
-  - closes/unlinks shared memory with `safe_shm_close(shm)`.
+- `generation.CaveGenerator`
+  - creates deterministic RNG state, derives `worm_inputs`, builds worm
+    starts, runs workers, post-processes the cave, and returns a
+    `CaveGenerationResult`.
 
-- `process_map(self) -> None`
-  - applies OpenCV median blur.
-  - calls `remove_hermit_caves(image)`.
-  - merges raw and cleaned maps.
-  - calls `add_wall_transition_noise(image, width, height, seed, worm_inputs)`.
+- `generation.WormProcessRunner`
+  - limits workers to `os.cpu_count()`, owns shared-memory create/copy/cleanup,
+    starts workers, and monitors completion.
 
-- `build_terrain_roughness(self) -> None`
-  - creates a floor-only `float32` roughness map in `[0, 1]`.
-  - combines smooth noise, wall-distance bias, and clustered noise.
+- `generation.CavePostProcessor`
+  - applies median blur, removes isolated caves, preserves strong walls, and
+    adds wall-transition noise when that pass succeeds.
+
+- `generation.TerrainRoughnessGenerator`
+  - creates a floor-only `float32` roughness map in `[0, 1]` from smooth noise,
+    wall-distance bias, and clustered noise.
+
+- `generation.MapArtifactWriter`
+  - writes `map.png`, `map_matrix.txt`, `walls.png`, and `floor.png`.
 
 Important helper functions in `MapGenHelpers.py`:
 
@@ -232,10 +262,10 @@ Libraries used here:
 
 ## 5. Mission Setup
 
-`MissionControl` is the central coordinator. It inherits:
-
-- `MissionControlTerrainMixin`: compatibility facade for terrain, sharing, rover target, SLAM view, and debug services.
-- `MissionControlLifecycleMixin`: mission loop, thread startup, shutdown.
+`MissionControl` is the central coordinator. It inherits
+`MissionControlLifecycleMixin` for the mission loop, thread startup, and
+shutdown, and directly owns its focused terrain, sharing, rover-target,
+SLAM-view, and debug services.
 
 ```mermaid
 flowchart TD
@@ -246,12 +276,12 @@ flowchart TD
     Presentation["PresentationAdapter(map_w, map_h)<br/>SlamRenderer(map_w, map_h)"]
     Services["TerrainFusionService<br/>TerrainSharingService<br/>RoverTargetService<br/>SlamViewService<br/>MissionDebugInfo"]
     Navigation["PathfindingService(cave_map, agent_count)"]
-    Renderer["MissionRenderer(control)"]
+    Renderer["MissionRenderer(MissionRendererDependencies)"]
     StartPoint["set_start_point()"]
     Ready["setup-only MissionControl<br/>no agents, pool, shared memory, or loop"]
     Run["run()"]
     Window["game.to_maximised()"]
-    CC["ControlCenter(game, num_drones)"]
+    CC["ControlCenter(game)"]
     Agents["AgentFactory.build_drones(self)<br/>AgentFactory.build_rovers(self)"]
     PathStart["pathfinding.start()<br/>shared map + ProcessPoolExecutor + Semaphore"]
     Draw0["initial sensing, renderer.draw(), display update"]
@@ -267,14 +297,18 @@ Important `MissionControl.__init__(game)` setup state:
 - `self.map_matrix`: binary cave map from `game.cartographer.bin_map`.
 - `self.terrain_roughness`: source roughness map from `MapGenerator`.
 - `self.terrain_knowledge`: mission telemetry aggregate owning roughness, confidence, floor mask, and synchronization; active agent decisions must not read it.
-- `self.known_roughness`, `self.terrain_confidence`, `self.terrain_lock`, and `self.floor_mask`: compatibility properties backed by `terrain_knowledge`.
 - `self.pathfinding`: allocation-free `PathfindingService`; its worker pool and shared memory are created by `start()`.
-- `self.map_shm`, `self.map_shape`, `self.pool`, and `self.pool_sem`: compatibility properties that expose service-owned resources.
 - `self.presentation`: overlay state object.
 - `self.slam_renderer`: cached surface renderer for occupancy/roughness.
-- `self.terrain_fusion`, `self.terrain_sharing`, `self.rover_targets`, `self.slam_view`, `self.debug_info`: focused services created by `_init_terrain_services()`.
+- `self.*_dependencies`: small dependency bundles that expose only the
+  collaborators each focused service or agent controller needs. `MissionControl`
+  remains the composition root; dependencies use callables for live runtime
+  state such as agents, the window, the control center, and simulation time.
+- `self.terrain_fusion`, `self.terrain_sharing`, `self.rover_targets`,
+  `self.slam_view`, `self.debug_info`: focused services constructed directly by
+  mission setup from those dependency bundles.
 - `self.frame_profiler`: smoothed main-loop and stage timing telemetry.
-- `self.renderer`: scene-level `MissionRenderer`; `MissionControl.draw()` remains a compatibility wrapper.
+- `self.renderer`: scene-level `MissionRenderer`.
 - `self.rover_motion_enabled = False`: rover movement code exists but rover threads are disabled by default in the current code.
 
 `MissionControl.run()` initializes:
@@ -293,7 +327,9 @@ Important `MissionControl.__init__(game)` setup state:
   - creates `Drone(game, control, id, start_point, color, icon, map_matrix)` for each drone.
 
 - `AgentFactory.build_rovers(control) -> None`
-  - sets `control.num_rovers = ceil(num_drones / 4)`.
+  - creates one first-aid rover plus one charging carrier per four drones.
+  - therefore creates two rovers for three or four drones and three rovers
+    for five through eight drones.
   - loads/scales one rover icon.
   - creates `Rover(game, control, id, start_point, color, icon, map_matrix)`.
   - rover construction creates its own `TerrainKnowledge`.
@@ -317,9 +353,10 @@ flowchart TD
     Stop["square stop control or QUIT"]
     Restart["circular-arrow restart control<br/>restart_requested = True"]
     Pause["pause/play control<br/>toggle_pause()"]
+    Barrier["PauseCoordinator.pause()<br/>wait for worker checkpoints"]
     Click["presentation.handle_click(pos, control_center, drones)"]
     Active{"not paused?"}
-    ShareRovers["_share_terrain_with_rovers()"]
+    ShareRovers["terrain_sharing.share_with_rovers()"]
     Done["is_mission_over()"]
     Sensors["update_sensors()"]
     Draw["renderer.draw()"]
@@ -331,7 +368,7 @@ flowchart TD
     Loop --> Tick --> Events
     Events --> Stop
     Events --> Restart
-    Events --> Pause
+    Events --> Pause --> Barrier
     Events --> Click
     Events --> Active
     Active -->|yes| ShareRovers --> Done --> Sensors --> Draw
@@ -345,7 +382,7 @@ flowchart TD
 After shutdown, STOP and normal completion return to the windowed menu.
 RESTART leaves the display in mission mode and returns control to
 `Game.start_mission()`, which creates a fresh single-use `MissionControl`
-against the existing `SimSettings` and `MapGenerator` result.
+against the existing `SimulationConfig` and `MapGenerator` result.
 
 Key methods:
 
@@ -354,15 +391,12 @@ Key methods:
   - calls `_initialize_runtime()`.
   - creates `threading.Thread` objects for drones.
   - processes `QUIT`, stop-button clicks, and control-center clicks.
-  - calls `_share_terrain_with_rovers()`.
+  - calls `terrain_sharing.share_with_rovers()`.
   - checks completion with `is_mission_over()`.
   - calls `update_sensors()` on the main thread.
   - draws and updates display.
   - always calls `_shutdown_mission(threads)` in `finally`.
   - restores the windowed view after shutdown.
-
-- `start_mission(self) -> None`
-  - compatibility alias for `run()`.
 
 - `is_mission_over(self) -> bool`
   - returns true only if every drone reports `mission_completed()`.
@@ -386,10 +420,10 @@ Drone movement is driven by `MissionControl.drone_thread(drone_id)`.
 ```mermaid
 flowchart TD
     Thread["MissionControl.drone_thread(drone_id)"]
-    Move["Drone.move() facade"]
+    Move["Drone.move()<br/>intentional agent API"]
     Controller["DroneMovementController.move()"]
     Complete["DroneMovementController.mission_completed()"]
-    Share["_share_terrain_with_nearby_drones(drone_id)"]
+    Share["terrain_sharing.share_with_nearby_drones(drone_id)"]
     HomeCheck{"returning_home<br/>or explored and no border?"}
     Start["DroneMovementController.reach_start_point()"]
     Find["DroneMovementController.find_new_node()"]
@@ -399,7 +433,7 @@ flowchart TD
     Path["MissionControl.compute_path(start, goal)"]
     Service["PathfindingService.compute_path(start, goal)"]
     AStar["AStarPathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
-    Graph["Graph.add_node(node)"]
+    Runtime["DroneRuntimeState.move_to(node)<br/>position, heading, Graph history"]
 
     Thread --> Complete
     Thread --> Move --> Controller
@@ -408,16 +442,23 @@ flowchart TD
     HomeCheck -->|"no"| Find --> Explore --> Path
     Find -->|"no valid direction"| UpdateBorders --> ReachBorder --> Path
     Path --> Service --> AStar
-    Start --> Graph
-    Explore --> Graph
-    ReachBorder --> Graph
+    Start --> Runtime
+    Explore --> Runtime
+    ReachBorder --> Runtime
     Thread --> Share
 ```
 
 Important drone methods and arguments:
 
 - `Drone.__init__(game, control, id: int, start_pos: tuple[int, int], color: tuple[int, int, int], icon: pygame.Surface, cave: list) -> None`
-  - stores mission settings, shared agent state, local terrain arrays, locks, graph, SLAM map, and movement/sensor/renderer collaborators.
+  - stores immutable identity/configuration plus owned runtime state, terrain,
+    SLAM, movement, sensing, and rendering collaborators.
+
+- `DroneRuntimeState`
+  - owns position, heading, direction history, the `Graph`, frontiers,
+    lifecycle flags, sensor-ray endpoints, battery, overlay visibility, and
+    frontier-rebuild timing behind one lock.
+  - returns immutable `DroneSnapshot` values for every cross-thread reader.
 
 - `DroneMovementController.move() -> None`
   - if done, returns.
@@ -432,29 +473,32 @@ Important drone methods and arguments:
   - chooses a valid direction randomly.
 
 - `DroneMovementController.explore(valid_dirs, valid_targets, chosen_target) -> bool`
-  - adds valid targets to `self.border`.
-  - calls `control.compute_path(self.pos, chosen_target)`.
-  - follows the returned path, updating heading and graph history.
+  - atomically records the chosen direction and valid frontier targets.
+  - calls `control.compute_path(snapshot.position, chosen_target)`.
+  - follows the returned path through `DroneRuntimeState.move_to()`, which
+    updates position, heading, and graph history together.
 
 - `DroneMovementController.reach_border() -> bool`
-  - sorts frontiers by distance.
-  - calls `control.compute_path(self.pos, target)` for candidates.
+  - sorts detached frontier values by distance.
+  - calls `control.compute_path(snapshot.position, target)` for candidates.
   - follows the first useful path.
 
 - `DroneMovementController.reach_start_point() -> bool`
-  - calls `control.compute_path(self.pos, self.start_pos)`.
+  - calls `control.compute_path(snapshot.position, drone.start_pos)`.
   - follows path home and returns whether the drone reached start.
 
 - `DroneMovementController.rebuild_frontiers(stride=4, confidence_threshold=0.6) -> None`
   - derives frontiers from local SLAM occupancy, SLAM confidence, local terrain confidence, and cave floor mask.
 
-- `Drone.move()`, `Drone.reach_border()`, and the other former movement methods
-  - remain as compatibility wrappers around `DroneMovementController`.
+- `Drone.move()` and `Drone.mission_completed()`
+  - form the small movement-facing API used by mission orchestration.
+  - detailed exploration, homing, frontier, and heading operations are called
+    directly on `DroneMovementController`.
 
 Support methods/classes:
 
 - `Graph.__init__(x_start, y_start, cave_mat) -> None`
-  - stores visited positions and cave matrix.
+  - stores visited positions and cave matrix inside `DroneRuntimeState`.
 - `Graph.is_valid(curr_pos, candidate_pos) -> bool`
   - checks `wall_hit(...)` and `cross_obs(...)`.
 - `Graph.cross_obs(x1, y1, x2, y2) -> bool`
@@ -463,23 +507,24 @@ Support methods/classes:
 ## 8. Sensing, SLAM, and Terrain Sampling
 
 Movement remains threaded, while sensing is an explicit main-thread update.
-Rendering consumes the latest ray endpoints but does not mutate SLAM or terrain
+Sensing captures one runtime snapshot for its origin and heading. Rendering
+consumes detached snapshots and does not mutate SLAM, terrain, or runtime
 state.
 
 ```mermaid
 flowchart TD
     MissionUpdate["MissionControl.update_sensors()"]
     DroneUpdate["Drone.update_sensors()"]
-    Sensor["DroneSensorController.update()"]
+    Sensor["DroneSensorController.update()<br/>capture DroneSnapshot"]
     Cast["VisionSensor.cast_cone(origin, heading_deg)"]
     Ray["VisionSensor._cast_single_ray(origin, angle_deg)"]
-    Slam["SlamMap.update_from_rays(origin, ray_hits)"]
+    Slam["SlamMap.update_from_rays(origin, ray_hits)<br/>internally synchronized"]
     TerrainScan["DroneSensorController.scan_terrain(ray_hits)"]
     Sample["RoughnessSampler.sample_from_rays(origin, ray_hits, step=4)"]
     Local["drone.terrain_knowledge.record_samples(samples)"]
     Global["TerrainFusionService.record_scan(samples)"]
     Draw["MissionRenderer.draw()"]
-    RenderCone["drone.renderer.draw_vision_overlay()"]
+    RenderCone["drone.renderer.draw_vision_overlay(snapshot)"]
 
     MissionUpdate --> DroneUpdate --> Sensor --> Cast --> Ray
     Sensor --> Slam
@@ -493,7 +538,9 @@ Important sensing types:
   - owns the `VisionSensor`, `RoughnessSampler`, scan interval, and scan timestamp.
 
 - `DroneSensorController.update() -> None`
-  - casts rays, updates `drone.ray_points`, updates local SLAM, and triggers terrain sampling.
+  - captures one coherent position/heading snapshot.
+  - casts rays, stores endpoints through `DroneRuntimeState`, updates local
+    SLAM from the captured origin, and triggers terrain sampling.
 
 - `Drone.update_sensors() -> None`
   - delegates the simulation update to its sensor controller.
@@ -508,12 +555,17 @@ Important sensing types:
   - dataclass fields: `end`, `hit`, `distance`, `angle_deg`.
 
 - `SlamMap.__init__(map_h, map_w, max_points=6000) -> None`
-  - allocates occupancy grid, confidence grid, and sparse point cloud.
+  - privately allocates occupancy, confidence, point-cloud, lock, and version
+    state.
 
 - `SlamMap.update_from_rays(origin, ray_hits) -> None`
   - marks free cells along each ray.
   - marks the endpoint occupied when the ray hit a wall.
-  - updates point cloud and dirty flag.
+  - atomically advances the map version when owned state changes.
+
+- `SlamMap.snapshot(point_limit=None) -> SlamSnapshot`
+  - returns detached occupancy/confidence arrays, point data, and one atomic
+    version.
 
 - `RoughnessSampler.__init__(terrain_roughness, map_matrix) -> None`
   - stores source roughness and map geometry.
@@ -528,8 +580,8 @@ Important sensing types:
   - calls `drone.terrain_knowledge.record_samples(...)` for local knowledge.
   - delegates mission-global fusion to `TerrainFusionService`.
 
-- `Drone.draw_vision_overlay() -> None`
-  - draws the latest `ray_points`.
+- `DroneRenderer.draw_vision_overlay(snapshot) -> None`
+  - draws the detached ray endpoints and position from the supplied snapshot.
   - does not cast rays or update SLAM/terrain state.
 
 ## 9. Distributed Terrain and SLAM Sharing
@@ -550,14 +602,14 @@ instances. `TerrainSharingService` decides when transfers occur, while
 ```mermaid
 flowchart TD
     DroneThread["drone_thread(drone_id)"]
-    ShareDrones["_share_terrain_with_nearby_drones(drone_id)"]
+    ShareDrones["terrain_sharing.share_with_nearby_drones(drone_id)"]
     Cooldown["service-owned drone, pair, and rover cooldown state"]
     Proximity["distance and line of sight"]
-    Snapshot["TerrainKnowledge.snapshot()"]
+    Snapshot["TerrainKnowledge.snapshot()<br/>SlamMap.snapshot()"]
     Diff["maps differ enough?<br/>roughness or SLAM"]
     MergeTerrain["TerrainKnowledge.merge_from(snapshot)"]
-    MergeBorder["Drone.merge_exploration_data(other_explored_alpha, other_border)"]
-    MergeSlam["SlamMap.merge_from_arrays(occupancy, confidence, point_cloud)"]
+    MergeBorder["Drone.merge_frontiers(other_border)"]
+    MergeSlam["SlamMap.merge_from(snapshot)"]
     Dirty["presentation.terrain_heatmap_dirty = True"]
 
     DroneThread --> ShareDrones --> Cooldown --> Proximity --> Snapshot --> Diff
@@ -572,11 +624,12 @@ Key sharing methods:
   - atomically reserves pair processing so concurrent drone workers cannot
     exchange the same pair twice within one cooldown window.
   - checks distance against each drone radius.
-  - requires `_has_line_of_sight(a, b)`.
-  - compares local roughness/confidence via `_maps_differ_enough(...)`.
-  - compares SLAM occupancy/confidence via `_slam_maps_differ_enough(...)`.
+  - checks line of sight through `has_line_of_sight(a, b)`.
+  - compares local roughness/confidence via `maps_differ_enough(...)`.
+  - compares SLAM occupancy/confidence via `slam_maps_differ_enough(...)`.
   - exchanges `TerrainSnapshot` values through `TerrainKnowledge.merge_from(...)`.
-  - uses `Drone.merge_exploration_data(...)` and `SlamMap.merge_from_arrays(...)` for frontier and occupancy state.
+  - uses `Drone.merge_frontiers(...)` and `SlamMap.merge_from(...)`
+    for frontier and occupancy state.
 
 - `TerrainSharingService.maps_differ_enough(source_roughness, source_confidence, target_roughness, target_confidence) -> bool`
   - samples maps using `share_compare_stride`.
@@ -663,12 +716,12 @@ flowchart TD
     Move["Rover.move()"]
     HasPath{"current_path?"}
     Step["pop next node<br/>Graph.add_node(pos)<br/>battery -= 1"]
-    Acquire["MissionControl.acquire_rover_target(rover_id, current_pos)"]
+    Acquire["rover_targets.acquire(rover_id, current_pos)"]
     Target["roughness >= 0.35<br/>confidence >= 0.25"]
     Path["MissionControl.compute_rover_path(start, goal)"]
     Service["PathfindingService.compute_weighted_path(...)"]
     Weighted["AStarPathfinder.compute_weighted_path(...)"]
-    Release["release_rover_target(rover_id, completed)"]
+    Release["rover_targets.release(rover_id, completed)"]
 
     Thread --> Move --> HasPath
     HasPath -->|"yes"| Step --> Release
@@ -685,39 +738,43 @@ Important methods:
   - if `current_path` exists, advances one point and drains battery.
   - otherwise asks the controller for a target and terrain-aware path.
 
-- `MissionControlTerrainMixin.acquire_rover_target(rover_id, current_pos) -> tuple[int, int] | None`
+- `RoverTargetService.acquire(rover_id, current_pos) -> tuple[int, int] | None`
   - finds rough, known floor cells.
   - excludes assigned and completed targets.
   - scores by roughness, confidence, and distance.
 
-- `MissionControlTerrainMixin.release_rover_target(rover_id, completed=False) -> None`
+- `RoverTargetService.release(rover_id, completed=False) -> None`
   - releases assignment and optionally marks target complete.
 
 ## 12. Rendering and UI Flow
 
 `MissionRenderer.draw()` owns the main visual layering. It always starts with
 a black canvas and a SLAM/terrain surface rather than the ground-truth cave
-image. `MissionControl.draw()` remains as a compatibility wrapper.
-Agent-specific Pygame operations are delegated to renderer objects.
+image. Agent-specific Pygame operations are delegated directly to renderer
+objects.
 
 ```mermaid
 flowchart TD
     Draw["MissionRenderer.draw()"]
+    AgentState["capture one DroneSnapshot per drone"]
     View["SlamViewService.draw()"]
     Refresh["SlamViewService.refresh(drone_id=None)"]
     SlamRender["SlamRenderer.render(occupancy, confidence, point_cloud, draw_points, roughness, roughness_conf)"]
-    DronePaths["drone.renderer.draw_path()"]
+    DronePaths["drone.renderer.draw_path(snapshot)"]
     RoverPaths["rover.renderer.draw_path()"]
-    DroneVision["drone.renderer.draw_vision_overlay()"]
-    Icons["drone.renderer.draw_icon()<br/>rover.renderer.draw_icon()"]
-    Debug["debug_info.build_lines()"]
-    CC["control_center.draw_control_center(...)"]
+    DroneVision["drone.renderer.draw_vision_overlay(snapshot)"]
+    Icons["drone.renderer.draw_icon(snapshot)<br/>rover.renderer.draw_icon()"]
+    Debug["debug_info.build_lines(snapshots)"]
+    Status["build detached DroneStatusView<br/>and RoverStatusView tuples"]
+    FrameModel["ControlCenter façade builds<br/>ControlCenterViewModel"]
+    CCRender["ControlCenterRenderer.render(view)<br/>returns ControlHitMap"]
     Stop["MissionRenderer.draw_stop_button()"]
 
+    Draw --> AgentState
     Draw --> View
-    View -->|"dirty and slam_render_interval elapsed"| Refresh --> SlamRender
-    Draw --> DronePaths --> RoverPaths --> DroneVision --> Icons
-    Draw --> Debug --> CC --> Stop
+    View -->|"snapshot version newer than rendered version<br/>and interval elapsed"| Refresh --> SlamRender
+    AgentState --> DronePaths --> RoverPaths --> DroneVision --> Icons
+    Draw --> Debug --> Status --> FrameModel --> CCRender --> Stop
 ```
 
 Overlay state and click flow:
@@ -726,40 +783,71 @@ Overlay state and click flow:
 flowchart TD
     Mouse["Pygame MOUSEBUTTONDOWN"]
     Presentation["PresentationAdapter.handle_click(mouse_pos, control_center, drones)"]
-    CCClick["ControlCenter.handle_click(mouse_pos, drone_objects)"]
-    Global["toggle_terrain_heatmap()"]
-    DroneHeat["toggle_drone_heatmap(drone_id)"]
-    DroneOverlay["drone.toggle_path() or drone.toggle_vision()"]
-    Visibility["update show_path and show_vision flags"]
+    CCClick["ControlCenter.handle_click(mouse_pos)"]
+    Controller["ControlCenterController interprets<br/>latest ControlHitMap"]
+    Global["toggle_terrain_heatmap(drones)"]
+    DroneHeat["toggle_drone_heatmap(drone_id, drones)"]
+    DroneOverlay["toggle_drone_path/vision(drone_id, drones)"]
+    Visibility["PresentationAdapter derives show_path/show_vision"]
     Dirty["terrain_heatmap_dirty = True"]
 
-    Mouse --> Presentation --> CCClick
-    CCClick --> Global --> Visibility --> Dirty
-    CCClick --> DroneHeat --> Visibility --> Dirty
-    CCClick --> DroneOverlay
+    Mouse --> Presentation --> CCClick --> Controller
+    Controller --> Global --> Visibility --> Dirty
+    Controller --> DroneHeat --> Visibility --> Dirty
+    Controller --> DroneOverlay
 ```
 
 Important UI classes:
 
 - `PresentationAdapter(map_w, map_h)`
   - stores `show_terrain_heatmap`, `selected_drone_heatmap_id`, `terrain_heatmap_dirty`, and a heatmap surface.
-  - routes click results from `ControlCenter.handle_click(...)`.
+  - solely owns heatmap selection and path/vision visibility transitions.
+  - resets presentation state when runtime agents are created.
+  - routes action tokens from the hit-testing-only `ControlCenter.handle_click(...)`.
 
-- `ControlCenter(game, num_drones)`
-  - owns control-panel geometry, tab state, cached fonts/surfaces, and interactive rectangles.
-  - exposes `draw_control_center(drone_objects, rover_objects=None, show_terrain_heatmap=True, selected_drone_heatmap_id=None, debug_lines=None)`.
+- `ControlCenter(game)`
+  - is the mission-facing façade.
+  - delegates timer, progress, tab selection, and hit interpretation to
+    `ControlCenterController`.
+  - builds one immutable `ControlCenterViewModel` per frame.
+  - retains the latest detached `ControlHitMap` returned by the renderer.
+  - receives detached drone and rover status tuples each frame.
+  - derives deployed counts from those tuples while retaining named
+    undeployed roster slots as `N/A`.
+
+- `ControlCenterController`
+  - owns elapsed mission time, pause accounting, explored percentage, active
+    tab, and conversion of hit rectangles into existing action tokens.
+  - contains no Pygame surfaces, fonts, images, or drawing code.
+
+- `ControlCenterViewModel`, `DroneStatusView`, and `RoverStatusView`
+  - are immutable values copied from current runtime agents by
+    `MissionRenderer`.
+  - carry complete per-frame display data without exposing mutable agents or
+    controller state to the renderer.
+
+- `ControlHitMap`
+  - is an immutable set of plain rectangle tuples produced by layout.
+  - crosses from the renderer to the controller without exposing renderer
+    caches or surfaces.
 
 - `ControlCenterRenderer`
-  - orchestrates the control-panel draw order.
-  - delegates text/caching details back to `ControlCenter`.
+  - owns control-panel geometry, Pygame surfaces, fonts, image resources,
+    static/dynamic caches, text composition, drawing, and layout.
+  - consumes only `ControlCenterViewModel` and returns `ControlHitMap`; it does
+    not call back into `ControlCenter`.
 
 - `SlamRenderer(map_w, map_h)`
   - owns a Pygame surface.
   - renders either occupancy/confidence or terrain roughness/confidence.
 
-- `MissionRenderer(control)`
+- `MissionRenderer(MissionRendererDependencies)`
   - owns complete frame composition and the stop-button rectangle/visual.
+  - captures each drone once per frame and supplies that same snapshot to
+    path, vision, icon, debug, and control-center consumers.
   - delegates map, agent, debug, and control-center layers to focused collaborators.
+  - receives live mission objects through narrow callables supplied by
+    `MissionControl`.
 
 - `DroneRenderer(drone)` and `RoverRenderer(rover)`
   - own agent-specific Pygame surfaces.
@@ -780,7 +868,8 @@ External and standard libraries by responsibility:
 - `math`: distances, angles, heuristics, trigonometry.
 - `random`: drone direction choice, agent colors, mission seed.
 - `configparser`: menu settings persistence.
-- `dataclasses`: `SimSettings`, `POI`, `RayHit`, UI state holders.
+- `dataclasses`: immutable simulation configuration, `POI`, `RayHit`, and UI
+  state holders.
 - `pathlib.Path` and `os`: resource and config paths.
 - `logging`: non-fatal diagnostics.
 
@@ -792,7 +881,7 @@ flowchart LR
     Game --> Menu
     Game --> MapGenerator
     Game --> MissionControl
-    Menu --> SimSettings
+    Menu --> SimulationConfig
     Menu --> asset_config
     MapGenerator --> MapGenHelpers
     MapGenerator --> asset_config
@@ -802,13 +891,12 @@ flowchart LR
     MissionControl --> PresentationAdapter
     MissionControl --> SlamRenderer
     MissionControl --> MissionRenderer
-    MissionControl --> MissionControlTerrain
     MissionControl --> TerrainKnowledge
-    MissionControlTerrain --> TerrainFusion
-    MissionControlTerrain --> TerrainSharing
-    MissionControlTerrain --> RoverTargets
-    MissionControlTerrain --> SlamViewService
-    MissionControlTerrain --> MissionDebugInfo
+    MissionControl --> TerrainFusion
+    MissionControl --> TerrainSharing
+    MissionControl --> RoverTargets
+    MissionControl --> SlamViewService
+    MissionControl --> MissionDebugInfo
     MissionControl --> MissionControlLifecycle
     MissionControlLifecycle --> PathfindingService
     PathfindingService --> AStarPathfinder
@@ -816,13 +904,15 @@ flowchart LR
     MissionRenderer --> SlamViewService
     MissionRenderer --> MissionDebugInfo
     MissionRenderer --> ControlCenter
+    ControlCenter --> ControlCenterController
     MissionRenderer --> DroneRenderer
     MissionRenderer --> RoverRenderer
     AgentFactory --> Drone
     AgentFactory --> Rover
     Drone --> TerrainKnowledge
     Rover --> TerrainKnowledge
-    Drone --> Graph
+    Drone --> DroneRuntimeState
+    DroneRuntimeState --> Graph
     Drone --> DroneMovementController
     Drone --> DroneSensorController
     Drone --> DroneRenderer
@@ -832,10 +922,11 @@ flowchart LR
     DroneSensorController --> TerrainKnowledge
     TerrainFusion --> TerrainKnowledge
     TerrainSharing --> TerrainKnowledge
-    DroneMovementController --> Graph
+    DroneMovementController --> DroneRuntimeState
     Rover --> Graph
     Rover --> RoverRenderer
     ControlCenter --> ControlCenterRenderer
+    ControlCenterRenderer --> ControlHitMap
 ```
 
 ## 14. Module Reference
@@ -859,28 +950,49 @@ flowchart LR
 
 ### `Menu.py`
 
-- Libraries: `os`, `configparser`, `logging`, `Enum`, `typing`, `pygame`, `pygame.mixer`, `Path`.
-- Internal imports: `Display`, `GameOptions`, `Audio`, `Images`, `Colors`, `Fonts`, `SimSettings`.
-- Classes:
-  - `MenuItemType(Enum)`: `TITLE`, `BUTTON`, `SELECTOR`, `TEXT_INPUT`, `SLIDER`.
-  - `MenuItem`: stores and draws a single menu row.
-  - `Menu`: creates menus, handles menu input, persists settings, starts missions.
+- Class: `Menu`.
+- Stable façade used by `Game`; creates typed screens, coordinates focused
+  collaborators, builds `SimulationConfig`, and starts missions.
 - Main methods:
   - `Menu.display()`, `_handle_global_input()`, `_draw()`, `build_sim_settings()`, `start_mission()`.
 
-### `SimSettings.py`
+### Menu collaborators
 
-- Library: `dataclasses.dataclass`.
-- Class: `SimSettings`.
-- Data-only mission configuration. Passed from `Menu` to `MapGenerator` and `MissionControl`.
+- `MenuModels.py`: typed screen, action, title, button, selector, text-input,
+  and slider models.
+- `MenuController.py`: navigation, input transitions, selection, and named
+  action dispatch.
+- `MenuRenderer.py`: Pygame resources and all menu/loading-screen drawing.
+- `MenuSettingsRepository.py`: audio persistence, current simulation-format
+  serialization, and legacy simulation-format import.
+- `MenuAudioService.py`: mixer resources and audio preference application.
+
+### `SimulationConfig.py` and `SimSettings.py`
+
+- `SimulationConfig` is the immutable validated runtime model passed from
+  `Menu` to `MapGenerator` and `MissionControl`.
+- Nested sections own mission, SLAM, sharing, frontier, and rendering values.
+- `SimSettings` adapts the former flat constructor for compatibility tests and
+  external callers; production consumers use nested sections.
 
 ### `MapGenerator.py`
 
-- Libraries: `os`, `logging`, `Path`, `typing.Tuple`, `numpy`, `cv2`, `pygame`.
-- Internal imports: display/config enums, media paths, colors, map-gen helpers.
+- Libraries: `logging`, `pygame`.
+- Internal imports: display/config constants and generation services.
 - Function: `_image_path_from_key(key: str) -> Path`.
 - Class: `MapGenerator`
-  - `__init__(game, settings)`, `dig_map(proc_num)`, `set_starts()`, `set_ends(step, id)`, `connect_rooms(x, y, step, stren, id)`, `process_map()`, `build_terrain_roughness()`, `_extract_cave_layer(color_to_remove, output_key)`, `save_map()`.
+  - `__init__(game, settings)`: delegates map generation and artifact output,
+    then exposes the mission-facing generated data.
+
+### `generation/`
+
+- `cave_generator.py`: `CaveGenerator`, `CaveGenerationResult`,
+  `CaveGenerationProgress`, and deterministic worm-start creation.
+- `worm_process_runner.py`: shared-memory allocation, worm process startup,
+  monitoring, copied result creation, and cleanup.
+- `cave_post_processor.py`: OpenCV cleanup and wall-transition noise.
+- `terrain_roughness_generator.py`: floor-only roughness synthesis.
+- `map_artifact_writer.py`: generated image, layer, and matrix persistence.
 
 ### `MapGenHelpers.py`
 
@@ -903,19 +1015,19 @@ flowchart LR
 ### `MissionControl.py`
 
 - Libraries: `random`, `threading`, `typing`, `numpy`, `pygame`.
-- Internal imports: `wall_hit`, `AgentFactory`, `ControlCenter`, `TerrainKnowledge`, `PathfindingService`, `PresentationAdapter`, `SlamRenderer`, `MissionRenderer`, terrain/lifecycle mixins.
-- Class: `MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin)`
+- Internal imports: `wall_hit`, `AgentFactory`, `ControlCenter`,
+  `TerrainKnowledge`, the focused mission services, `PathfindingService`,
+  `PresentationAdapter`, `SlamRenderer`, `MissionRenderer`, and the lifecycle
+  mixin.
+- Class: `MissionControl(MissionControlLifecycleMixin)`
   - `__init__(game)`: setup-only mission state construction.
   - `_initialize_runtime()`: window, control center, agents, resources, and first frame.
-  - `_setup_pathfinding_resources()`: compatibility wrapper for `pathfinding.start()`.
   - `set_start_point()`: picks a floor cell from worm starts.
   - `drone_thread(drone_id)`: moves one drone and triggers nearby sharing.
   - `compute_path(start, goal)`: delegates drone routing to `PathfindingService`.
   - `compute_rover_path(start, goal)`: copies terrain state and delegates weighted routing.
-  - `toggle_terrain_heatmap()`, `toggle_drone_heatmap(drone_id)`.
   - `rover_thread(rover_id)`.
   - `update_sensors()`.
-  - `draw_stop_button()`, `draw()`: compatibility wrappers around `MissionRenderer`.
 
 ### `MissionControlLifecycle.py`
 
@@ -926,36 +1038,16 @@ flowchart LR
   - `_start_agent_threads()`
   - `_run_mission_loop()`
   - `run()`
-  - `start_mission()`
 - The main loop records frame wait, events, sharing, mission-status, sensing,
   rendering, and display durations through `FrameProfiler`.
 - The square control completes the run normally. The circular-arrow control sets `restart_requested`, completes
   the run, performs normal worker/resource cleanup, and skips the intermediate
   windowed-menu transition.
-- The pause/play control gates agent threads and skips sharing, completion, and
-  sensor updates while rendering and event handling continue.
-
-### `MissionControlTerrain.py`
-
-- Libraries: `typing`, `numpy`.
-- Internal imports: terrain, rover-target, SLAM-view, and debug-info services.
-- Class: `MissionControlTerrainMixin`
-  - `_init_terrain_services()`
-  - `_ensure_terrain_services()`
-  - `build_debug_lines()`
-  - `record_terrain_scan(samples)`
-  - `toggle_terrain_heatmap()`
-  - `toggle_drone_heatmap(drone_id)`
-  - `_update_visibility_state()`
-  - `_has_line_of_sight(a, b)`
-  - `_maps_differ_enough(source_roughness, source_confidence, target_roughness, target_confidence)`
-  - `_slam_maps_differ_enough(source_occ, source_conf, target_occ, target_conf)`
-  - `_share_terrain_with_nearby_drones(drone_id)`
-  - `_share_terrain_with_rovers()`
-  - `_refresh_slam_map(drone_id=None)`
-  - `draw_terrain_heatmap()`
-  - `acquire_rover_target(rover_id, current_pos)`
-  - `release_rover_target(rover_id, completed=False)`
+- The pause/play control closes a worker barrier, waits for every registered
+  agent thread to reach a movement/sharing checkpoint, and skips main-thread
+  sharing, completion, and sensor updates while rendering and events continue.
+- `SimulationClock` removes paused wall time from sensing, sharing, frontier,
+  and progress-update cooldowns.
 
 ### `mapping/terrain_knowledge.py`
 
@@ -970,10 +1062,29 @@ flowchart LR
   - `explored_ratio(threshold=0.0)`
 - Owns terrain arrays, floor masking, synchronization, snapshot isolation, observation fusion, and confidence-weighted merging.
 
+### `mission/service_dependencies.py`
+
+- Libraries: `dataclasses`, `typing`, `numpy`.
+- Dataclasses:
+  - `TerrainFusionDependencies`
+  - `TerrainSharingDependencies`
+  - `RoverTargetDependencies`
+  - `SlamViewDependencies`
+  - `MissionDebugDependencies`
+  - `MissionRendererDependencies`
+  - `DroneMovementDependencies`
+  - `DroneSensorDependencies`
+  - `RoverNavigationDependencies`
+- Protocols describe the minimum mission-facing display, presentation, terrain,
+  and SLAM-renderer APIs.
+- Keeps `MissionControl` as the only broad composition root while allowing
+  terrain, sharing, rendering, movement, sensing, and rover navigation
+  collaborators to receive narrow, explicit inputs.
+
 ### `mapping/terrain_fusion.py`
 
-- Libraries: `typing`, `pygame`.
-- Re-exports: `TerrainSample`, `fuse_terrain_samples`.
+- Libraries: `typing`.
+- Internal imports: `TerrainKnowledge` helpers and `TerrainFusionDependencies`.
 - Class: `TerrainFusionService`
   - `record_scan(samples)`
 - Records samples into mission `TerrainKnowledge` for telemetry and combined
@@ -991,22 +1102,44 @@ flowchart LR
   - `reach_border()`
   - `update_borders()`, `maybe_rebuild_frontiers()`, `rebuild_frontiers(...)`
   - `mission_completed()`
-  - `get_distance(target)`, `update_heading(previous, current)`
-- Owns exploration policy, frontier retry/cooldown state, A* traversal, and homing behavior.
+  - `get_distance(target)`
+- Owns exploration policy, retry bookkeeping, A* traversal, and homing
+  decisions while delegating shared mutation to `DroneRuntimeState`.
+- Receives pathfinding, pause, and simulation-time callbacks through
+  `DroneMovementDependencies`; it does not retain the whole mission control.
+
+### `agents/drone_runtime_state.py`
+
+- Libraries: `dataclasses`, `math`, `threading`, `typing`.
+- Dataclass: `DroneSnapshot`.
+- Class: `DroneRuntimeState`
+  - `snapshot()`
+  - `move_to(position)`
+  - `graph_is_valid(current, candidate)`
+  - frontier merge/replace/remove operations
+  - lifecycle, sensor-ray, battery, and overlay mutation methods
+  - `reserve_frontier_rebuild(now)`
+- Owns synchronized drone runtime mutation, the private `Graph`, immutable
+  snapshot creation, and atomic position/heading/path-history updates.
 
 ### `mapping/drone_sensor.py`
 
-- Libraries: `time`, `typing`, `numpy`.
-- Internal imports: `RoughnessSampler`, `VisionSensor`, `TerrainSample`.
+- Libraries: `typing`, `numpy`.
+- Internal imports: `RoughnessSampler`, `VisionSensor`, `TerrainSample`,
+  `DroneSensorDependencies`.
 - Class: `DroneSensorController`
   - `update()`
   - `scan_terrain(ray_hits)`
   - `record_local_scan(samples)`
-- Owns ray casting, local SLAM updates, and local/global terrain sampling.
+- Owns ray casting, local SLAM updates, and local/global terrain sampling
+  using one captured runtime origin per update.
+- Receives terrain source data, simulation time, and the mission telemetry
+  recording callback through `DroneSensorDependencies`.
 
 ### `mapping/terrain_sharing.py`
 
-- Libraries: `math`, `threading`, `time`, `typing`, `numpy`.
+- Libraries: `math`, `threading`, `typing`, `numpy`.
+- Internal imports: `TerrainSharingDependencies`.
 - Class: `TerrainSharingService`
   - `has_line_of_sight(a, b)`
   - `maps_differ_enough(...)`
@@ -1015,6 +1148,7 @@ flowchart LR
   - `share_with_rovers()`
 - Owns proximity, synchronized drone/pair/rover cooldown state, terrain
   sharing, and SLAM sharing rules.
+- Reads drone positions and frontiers only from detached runtime snapshots.
 - Rover sharing defaults to a 0.5-second cooldown so full terrain snapshots
   are not copied every frame.
 
@@ -1025,21 +1159,27 @@ flowchart LR
   - `acquire(rover_id, current_pos)`
   - `release(rover_id, completed=False)`
 - Owns target scoring and reservation for rough terrain rover goals.
+- Receives cave, mission terrain telemetry, and assignment state through
+  `RoverTargetDependencies`.
 
 ### `rendering/slam_view.py`
 
 - Libraries: `time`, `typing`, `numpy`.
+- Internal imports: `SlamViewDependencies`.
 - Class: `SlamViewService`
   - `refresh(drone_id=None)`
   - `draw()`
 - Owns combined/per-drone SLAM and terrain heatmap surface orchestration.
-- Rebuilds dirty cached surfaces only after `slam_render_interval` has elapsed;
-  the cached surface is still blitted every frame.
+- Tracks the last rendered `SlamSnapshot.version` per drone.
+- Rebuilds cached surfaces only after a relevant map version changes and
+  `slam_render_interval` has elapsed; the cached surface is still blitted
+  every frame.
 
 ### `rendering/mission_renderer.py`
 
-- Libraries: `typing`, `pygame`.
-- Internal imports: `Colors`, `Fonts`.
+- Libraries: `math`, `pygame`.
+- Internal imports: `Colors`, `MissionRendererDependencies`, and detached
+  control-center status builders.
 - Class: `MissionRenderer`
   - `draw()`
   - `draw_stop_button()`
@@ -1047,18 +1187,32 @@ flowchart LR
   - `draw_pause_button()`
 - Owns complete mission frame order and the compact stop/restart/pause icon
   controls.
+- Copies live agent data into detached status views before drawing the control
+  center.
+
+### `rendering/control_center_view_model.py`
+
+- Libraries: `dataclasses`, `typing`.
+- Dataclasses: `AgentRosterEntry`, `DroneStatusView`, `RoverStatusView`.
+- Functions:
+  - `build_drone_status_views(drones)`
+  - `build_rover_status_views(rovers)`
+- Owns the stable Blinky-through-Kinky and Huey-through-Louie presentation
+  identities and creates immutable per-frame status values.
 
 ### `rendering/agent_renderer.py`
 
 - Libraries: `typing`, `pygame`.
 - Internal import: `Colors`.
 - Classes:
-  - `DroneRenderer`: owns path, vision, and start-marker surfaces; draws drone path, vision, and icon.
+  - `DroneRenderer`: owns path, vision, and start-marker surfaces; draws drone
+    path, vision, and icon from one supplied `DroneSnapshot`.
   - `RoverRenderer`: owns the rover path surface; draws rover path and icon.
 
 ### `mission/debug_info.py`
 
-- Libraries: `time`, `typing`.
+- Libraries: `typing`.
+- Internal imports: `MissionDebugDependencies`.
 - Class: `MissionDebugInfo`
   - `build_lines()`
 - Owns the debug text shown in the control center.
@@ -1082,34 +1236,41 @@ flowchart LR
 - Class: `AgentFactory`
   - `build_drones(control) -> None`
   - `build_rovers(control) -> None`
+  - `get_rover_count(num_drones) -> int`
   - `choose_rover_color(rover_colors) -> tuple[int, int, int]`
   - `get_drone_icon_dim(map_dim) -> tuple[int, int]`
   - `get_rover_icon_dim(map_dim) -> tuple[int, int]`
 
 ### `Drone.py`
 
-- Libraries: `random`, `threading`, `typing`, `numpy`.
-- Internal imports: `Graph`, `SlamMap`, `TerrainKnowledge`, `DroneMovementController`, `DroneSensorController`, `DroneRenderer`.
+- Libraries: `random`, `typing`.
+- Internal imports: `DroneRuntimeState`, `SlamMap`, `TerrainKnowledge`,
+  `DroneMovementController`, `DroneSensorController`, `DroneRenderer`, and
+  drone dependency bundles.
 - Class: `Drone`
-  - Movement compatibility facade: `move()`, `reach_start_point()`, `find_new_node()`, `explore(...)`, `reach_border()`, `update_borders()`, `_maybe_rebuild_frontiers()`, `_rebuild_frontiers(...)`, `mission_completed()`, `get_distance(target)`.
-  - Sensing facade: `update_sensors()`, `scan_terrain(ray_hits)`, `_record_local_terrain_scan(samples)`.
-  - Sharing: `merge_terrain_data(other_roughness, other_confidence)`, `merge_exploration_data(other_explored_alpha, other_border)`, `merge_slam_map(other_map)`.
-  - Renderer compatibility wrappers: `draw_path()`, `draw_vision_overlay()`, `draw_vision()`, `draw_icon()`.
-  - Presentation state: `toggle_path()`, `toggle_vision()`.
-  - Legacy properties: `floor_surf`, `vision_overlay`, `known_roughness`, `terrain_confidence`, `terrain_lock`.
+  - Intentional mission API: `move()`, `mission_completed()`,
+    `update_sensors()`, `snapshot()`.
+  - Sharing API: `merge_frontiers(other_border)`.
+  - Presentation state: `toggle_path()`, `toggle_vision()`,
+    `set_overlay_visibility(...)`.
+  - Detailed movement, sensing, terrain, SLAM, and rendering work is accessed
+    through its owned collaborators rather than mirrored wrappers.
+  - Keeps the legacy constructor signature for factory compatibility, but only
+    extracts the narrow mission callbacks needed by movement and sensing.
 
 ### `Rover.py`
 
 - Libraries: `random`, `typing`.
-- Internal imports: `Graph`, `TerrainKnowledge`, `RoverRenderer`.
+- Internal imports: `Graph`, `TerrainKnowledge`, `RoverRenderer`,
+  `RoverNavigationDependencies`.
 - Class: `Rover`
   - `__init__(game, control, id, start_pos, color, icon, cave)`
   - `calculate_radius()`
   - `move()`
-  - `draw_path()`
-  - `draw_icon()`
-  - `floor_surf` compatibility property.
-  - terrain compatibility properties backed by rover-owned `TerrainKnowledge`.
+  - owns `terrain_knowledge` and `renderer` directly without mirrored
+    array/surface properties.
+  - Uses `RoverNavigationDependencies` for target acquisition/release and
+    rover pathfinding instead of retaining the whole mission control.
 
 ### `navigation/pathfinding.py`
 
@@ -1152,18 +1313,19 @@ flowchart LR
 
 ### `SlamMap.py`
 
-- Libraries: `collections.deque`, `itertools.islice`, `typing`, `math`, `numpy`.
+- Libraries: `collections.deque`, `dataclasses`, `itertools.islice`,
+  `threading`, `typing`, `math`, `numpy`.
 - Constants: `UNKNOWN = -1`, `FREE = 0`, `OCCUPIED = 1`.
+- Dataclass: `SlamSnapshot(occupancy, confidence, point_cloud, version)`.
 - Class: `SlamMap`
   - `__init__(map_h, map_w, max_points=6000)`
+  - `snapshot(point_limit=None)`
+  - `has_changed_since(version)`
   - `update_from_rays(origin, ray_hits)`
-  - `merge_from(other)`
-  - `merge_from_arrays(occupancy, confidence, point_cloud=None)`
+  - `merge_from(snapshot)`
   - `is_known(x, y, threshold=0.6)`
-  - `recent_points(limit)`
-  - `_mark_points(points, occ_value, conf)`
-  - `_add_point(point)`
-  - `_line_points(x0, y0, x1, y1)`
+- Owns synchronization, private arrays, bounded point storage,
+  confidence-dominant merging, detached snapshots, and version advancement.
 
 ### `SlamRenderer.py`
 
@@ -1183,36 +1345,49 @@ flowchart LR
 
 ### `PresentationAdapter.py`
 
-- Libraries: `typing`, `pygame`, `numpy`.
+- Libraries: `typing`, `pygame`.
 - Class: `PresentationAdapter`
   - `__init__(map_w, map_h)`
-  - `toggle_terrain_heatmap()`
-  - `toggle_drone_heatmap(drone_id)`
-  - `_set_all_drone_paths(drone_objects, enabled)`
+  - `reset(drone_objects)`
+  - `toggle_terrain_heatmap(drone_objects)`
+  - `toggle_drone_heatmap(drone_id, drone_objects)`
+  - `toggle_drone_path(drone_id, drone_objects)`
+  - `toggle_drone_vision(drone_id, drone_objects)`
   - `handle_click(mouse_pos, control_center, drone_objects)`
 
 ### `ControlCenter.py`
 
-- Libraries: `time`, `dataclasses`, `typing`, `pygame`, `pathlib.Path`.
-- Internal imports: display/rendering/media config and `ControlCenterRenderer`.
-- Classes:
-  - `ControlCenterTabState`
-  - `ControlCenterRenderState`
-  - `ControlCenter`
+- Libraries: `typing`.
+- Internal imports: `ControlCenterController`, `ControlHitMap`,
+  `ControlCenterRenderer`, and detached view models.
+- Class: `ControlCenter`.
 - Main methods:
   - `draw_control_center(...)`
-  - `handle_click(mouse_pos, drone_objects)`
-  - `start_timer()`, `format_timer()`
-  - `_draw_drone_toggles(...)`
-  - cached text/font helpers.
+  - `handle_click(mouse_pos)`
+  - `start_timer()`, `pause_timer()`, `resume_timer()`, `format_timer()`
+  - `set_explored_percent(value)`
+- Provides the stable mission-facing façade without owning Pygame resources.
+
+### `ControlCenterController.py`
+
+- Libraries: `dataclasses`, `time`, `typing`, `pygame`.
+- Dataclass: `ControlHitMap`.
+- Class: `ControlCenterController`
+  - timer start/pause/resume/format operations
+  - explored-progress and active-tab state
+  - `handle_click(mouse_pos, hit_map)`
+- Owns non-rendering state and preserves all existing presentation action
+  tokens.
 
 ### `ControlCenterRenderer.py`
 
-- Libraries: `typing`, `pygame`.
-- Internal imports: `Display`, `Colors`, `Fonts`, `RectHandle`.
+- Libraries: `pathlib`, `time`, `typing`, `pygame`.
+- Internal imports: display/media/rendering resources, immutable frame models,
+  and `ControlHitMap`.
 - Class: `ControlCenterRenderer`
-  - `render(cc, drone_objects, rover_objects=None, show_terrain_heatmap=True, selected_drone_heatmap_id=None, debug_lines=None)`
-  - high-level draw methods for title, statistics, tabs, drone/rover/debug/system panels, toggles, and statuses.
+  - `render(view_model) -> ControlHitMap`
+  - owns the control surface, layout constants, font/image caches, text/status
+    composition, every draw helper, and hit-rectangle production.
 
 ### `POI.py`
 
@@ -1225,7 +1400,7 @@ flowchart LR
 ### `asset_config/`
 
 - `gameplay.py`: `Display`, `GameOptions`.
-- `mapgen.py`: `MapGen`, `Brush`, `WormInputs`.
+- `mapgen.py`: `MapGen`, `WormInputs`.
 - `media.py`: `Audio`, `Images`.
 - `rendering.py`: `Colors`, `DroneColors`, `RoverColors`, `Fonts`, `RectHandle`.
 - `helpers.py`: `next_cell_coords(x, y, step_len, direction)`, `wall_hit(map_matrix, pos)`.
@@ -1233,11 +1408,20 @@ flowchart LR
 ## 15. New Developer Reading Order
 
 1. Start with `main.py`, `Game.py`, and `Menu.py` to understand launch and configuration.
-2. Read `SimSettings.py` and `asset_config/` to understand the constants and runtime knobs.
-3. Read `MapGenerator.py`, then skim `MapGenHelpers.py` for the multiprocessing details.
-4. Read `MissionControl.py`, then `MissionControlLifecycle.py` and the `MissionControlTerrain.py` facade.
-5. Read the focused services: `mapping/terrain_knowledge.py`, `agents/drone_movement.py`, `navigation/pathfinding.py`, `mapping/drone_sensor.py`, `mapping/terrain_fusion.py`, `mapping/terrain_sharing.py`, `mapping/rover_targets.py`, `rendering/mission_renderer.py`, `rendering/slam_view.py`, `rendering/agent_renderer.py`, `mission/debug_info.py`, and `mission/frame_timing.py`.
-6. Read `Drone.py` with `Graph.py`, `VisionSensor.py`, `SlamMap.py`, and `RoughnessSampler.py` open beside it.
+2. Read `SimulationConfig.py`, `MenuSettingsRepository.py`, and
+   `asset_config/` to understand runtime configuration and persistence.
+3. Read `MapGenerator.py` and `generation/`, then skim `MapGenHelpers.py` for
+   the multiprocessing worker entrypoint and low-level map helpers.
+4. Read `MissionControl.py`, then `MissionControlLifecycle.py`.
+5. Read the focused services: `mapping/terrain_knowledge.py`,
+   `agents/drone_runtime_state.py`, `agents/drone_movement.py`,
+   `navigation/pathfinding.py`, `mapping/drone_sensor.py`,
+   `mapping/terrain_fusion.py`, `mapping/terrain_sharing.py`,
+   `mapping/rover_targets.py`, `rendering/mission_renderer.py`,
+   `rendering/slam_view.py`, `rendering/agent_renderer.py`,
+   `mission/debug_info.py`, and `mission/frame_timing.py`.
+6. Read `Drone.py` with `agents/drone_runtime_state.py`, `Graph.py`,
+   `VisionSensor.py`, `SlamMap.py`, and `RoughnessSampler.py` open beside it.
 7. Read `AStarPathfinder.py` after `navigation/pathfinding.py` when you need the algorithm details.
 8. Read `PresentationAdapter.py`, `ControlCenter.py`, `ControlCenterRenderer.py`, and `SlamRenderer.py` to understand interaction and visualization.
 9. Read `Rover.py` last; its motion code is built, but rover threads are currently off by default.
@@ -1245,12 +1429,24 @@ flowchart LR
 ## 16. Practical Notes and Gotchas
 
 - `MissionControl.__init__()` is setup-only. `Game.start_mission()` explicitly calls `MissionControl.run()`, and each mission controller is single-use. Restart creates another controller rather than reusing the completed instance.
-- `MissionRenderer` owns scene composition and stop-button drawing; `MissionControl.draw()` and `draw_stop_button()` are compatibility wrappers.
-- `PathfindingService` owns pathfinding shared memory, the process pool, and its semaphore; the matching `MissionControl` methods and resource properties are compatibility facades.
-- `TerrainKnowledge` owns roughness/confidence arrays, synchronization, snapshots, and merging for missions, drones, and rovers; legacy array and lock properties remain compatibility views.
-- `Drone.update_sensors()` mutates SLAM/terrain state; `Drone.draw_vision_overlay()` is rendering-only.
-- Drone and rover Pygame surfaces are owned by `DroneRenderer` and `RoverRenderer`; agent `draw_*` methods are compatibility wrappers.
-- Drone exploration policy and frontier retry state are owned by `DroneMovementController`; the matching `Drone` methods/properties are compatibility facades.
+- `MissionRenderer` solely owns scene composition and mission-control drawing.
+- `DroneRuntimeState` owns all mutable drone position, path, frontier,
+  lifecycle, sensor-ray, battery, and overlay state that crosses thread
+  boundaries. Callers consume detached `DroneSnapshot` values.
+- `PathfindingService` owns pathfinding shared memory, the process pool, and
+  its semaphore; inspect those resources on the service itself.
+- `TerrainKnowledge` owns roughness/confidence arrays, synchronization,
+  snapshots, and merging for missions, drones, and rovers.
+- `SlamMap` owns its lock, occupancy/confidence arrays, point cloud, snapshots,
+  and versioning. Callers must not carry separate SLAM locks or mutable grid
+  references.
+- `Drone.update_sensors()` mutates SLAM/terrain state; rendering calls the
+  drone renderer directly.
+- Drone and rover Pygame surfaces are owned by `DroneRenderer` and
+  `RoverRenderer`.
+- Drone exploration policy and frontier retry state are owned by
+  `DroneMovementController`; synchronized runtime values and frontier-rebuild
+  timing are owned by `DroneRuntimeState`.
 - Drone movement and drone-to-drone sharing run on worker threads; drawing and Pygame events stay on the main thread.
 - `wall_hit(map_matrix, pos)` assumes `pos` is in bounds. Most callers validate bounds first; new callers should do the same.
 - Positions are `(x, y)`, but NumPy arrays are indexed `[y, x]`.

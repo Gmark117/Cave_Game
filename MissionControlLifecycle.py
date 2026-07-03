@@ -28,6 +28,7 @@ class MissionControlLifecycleMixin:
         """Stop workers, join threads, and release process/shared-memory resources."""
         self.mission_event.set()
         self.pause_event.set()
+        self.pause_coordinator.stop()
 
         for thread in threads:
             thread.join()
@@ -91,7 +92,7 @@ class MissionControlLifecycleMixin:
                 break
 
             if not self.is_paused:
-                self._share_terrain_with_rovers()
+                self.terrain_sharing.share_with_rovers()
             sharing_finished = time.perf_counter()
             if not self.is_paused:
                 self.completed = self.is_mission_over()
@@ -139,7 +140,3 @@ class MissionControlLifecycleMixin:
             self._has_run = True
             if pygame.get_init() and not self.restart_requested:
                 self.game.display = self.game.to_windowed()
-
-    def start_mission(self) -> None:
-        """Compatibility alias for `run()`."""
-        self.run()

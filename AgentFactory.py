@@ -23,8 +23,9 @@ class AgentFactory:
     @staticmethod
     def build_drones(control) -> None:
         """Create drones, load the shared icon, and attach them to control."""
-        control.num_drones = control.settings.num_drones
-        icon_size = AgentFactory.get_drone_icon_dim(control.settings.map_dim)
+        mission = control.settings.mission_config
+        control.num_drones = mission.num_drones
+        icon_size = AgentFactory.get_drone_icon_dim(mission.map_dim)
         control.drone_icon = pygame.transform.scale(
             pygame.image.load(Images.DRONE.value),
             icon_size
@@ -48,8 +49,12 @@ class AgentFactory:
     @staticmethod
     def build_rovers(control) -> None:
         """Create rovers, load the shared icon, and attach them to control."""
-        control.num_rovers = math.ceil(control.settings.num_drones / 4)
-        icon_size = AgentFactory.get_rover_icon_dim(control.settings.map_dim)
+        control.num_rovers = AgentFactory.get_rover_count(
+            control.settings.mission_config.num_drones
+        )
+        icon_size = AgentFactory.get_rover_icon_dim(
+            control.settings.mission_config.map_dim
+        )
         control.rover_icon = pygame.transform.scale(
             pygame.image.load(Images.ROVER.value),
             icon_size
@@ -69,6 +74,11 @@ class AgentFactory:
                 control.map_matrix,
             )
             control.rovers.append(rover)
+
+    @staticmethod
+    def get_rover_count(num_drones: int) -> int:
+        """Return one first-aid rover plus charging carriers for four drones."""
+        return 1 + math.ceil(num_drones / 4)
 
     @staticmethod
     def choose_rover_color(rover_colors) -> Tuple[int, int, int]:

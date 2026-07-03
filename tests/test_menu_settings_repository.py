@@ -1,0 +1,137 @@
+import configparser
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from MenuSettingsRepository import AudioSettings, MenuSettingsRepository
+from SimulationConfig import SimulationConfig
+
+
+class MenuSettingsRepositoryTests(unittest.TestCase):
+    def make_repository(self):
+        temporary_directory = tempfile.TemporaryDirectory()
+        root = Path(temporary_directory.name)
+        (root / "GameConfig").mkdir()
+        return temporary_directory, MenuSettingsRepository(root)
+
+    def test_audio_options_round_trip_with_existing_schema(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+
+        repository.save_audio(AudioSettings(60, "off", "on"))
+        loaded = repository.load_audio()
+
+        self.assertEqual(loaded, AudioSettings(60, "off", "on"))
+        config = configparser.ConfigParser()
+        config.read(repository.options_path)
+        self.assertTrue(config.has_section("Options"))
+
+    def test_simulation_round_trip_uses_nested_sections(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        defaults = SimulationConfig()
+        source = replace(
+            defaults,
+            mission_config=replace(
+                defaults.mission_config,
+                objective=1,
+                map_dim="LARGE",
+                seed=444,
+                num_drones=6,
+            ),
+            slam=replace(defaults.slam, scan_interval=0.5),
+            sharing=replace(defaults.sharing, pair_cooldown=2.5),
+            frontier=replace(defaults.frontier, stride=2),
+            rendering=replace(defaults.rendering, refresh_interval=0.2),
+        )
+
+        repository.save_simulation(source)
+        loaded = repository.load_simulation(defaults)
+
+        self.assertEqual(loaded, source)
+        config = configparser.ConfigParser()
+        config.read(repository.simulation_path)
+        self.assertEqual(
+            set(config.sections()),
+            {"MISSION", "SLAM", "SHARING", "FRONTIER", "RENDERING"},
+        )
+
+    def test_legacy_file_loads_when_new_file_is_absent(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.legacy_simulation_path.write_text(
+            "[symSettings]\n"
+            "mode = Search and Rescue\n"
+            "map_dimension = Large\n"
+            "seed = 444\n"
+            "drones = 6\n"
+            "\n"
+            "[SLAM]\n"
+            "scan_interval = 0.5\n"
+            "scan_rays = 24\n"
+            "point_cloud_max_points = 2000\n"
+            "render_point_tail = 300\n"
+            "render_interval = 0.2\n"
+            "rover_share_interval = 0.75\n"
+            "frontier_stride = 2\n"
+            "frontier_confidence_threshold = 0.7\n"
+            "frontier_rebuild_cooldown = 0.4\n"
+        )
+
+        loaded = repository.load_simulation(SimulationConfig())
+
+        self.assertEqual(loaded.mission_config.objective, 1)
+        self.assertEqual(loaded.mission_config.map_dim, "LARGE")
+        self.assertEqual(loaded.slam.scan_rays, 24)
+        self.assertEqual(loaded.sharing.rover_interval, 0.75)
+        self.assertEqual(loaded.frontier.stride, 2)
+        self.assertEqual(loaded.rendering.refresh_interval, 0.2)
+        self.assertFalse(repository.simulation_path.exists())
+
+    def test_new_file_takes_precedence_over_legacy_file(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.legacy_simulation_path.write_text(
+            "[symSettings]\nseed = 1\n"
+        )
+        current = replace(
+            SimulationConfig(),
+            mission_config=replace(
+                SimulationConfig().mission_config,
+                seed=99,
+            ),
+        )
+        repository.save_simulation(current)
+
+        loaded = repository.load_simulation(SimulationConfig())
+
+        self.assertEqual(loaded.mission_config.seed, 99)
+
+    def test_invalid_section_restores_only_that_section_defaults(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.simulation_path.write_text(
+            "[MISSION]\n"
+            "objective = Exploration\n"
+            "map_dimension = Small\n"
+            "seed = 5\n"
+            "drones = 3\n"
+            "\n"
+            "[SLAM]\n"
+            "scan_interval = invalid\n"
+            "scan_rays = 12\n"
+            "\n"
+            "[SHARING]\n"
+            "pair_cooldown = 2.0\n"
+        )
+        defaults = SimulationConfig()
+
+        loaded = repository.load_simulation(defaults)
+
+        self.assertEqual(loaded.slam, defaults.slam)
+        self.assertEqual(loaded.sharing.pair_cooldown, 2.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -9,9 +9,23 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 from mapping.terrain_fusion import TerrainFusionService, fuse_terrain_samples
 from mapping.terrain_knowledge import TerrainKnowledge
+from mission.service_dependencies import TerrainFusionDependencies
 
 
 class TerrainFusionTests(unittest.TestCase):
+    @staticmethod
+    def make_service(control, now: float = 1.0) -> TerrainFusionService:
+        dependencies = TerrainFusionDependencies(
+            terrain_knowledge=control.terrain_knowledge,
+            get_control_center=lambda: control.control_center,
+            presentation=control.presentation,
+            simulation_time=lambda: now,
+            explored_update_interval=control.explored_update_interval,
+            last_explored_update=control.last_explored_update,
+        )
+        control.dependencies = dependencies
+        return TerrainFusionService(dependencies)
+
     def test_fuses_floor_samples_and_ignores_walls(self) -> None:
         roughness = np.full((2, 2), -1.0, dtype=np.float32)
         confidence = np.zeros((2, 2), dtype=np.float32)
@@ -41,20 +55,20 @@ class TerrainFusionTests(unittest.TestCase):
             last_explored_update=0.0,
             explored_update_interval=0.5,
             floor_cells=4,
-            control_center=SimpleNamespace(explored_percent=0),
+            control_center=SimpleNamespace(
+                set_explored_percent=Mock(),
+            ),
             presentation=SimpleNamespace(terrain_heatmap_dirty=False),
         )
 
-        with patch(
-            "mapping.terrain_fusion.pygame.time.get_ticks",
-            return_value=1000,
-        ):
-            TerrainFusionService(control).record_scan(
-                [(0, 0, 0.5, 0.5), (1, 0, 0.8, 0.5)]
-            )
+        self.make_service(control).record_scan(
+            [(0, 0, 0.5, 0.5), (1, 0, 0.8, 0.5)]
+        )
 
-        self.assertEqual(control.control_center.explored_percent, 50)
-        self.assertEqual(control.last_explored_update, 1.0)
+        control.control_center.set_explored_percent.assert_called_once_with(
+            50
+        )
+        self.assertEqual(control.dependencies.last_explored_update, 1.0)
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
 
     def test_telemetry_fusion_does_not_mutate_agent_local_knowledge(self) -> None:
@@ -65,17 +79,13 @@ class TerrainFusionTests(unittest.TestCase):
             terrain_knowledge=TerrainKnowledge(cave),
             last_explored_update=0.0,
             explored_update_interval=0.5,
-            control_center=SimpleNamespace(explored_percent=0),
+            control_center=SimpleNamespace(
+                set_explored_percent=Mock(),
+            ),
             presentation=SimpleNamespace(terrain_heatmap_dirty=False),
         )
 
-        with patch(
-            "mapping.terrain_fusion.pygame.time.get_ticks",
-            return_value=1000,
-        ):
-            TerrainFusionService(control).record_scan(
-                [(0, 0, 0.8, 0.75)]
-            )
+        self.make_service(control).record_scan([(0, 0, 0.8, 0.75)])
 
         self.assertAlmostEqual(
             float(control.terrain_knowledge.confidence[0, 0]),

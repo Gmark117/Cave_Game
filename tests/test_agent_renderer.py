@@ -1,6 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -10,27 +11,41 @@ import pygame
 
 from Drone import Drone
 from Rover import Rover
+from SimulationConfig import MissionConfig, SimulationConfig, SlamConfig
 from rendering.agent_renderer import DroneRenderer, RoverRenderer
 
 
 class RenderControl:
     delay = 1 / 15
     terrain_roughness = np.full((64, 64), 0.4, dtype=np.float32)
+    terrain_fusion = SimpleNamespace(record_scan=lambda samples: None)
+    rover_targets = SimpleNamespace(acquire=Mock(), release=Mock())
 
-    def record_terrain_scan(self, samples) -> None:
-        pass
+    def compute_path(self, start, goal):
+        return []
+
+    def compute_rover_path(self, start, goal):
+        return []
+
+    def simulation_time(self) -> float:
+        return 1.0
+
+    def pause_checkpoint(self) -> bool:
+        return True
+
+    def wait_simulation_delay(self, duration: float) -> bool:
+        return True
 
 
 class AgentRendererTests(unittest.TestCase):
     def setUp(self) -> None:
-        settings = SimpleNamespace(
-            map_dim="SMALL",
-            slam_scan_interval=0.0,
-            slam_scan_rays=5,
-            slam_point_cloud_max_points=50,
-            frontier_rebuild_cooldown=0.25,
-            frontier_stride=4,
-            frontier_confidence_threshold=0.6,
+        settings = SimulationConfig(
+            mission_config=MissionConfig(map_dim="SMALL"),
+            slam=SlamConfig(
+                scan_interval=0.0,
+                scan_rays=5,
+                point_cloud_max_points=50,
+            ),
         )
         self.window = pygame.Surface((64, 64), pygame.SRCALPHA)
         self.game = SimpleNamespace(
@@ -54,25 +69,32 @@ class AgentRendererTests(unittest.TestCase):
             icon,
             self.cave,
         )
-        drone.graph.add_node((40, 32))
-        drone.ray_points = [(40, 20), (24, 20)]
+        drone.runtime_state.move_to((40, 32))
+        drone.runtime_state.set_ray_points([(40, 20), (24, 20)])
+        snapshot = drone.snapshot()
 
         self.assertIsInstance(drone.renderer, DroneRenderer)
-        self.assertIs(drone.floor_surf, drone.renderer.path_surface)
-        self.assertIs(drone.vision_overlay, drone.renderer.vision_surface)
 
-        drone.renderer.draw_path()
-        drone.renderer.draw_vision_overlay()
-        drone.renderer.draw_icon()
+        drone.renderer.draw_path(snapshot)
+        drone.renderer.draw_vision_overlay(snapshot)
+        drone.renderer.draw_icon(snapshot)
 
         self.assertGreater(
-            int(np.count_nonzero(pygame.surfarray.array_alpha(drone.floor_surf))),
+            int(
+                np.count_nonzero(
+                    pygame.surfarray.array_alpha(
+                        drone.renderer.path_surface
+                    )
+                )
+            ),
             0,
         )
         self.assertGreater(
             int(
                 np.count_nonzero(
-                    pygame.surfarray.array_alpha(drone.vision_overlay)
+                    pygame.surfarray.array_alpha(
+                        drone.renderer.vision_surface
+                    )
                 )
             ),
             0,
@@ -93,17 +115,21 @@ class AgentRendererTests(unittest.TestCase):
         rover.graph.add_node((36, 32))
 
         self.assertIsInstance(rover.renderer, RoverRenderer)
-        self.assertIs(rover.floor_surf, rover.renderer.path_surface)
 
         rover.renderer.draw_path()
         rover.renderer.draw_icon()
 
         self.assertGreater(
-            int(np.count_nonzero(pygame.surfarray.array_alpha(rover.floor_surf))),
+            int(
+                np.count_nonzero(
+                    pygame.surfarray.array_alpha(
+                        rover.renderer.path_surface
+                    )
+                )
+            ),
             0,
         )
 
 
 if __name__ == "__main__":
     unittest.main()
-

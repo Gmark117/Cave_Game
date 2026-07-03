@@ -10,12 +10,18 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from AgentFactory import AgentFactory
+from SimulationConfig import MissionConfig, SimulationConfig
 
 
 class AgentFactoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.control = SimpleNamespace(
-            settings=SimpleNamespace(num_drones=5, map_dim="SMALL"),
+            settings=SimulationConfig(
+                mission_config=MissionConfig(
+                    map_dim="SMALL",
+                    num_drones=5,
+                )
+            ),
             game=SimpleNamespace(),
             start_point=(3, 4),
             map_matrix=np.zeros((6, 7), dtype=np.uint8),
@@ -54,13 +60,19 @@ class AgentFactoryTests(unittest.TestCase):
                 ) as rover_cls:
                     AgentFactory.build_rovers(self.control)
 
-        self.assertEqual(self.control.num_rovers, 2)
-        self.assertEqual(rover_cls.call_count, 2)
+        self.assertEqual(self.control.num_rovers, 3)
+        self.assertEqual(rover_cls.call_count, 3)
         self.assertEqual(self.control.rover_icon.get_size(), (40, 40))
         self.assertIs(
             self.control.rovers[0].args[-1],
             self.control.map_matrix,
         )
+
+    def test_rover_count_includes_first_aid_and_charging_carriers(self) -> None:
+        self.assertEqual(AgentFactory.get_rover_count(3), 2)
+        self.assertEqual(AgentFactory.get_rover_count(4), 2)
+        self.assertEqual(AgentFactory.get_rover_count(5), 3)
+        self.assertEqual(AgentFactory.get_rover_count(8), 3)
 
     def test_icon_dimensions_follow_map_size(self) -> None:
         self.assertEqual(AgentFactory.get_drone_icon_dim("LARGE"), (10, 10))

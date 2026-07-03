@@ -6,6 +6,7 @@ import numpy as np
 
 from mapping.rover_targets import RoverTargetService
 from mapping.terrain_knowledge import TerrainKnowledge
+from mission.service_dependencies import RoverTargetDependencies
 
 
 class RoverTargetServiceTests(unittest.TestCase):
@@ -20,7 +21,17 @@ class RoverTargetServiceTests(unittest.TestCase):
             game=SimpleNamespace(width=4, height=4),
         )
         self.control.rover_assignment_lock = threading.Lock()
-        self.service = RoverTargetService(self.control)
+        self.service = RoverTargetService(
+            RoverTargetDependencies(
+                cave_map=self.control.map_matrix,
+                terrain_knowledge=self.control.terrain_knowledge,
+                assignment_lock=self.control.rover_assignment_lock,
+                assignments=self.control.rover_assignments,
+                completed_targets=self.control.completed_rover_targets,
+                norm_width=self.control.game.width,
+                norm_height=self.control.game.height,
+            )
+        )
 
     def test_acquire_reserves_best_known_rough_target(self) -> None:
         self.control.terrain_knowledge.roughness[1, 1] = 0.5

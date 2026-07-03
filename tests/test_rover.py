@@ -10,20 +10,26 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from Rover import Rover
+from SimulationConfig import MissionConfig, SimulationConfig
 
 
 class RoverTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.rover_targets = SimpleNamespace(
+            acquire=Mock(return_value=(2, 0)),
+            release=Mock(),
+        )
         self.control = SimpleNamespace(
             delay=1 / 15,
-            acquire_rover_target=Mock(return_value=(2, 0)),
+            rover_targets=self.rover_targets,
             compute_rover_path=Mock(
                 return_value=[(0, 0), (1, 0), (2, 0)]
             ),
-            release_rover_target=Mock(),
         )
         game = SimpleNamespace(
-            sim_settings=SimpleNamespace(map_dim="SMALL"),
+            sim_settings=SimulationConfig(
+                mission_config=MissionConfig(map_dim="SMALL")
+            ),
             window=pygame.Surface((16, 16), pygame.SRCALPHA),
             width=16,
             height=16,
@@ -50,7 +56,7 @@ class RoverTests(unittest.TestCase):
         self.assertEqual(self.rover.pos, (2, 0))
         self.assertEqual(self.rover.status, "Done")
         self.assertIsNone(self.rover.target)
-        self.control.release_rover_target.assert_called_once_with(
+        self.rover_targets.release.assert_called_once_with(
             0,
             completed=True,
         )
@@ -60,7 +66,7 @@ class RoverTests(unittest.TestCase):
 
         self.rover.move()
 
-        self.control.release_rover_target.assert_called_once_with(
+        self.rover_targets.release.assert_called_once_with(
             0,
             completed=False,
         )
@@ -68,12 +74,19 @@ class RoverTests(unittest.TestCase):
         self.assertEqual(self.rover.current_path, [])
 
     def test_rover_owns_local_terrain_knowledge(self) -> None:
-        self.assertEqual(self.rover.known_roughness.shape, (4, 4))
-        self.assertTrue(np.all(self.rover.known_roughness == -1.0))
-        self.assertTrue(np.all(self.rover.terrain_confidence == 0.0))
-        self.assertIs(
-            self.rover.terrain_lock,
-            self.rover.terrain_knowledge.lock,
+        knowledge = self.rover.terrain_knowledge
+        self.assertEqual(knowledge.roughness.shape, (4, 4))
+        self.assertTrue(np.all(knowledge.roughness == -1.0))
+        self.assertTrue(np.all(knowledge.confidence == 0.0))
+        self.assertFalse(
+            any(
+                hasattr(self.rover, name)
+                for name in (
+                    "known_roughness",
+                    "terrain_confidence",
+                    "terrain_lock",
+                )
+            )
         )
 
 

@@ -4,10 +4,9 @@ Separates UI concerns from simulation logic by managing SLAM map visibility,
 selected drone state, and click-event dispatch to control-center views.
 """
 
-from typing import Optional, Tuple, List, Any
+from typing import Any, List, Optional, Tuple
 
 import pygame
-import numpy as np
 
 
 class PresentationAdapter:
@@ -35,25 +34,80 @@ class PresentationAdapter:
         self.terrain_heatmap_dirty = True
         self.terrain_heatmap_surf = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
 
-    def toggle_terrain_heatmap(self) -> None:
-        """Toggle global SLAM map visibility on/off."""
+    def reset(self, drone_objects: List[Any]) -> None:
+        """Restore the default combined occupancy and agent-overlay state."""
+        self.show_terrain_heatmap = False
+        self.selected_drone_heatmap_id = None
+        self.terrain_heatmap_dirty = True
+        for drone in drone_objects:
+            drone.set_overlay_visibility(
+                show_path=True,
+                show_vision=True,
+            )
+
+    def toggle_terrain_heatmap(self, drone_objects: List[Any]) -> None:
+        """Toggle global terrain rendering and synchronize agent overlays."""
         self.show_terrain_heatmap = not self.show_terrain_heatmap
         self.terrain_heatmap_dirty = True
+        self._apply_heatmap_visibility(drone_objects)
 
-    def toggle_drone_heatmap(self, drone_id: int) -> None:
-        """Toggle per-drone SLAM map: show if different drone, hide if same drone."""
+    def toggle_drone_heatmap(
+        self,
+        drone_id: int,
+        drone_objects: List[Any],
+    ) -> None:
+        """Toggle one drone's map and synchronize all agent overlays."""
+        if not self._valid_drone_id(drone_id, drone_objects):
+            return
         if self.selected_drone_heatmap_id == drone_id:
-            # Clicking same drone toggles it off
             self.selected_drone_heatmap_id = None
         else:
-            # Clicking different drone selects it
             self.selected_drone_heatmap_id = drone_id
         self.terrain_heatmap_dirty = True
+        self._apply_heatmap_visibility(drone_objects)
 
-    def _set_all_drone_paths(self, drone_objects: List[Any], enabled: bool) -> None:
-        """Set the path overlay visibility for every drone in the current mission."""
-        for drone in drone_objects:
-            drone.show_path = enabled
+    def toggle_drone_path(
+        self,
+        drone_id: int,
+        drone_objects: List[Any],
+    ) -> None:
+        """Toggle one drone's path overlay."""
+        if self._valid_drone_id(drone_id, drone_objects):
+            drone_objects[drone_id].toggle_path()
+
+    def toggle_drone_vision(
+        self,
+        drone_id: int,
+        drone_objects: List[Any],
+    ) -> None:
+        """Toggle one drone's vision overlay."""
+        if self._valid_drone_id(drone_id, drone_objects):
+            drone_objects[drone_id].toggle_vision()
+
+    def _apply_heatmap_visibility(self, drone_objects: List[Any]) -> None:
+        """Derive every drone overlay from the current heatmap selection."""
+        selected_id = self.selected_drone_heatmap_id
+        if selected_id is None:
+            show_overlays = not self.show_terrain_heatmap
+            for drone in drone_objects:
+                drone.set_overlay_visibility(
+                    show_path=show_overlays,
+                    show_vision=show_overlays,
+                )
+            return
+
+        show_selected_path = not self.show_terrain_heatmap
+        for drone_id, drone in enumerate(drone_objects):
+            is_selected = drone_id == selected_id
+            drone.set_overlay_visibility(
+                show_path=is_selected and show_selected_path,
+                show_vision=is_selected,
+            )
+
+    @staticmethod
+    def _valid_drone_id(drone_id: int, drone_objects: List[Any]) -> bool:
+        """Return whether an action targets a current mission drone."""
+        return 0 <= drone_id < len(drone_objects)
 
     def handle_click(
         self,
@@ -68,41 +122,16 @@ class PresentationAdapter:
             control_center: ControlCenter instance with drawable rectangles.
             drone_objects: List of drone objects for overlay toggling.
         """
-        click_result = control_center.handle_click(mouse_pos, drone_objects)
+        click_result = control_center.handle_click(mouse_pos)
         if click_result is None:
             return
 
         action, drone_id = click_result
-        if action == 'terrain_heatmap':
-            # Toggle global heatmap; do not clear per-drone selection.
-            self.toggle_terrain_heatmap()
-            # Update drone overlays based on current combined/per-drone state
-            if self.selected_drone_heatmap_id is None:
-                # No per-drone selected: show/hide all overlays based on global heatmap
-                enable = not self.show_terrain_heatmap
-                for drone in drone_objects:
-                    drone.show_path = enable
-                    drone.show_vision = enable
-            else:
-                # Per-drone selected: show selected drone's vision always
-                sel = self.selected_drone_heatmap_id
-                for i, drone in enumerate(drone_objects):
-                    drone.show_vision = (i == sel)
-                    # Selected drone's path visible only in occupancy (H off)
-                    drone.show_path = (i == sel) and (not self.show_terrain_heatmap)
-        elif action == 'drone_heatmap' and drone_id is not None:
-            # Toggle per-drone selection and keep global heatmap state as-is.
-            self.toggle_drone_heatmap(drone_id)
-            sel = self.selected_drone_heatmap_id
-            if sel is None:
-                # No per-drone selected: revert to global behavior
-                enable = not self.show_terrain_heatmap
-                for drone in drone_objects:
-                    drone.show_path = enable
-                    drone.show_vision = enable
-            else:
-                # Per-drone selected: show only the selected drone's vision
-                for i, drone in enumerate(drone_objects):
-                    drone.show_vision = (i == sel)
-                    drone.show_path = (i == sel) and (not self.show_terrain_heatmap)
-        # Note: 'drone_overlay' is handled by ControlCenter directly (it calls drone.toggle_path/toggle_vision)
+        if action == "terrain_heatmap":
+            self.toggle_terrain_heatmap(drone_objects)
+        elif action == "drone_heatmap" and drone_id is not None:
+            self.toggle_drone_heatmap(drone_id, drone_objects)
+        elif action == "drone_path" and drone_id is not None:
+            self.toggle_drone_path(drone_id, drone_objects)
+        elif action == "drone_vision" and drone_id is not None:
+            self.toggle_drone_vision(drone_id, drone_objects)

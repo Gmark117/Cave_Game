@@ -1,42 +1,50 @@
 """Control-panel debug information for a running mission."""
 
-import time
-from typing import Any, List
+from typing import Iterable, List, Optional
+
+from agents.drone_runtime_state import DroneSnapshot
+from mission.service_dependencies import MissionDebugDependencies
 
 
 class MissionDebugInfo:
     """Build small runtime status lines for the control center."""
 
-    def __init__(self, control: Any) -> None:
-        self.control = control
+    def __init__(self, dependencies: MissionDebugDependencies) -> None:
+        self.dependencies = dependencies
 
-    def build_lines(self) -> List[str]:
+    def build_lines(
+        self,
+        drone_snapshots: Optional[Iterable[DroneSnapshot]] = None,
+    ) -> List[str]:
         """Build runtime debug lines for the control panel."""
-        control = self.control
-        now = time.perf_counter()
-        dirty_maps = sum(
-            1
-            for drone in control.drones
-            if getattr(drone, "slam_map", None) is not None
-            and drone.slam_map.dirty
-        )
+        dependencies = self.dependencies
+        if drone_snapshots is None:
+            drone_snapshots = (
+                drone.snapshot() for drone in dependencies.get_drones()
+            )
+        snapshots = tuple(drone_snapshots)
+        now = dependencies.simulation_time()
+        dirty_maps = dependencies.dirty_map_count()
         frontier_count = sum(
-            len(getattr(drone, "border", ())) for drone in control.drones
+            len(snapshot.frontiers) for snapshot in snapshots
         )
-        selected_id = control.presentation.selected_drone_heatmap_id
+        selected_id = dependencies.presentation.selected_drone_heatmap_id
         selected_label = (
             "all/none selected" if selected_id is None else f"drone {selected_id}"
         )
 
         cooldown_remaining = 0.0
-        if control.drones:
+        if snapshots:
             cooldown_remaining = min(
                 max(
                     0.0,
-                    drone.frontier_rebuild_cooldown
-                    - (now - drone.last_frontier_rebuild),
+                    snapshot.frontier_rebuild_cooldown
+                    - (
+                        now
+                        - snapshot.last_frontier_rebuild
+                    ),
                 )
-                for drone in control.drones
+                for snapshot in snapshots
             )
 
         lines = [
@@ -46,7 +54,7 @@ class MissionDebugInfo:
             f"Frontier cooldown: {cooldown_remaining:.2f}s",
         ]
 
-        profiler = getattr(control, "frame_profiler", None)
+        profiler = dependencies.frame_profiler
         if profiler is not None:
             timing = profiler.snapshot()
             if timing.sample_count > 0:

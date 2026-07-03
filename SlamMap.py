@@ -1,9 +1,11 @@
-"""Hybrid SLAM map state: occupancy grid + sparse point cloud."""
+"""Thread-safe hybrid SLAM state with detached snapshots."""
 
 from collections import deque
+from dataclasses import dataclass
 from itertools import islice
-from typing import Deque, Iterable, List, Optional, Tuple
 import math
+import threading
+from typing import Deque, Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -11,164 +13,262 @@ UNKNOWN = -1
 FREE = 0
 OCCUPIED = 1
 
+Point = Tuple[int, int]
+
+
+@dataclass(frozen=True)
+class SlamSnapshot:
+    """Detached occupancy, confidence, point-cloud, and version state."""
+
+    occupancy: np.ndarray
+    confidence: np.ndarray
+    point_cloud: Tuple[Point, ...] = ()
+    version: int = 0
+
+    def __post_init__(self) -> None:
+        if self.occupancy.ndim != 2 or self.confidence.ndim != 2:
+            raise ValueError("SLAM snapshot arrays must be two-dimensional")
+        if self.occupancy.shape != self.confidence.shape:
+            raise ValueError("SLAM snapshot arrays must have the same shape")
+
 
 class SlamMap:
-    """Tracks local SLAM occupancy and sparse point observations."""
+    """Own synchronized SLAM arrays, point observations, and merge rules."""
 
     def __init__(self, map_h: int, map_w: int, max_points: int = 6000) -> None:
-        self.occupancy = np.full((map_h, map_w), UNKNOWN, dtype=np.int8)
-        self.confidence = np.zeros((map_h, map_w), dtype=np.float32)
+        self._lock = threading.RLock()
+        self._occupancy = np.full(
+            (map_h, map_w),
+            UNKNOWN,
+            dtype=np.int8,
+        )
+        self._confidence = np.zeros(
+            (map_h, map_w),
+            dtype=np.float32,
+        )
+        self._point_cloud: Deque[Point] = deque()
+        self._point_set: set[Point] = set()
+        self._version = 0
+
         self.max_range = max(1.0, float(math.hypot(map_w, map_h)))
-        self.dirty = True
+        self.max_points = max(0, int(max_points))
 
-        self.point_cloud: Deque[Tuple[int, int]] = deque()
-        self._point_set = set()
-        self.max_points = max_points
+    @property
+    def version(self) -> int:
+        """Return the current map version."""
+        with self._lock:
+            return self._version
 
-    def update_from_rays(self, origin: Tuple[float, float], ray_hits: Iterable[object]) -> None:
-        """Update occupancy and point cloud from ray hits."""
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """Return the occupancy-grid shape."""
+        return self._occupancy.shape
+
+    def snapshot(self, point_limit: Optional[int] = None) -> SlamSnapshot:
+        """Return detached arrays and recent points from one atomic version."""
+        with self._lock:
+            points = self._snapshot_points(point_limit)
+            return SlamSnapshot(
+                occupancy=self._occupancy.copy(),
+                confidence=self._confidence.copy(),
+                point_cloud=points,
+                version=self._version,
+            )
+
+    def has_changed_since(self, version: int) -> bool:
+        """Return whether this map has advanced beyond `version`."""
+        with self._lock:
+            return self._version != int(version)
+
+    def update_from_rays(
+        self,
+        origin: Tuple[float, float],
+        ray_hits: Iterable[object],
+    ) -> bool:
+        """Update occupancy and point state from rays, returning whether it changed."""
         ox = int(round(origin[0]))
         oy = int(round(origin[1]))
-        updated = False
 
-        for hit in ray_hits:
-            end = getattr(hit, 'end', None)
-            if end is None:
-                continue
-            ex, ey = int(end[0]), int(end[1])
-            if ex < 0 or ey < 0 or ex >= self.occupancy.shape[1] or ey >= self.occupancy.shape[0]:
-                continue
+        with self._lock:
+            updated = False
+            for hit in ray_hits:
+                end = getattr(hit, "end", None)
+                if end is None:
+                    continue
+                ex, ey = int(end[0]), int(end[1])
+                if (
+                    ex < 0
+                    or ey < 0
+                    or ex >= self._occupancy.shape[1]
+                    or ey >= self._occupancy.shape[0]
+                ):
+                    continue
 
-            points = self._line_points(ox, oy, ex, ey)
-            if not points:
-                continue
+                points = self._line_points(ox, oy, ex, ey)
+                if not points:
+                    continue
 
-            dist = float(getattr(hit, 'distance', math.dist((ox, oy), (ex, ey))))
-            base_conf = max(0.15, 1.0 - (dist / self.max_range))
+                distance = float(
+                    getattr(
+                        hit,
+                        "distance",
+                        math.dist((ox, oy), (ex, ey)),
+                    )
+                )
+                base_confidence = max(
+                    0.15,
+                    1.0 - (distance / self.max_range),
+                )
 
-            if getattr(hit, 'hit', False):
-                free_points = points[:-1]
-                hit_point = points[-1]
-                updated |= self._mark_points(free_points, FREE, base_conf)
-                updated |= self._mark_points([hit_point], OCCUPIED, min(1.0, base_conf + 0.25))
-                self._add_point(hit_point)
-            else:
-                updated |= self._mark_points(points, FREE, base_conf)
+                if getattr(hit, "hit", False):
+                    updated |= self._mark_points(
+                        points[:-1],
+                        FREE,
+                        base_confidence,
+                    )
+                    updated |= self._mark_points(
+                        [points[-1]],
+                        OCCUPIED,
+                        min(1.0, base_confidence + 0.25),
+                    )
+                    updated |= self._add_point(points[-1])
+                else:
+                    updated |= self._mark_points(
+                        points,
+                        FREE,
+                        base_confidence,
+                    )
 
-        if updated:
-            self.dirty = True
+            if updated:
+                self._version += 1
+            return updated
 
-    def merge_from(self, other: 'SlamMap') -> None:
-        """Merge another SlamMap into this one using confidence dominance."""
-        if other is None:
-            return
+    def merge_from(self, source: SlamSnapshot) -> bool:
+        """Merge a detached snapshot using confidence dominance."""
+        source_occupancy = np.asarray(source.occupancy, dtype=np.int8)
+        source_confidence = np.asarray(source.confidence, dtype=np.float32)
+        if source_occupancy.shape != source_confidence.shape:
+            raise ValueError("SLAM snapshot arrays must have the same shape")
 
-        h = min(self.occupancy.shape[0], other.occupancy.shape[0])
-        w = min(self.occupancy.shape[1], other.occupancy.shape[1])
-        if h <= 0 or w <= 0:
-            return
+        with self._lock:
+            height = min(
+                self._occupancy.shape[0],
+                source_occupancy.shape[0],
+            )
+            width = min(
+                self._occupancy.shape[1],
+                source_occupancy.shape[1],
+            )
 
-        target_conf = self.confidence[:h, :w]
-        source_conf = other.confidence[:h, :w]
-        source_occ = other.occupancy[:h, :w]
+            updated = False
+            if height > 0 and width > 0:
+                target_confidence = self._confidence[:height, :width]
+                incoming_confidence = source_confidence[:height, :width]
+                higher_confidence = incoming_confidence > target_confidence
+                if np.any(higher_confidence):
+                    target_occupancy = self._occupancy[:height, :width]
+                    incoming_occupancy = source_occupancy[:height, :width]
+                    target_occupancy[higher_confidence] = (
+                        incoming_occupancy[higher_confidence]
+                    )
+                    target_confidence[higher_confidence] = (
+                        incoming_confidence[higher_confidence]
+                    )
+                    updated = True
 
-        higher_conf = source_conf > target_conf
-        if np.any(higher_conf):
-            self.occupancy[:h, :w][higher_conf] = source_occ[higher_conf]
-            target_conf[higher_conf] = source_conf[higher_conf]
-            self.dirty = True
+            for point in source.point_cloud:
+                updated |= self._add_point(point)
 
-        for point in other.point_cloud:
-            self._add_point(point)
-
-    def merge_from_arrays(
-        self,
-        occupancy: np.ndarray,
-        confidence: np.ndarray,
-        point_cloud: Optional[List[Tuple[int, int]]] = None
-    ) -> None:
-        """Merge occupancy/confidence arrays into this map."""
-        if occupancy is None or confidence is None:
-            return
-
-        h = min(self.occupancy.shape[0], occupancy.shape[0], confidence.shape[0])
-        w = min(self.occupancy.shape[1], occupancy.shape[1], confidence.shape[1])
-        if h <= 0 or w <= 0:
-            return
-
-        target_conf = self.confidence[:h, :w]
-        source_conf = confidence[:h, :w]
-        source_occ = occupancy[:h, :w]
-
-        higher_conf = source_conf > target_conf
-        if np.any(higher_conf):
-            self.occupancy[:h, :w][higher_conf] = source_occ[higher_conf]
-            target_conf[higher_conf] = source_conf[higher_conf]
-            self.dirty = True
-
-        if point_cloud:
-            for point in point_cloud:
-                self._add_point(point)
+            if updated:
+                self._version += 1
+            return updated
 
     def is_known(self, x: int, y: int, threshold: float = 0.6) -> bool:
-        if y < 0 or y >= self.confidence.shape[0] or x < 0 or x >= self.confidence.shape[1]:
-            return True
-        return float(self.confidence[y, x]) >= threshold
+        """Return whether a cell is known; out-of-bounds cells are unavailable."""
+        with self._lock:
+            if (
+                y < 0
+                or y >= self._confidence.shape[0]
+                or x < 0
+                or x >= self._confidence.shape[1]
+            ):
+                return True
+            return float(self._confidence[y, x]) >= threshold
 
-    def recent_points(self, limit: int) -> List[Tuple[int, int]]:
-        """Return up to `limit` most-recent points from the cloud."""
-        n = max(0, int(limit))
-        if n == 0 or not self.point_cloud:
-            return []
-        # Use deque iteration from the right to avoid copying the full container.
-        return list(islice(reversed(self.point_cloud), n))
+    def _snapshot_points(self, point_limit: Optional[int]) -> Tuple[Point, ...]:
+        if point_limit is None:
+            return tuple(self._point_cloud)
 
-    def _mark_points(self, points: Iterable[Tuple[int, int]], occ_value: int, conf: float) -> bool:
+        limit = max(0, int(point_limit))
+        if limit == 0 or not self._point_cloud:
+            return ()
+        recent = islice(reversed(self._point_cloud), limit)
+        return tuple(recent)
+
+    def _mark_points(
+        self,
+        points: Iterable[Point],
+        occupancy_value: int,
+        confidence: float,
+    ) -> bool:
         updated = False
         for x, y in points:
-            if y < 0 or y >= self.confidence.shape[0] or x < 0 or x >= self.confidence.shape[1]:
+            if (
+                y < 0
+                or y >= self._confidence.shape[0]
+                or x < 0
+                or x >= self._confidence.shape[1]
+            ):
                 continue
-            prev_conf = float(self.confidence[y, x])
-            if conf > prev_conf + 1e-4:
-                self.occupancy[y, x] = occ_value
-                self.confidence[y, x] = min(1.0, conf)
+
+            previous_confidence = float(self._confidence[y, x])
+            if confidence > previous_confidence + 1e-4:
+                self._occupancy[y, x] = occupancy_value
+                self._confidence[y, x] = min(1.0, confidence)
                 updated = True
-            elif self.occupancy[y, x] == occ_value:
-                boosted = min(1.0, prev_conf + conf * 0.15)
-                if boosted > prev_conf + 1e-4:
-                    self.confidence[y, x] = boosted
+            elif self._occupancy[y, x] == occupancy_value:
+                boosted = min(
+                    1.0,
+                    previous_confidence + confidence * 0.15,
+                )
+                if boosted > previous_confidence + 1e-4:
+                    self._confidence[y, x] = boosted
                     updated = True
         return updated
 
-    def _add_point(self, point: Tuple[int, int]) -> None:
-        if point in self._point_set:
-            return
-        self.point_cloud.append(point)
-        self._point_set.add(point)
-        if len(self.point_cloud) > self.max_points:
-            old = self.point_cloud.popleft()
-            self._point_set.discard(old)
+    def _add_point(self, point: Point) -> bool:
+        normalized = (int(point[0]), int(point[1]))
+        if normalized in self._point_set or self.max_points == 0:
+            return False
 
-    def _line_points(self, x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:
+        self._point_cloud.append(normalized)
+        self._point_set.add(normalized)
+        if len(self._point_cloud) > self.max_points:
+            old = self._point_cloud.popleft()
+            self._point_set.discard(old)
+        return True
+
+    @staticmethod
+    def _line_points(x0: int, y0: int, x1: int, y1: int) -> list[Point]:
         """Return integer points along a line using Bresenham's algorithm."""
-        points: List[Tuple[int, int]] = []
+        points: list[Point] = []
 
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
         sx = 1 if x0 < x1 else -1
         sy = 1 if y0 < y1 else -1
-        err = dx - dy
+        error = dx - dy
 
         x, y = x0, y0
         while True:
             points.append((x, y))
             if x == x1 and y == y1:
                 break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
+            doubled_error = 2 * error
+            if doubled_error > -dy:
+                error -= dy
                 x += sx
-            if e2 < dx:
-                err += dx
+            if doubled_error < dx:
+                error += dx
                 y += sy
         return points

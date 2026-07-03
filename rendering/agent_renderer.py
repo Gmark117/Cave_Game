@@ -4,6 +4,7 @@ from typing import Any
 
 import pygame
 
+from agents.drone_runtime_state import DroneSnapshot
 from asset_config.rendering import Colors
 
 
@@ -33,36 +34,35 @@ class DroneRenderer:
             6,
         )
 
-    def draw_path(self) -> None:
+    def draw_path(self, snapshot: DroneSnapshot) -> None:
         """Render route history and the shared starting-point marker."""
         drone = self.drone
-        with drone.exploration_lock:
-            for i in range(1, len(drone.graph.pos)):
-                pygame.draw.line(
-                    self.path_surface,
-                    (*drone.color, 255),
-                    drone.graph.pos[i],
-                    drone.graph.pos[i - 1],
-                    2,
-                )
+        for i in range(1, len(snapshot.path_history)):
+            pygame.draw.line(
+                self.path_surface,
+                (*drone.color, 255),
+                snapshot.path_history[i],
+                snapshot.path_history[i - 1],
+                2,
+            )
 
-            if drone.show_path:
-                drone.game.window.blit(self.path_surface, (0, 0))
+        if snapshot.show_path:
+            drone.game.window.blit(self.path_surface, (0, 0))
 
         drone.game.window.blit(
             self.start_surface,
             (drone.start_pos[0] - 6, drone.start_pos[1] - 6),
         )
 
-    def draw_vision_overlay(self) -> None:
+    def draw_vision_overlay(self, snapshot: DroneSnapshot) -> None:
         """Render the latest sensor-ray endpoints as a vision cone."""
         drone = self.drone
-        if not drone.show_vision:
+        if not snapshot.show_vision:
             return
 
         self.vision_surface.fill((0, 0, 0, 0))
-        if len(drone.ray_points) > 1:
-            points = [drone.pos] + drone.ray_points
+        if len(snapshot.ray_points) > 1:
+            points = [snapshot.position, *snapshot.ray_points]
             pygame.draw.polygon(
                 self.vision_surface,
                 (*drone.color, drone.alpha),
@@ -72,20 +72,23 @@ class DroneRenderer:
             pygame.draw.circle(
                 self.vision_surface,
                 (*drone.color, drone.alpha),
-                (int(drone.pos[0]), int(drone.pos[1])),
+                (
+                    int(snapshot.position[0]),
+                    int(snapshot.position[1]),
+                ),
                 12,
                 1,
             )
 
         drone.game.window.blit(self.vision_surface, (0, 0))
 
-    def draw_icon(self) -> None:
+    def draw_icon(self, snapshot: DroneSnapshot) -> None:
         """Blit the drone icon centered at its current position."""
         drone = self.drone
         icon_width, icon_height = drone.icon.get_size()
         icon_position = (
-            int(drone.pos[0] - icon_width // 2),
-            int(drone.pos[1] - icon_height // 2),
+            int(snapshot.position[0] - icon_width // 2),
+            int(snapshot.position[1] - icon_height // 2),
         )
         drone.game.window.blit(drone.icon, icon_position)
 
@@ -128,4 +131,3 @@ class RoverRenderer:
             int(rover.pos[1] - icon_height // 2),
         )
         rover.game.window.blit(rover.icon, icon_position)
-

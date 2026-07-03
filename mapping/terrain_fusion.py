@@ -5,36 +5,37 @@ rendering. It does not distribute knowledge to agents and must not influence
 active agent decisions.
 """
 
-from typing import Any, Iterable
-
-import pygame
+from typing import Iterable
 
 from mapping.terrain_knowledge import (
     TerrainSample,
     fuse_terrain_samples,
 )
+from mission.service_dependencies import TerrainFusionDependencies
 
 
 class TerrainFusionService:
     """Fuse observations into mission telemetry without mutating agents."""
 
-    def __init__(self, control: Any) -> None:
-        self.control = control
+    def __init__(self, dependencies: TerrainFusionDependencies) -> None:
+        self.dependencies = dependencies
 
     def record_scan(self, samples: Iterable[TerrainSample]) -> None:
         """Fuse observations into mission telemetry and update the UI."""
-        control = self.control
-        map_updated = control.terrain_knowledge.record_samples(samples)
+        dependencies = self.dependencies
+        map_updated = dependencies.terrain_knowledge.record_samples(samples)
 
-        now = pygame.time.get_ticks() / 1000.0
+        now = dependencies.simulation_time()
         if (
             map_updated
-            and (now - control.last_explored_update)
-            >= control.explored_update_interval
+            and (now - dependencies.last_explored_update)
+            >= dependencies.explored_update_interval
         ):
-            control.control_center.explored_percent = round(
-                control.terrain_knowledge.explored_ratio() * 100
+            dependencies.get_control_center().set_explored_percent(
+                round(
+                    dependencies.terrain_knowledge.explored_ratio() * 100
+                )
             )
-            control.last_explored_update = now
+            dependencies.last_explored_update = now
         if map_updated:
-            control.presentation.terrain_heatmap_dirty = True
+            dependencies.presentation.terrain_heatmap_dirty = True

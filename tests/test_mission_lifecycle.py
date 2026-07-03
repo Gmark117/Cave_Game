@@ -1,4 +1,5 @@
 import os
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,6 +12,7 @@ import pygame
 
 from Game import Game
 from MissionControl import MissionControl
+from SimulationConfig import MissionConfig, SimulationConfig
 from mapping.terrain_knowledge import TerrainKnowledge
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
@@ -18,11 +20,13 @@ from rendering.mission_renderer import MissionRenderer
 
 class FakeGame:
     def __init__(self) -> None:
-        self.sim_settings = SimpleNamespace(
-            seed=7,
-            mission=0,
-            num_drones=3,
-            map_dim="SMALL",
+        self.sim_settings = SimulationConfig(
+            mission_config=MissionConfig(
+                seed=7,
+                objective=0,
+                num_drones=3,
+                map_dim="SMALL",
+            )
         )
         cave = np.zeros((8, 8), dtype=np.uint8)
         self.cartographer = SimpleNamespace(
@@ -65,22 +69,19 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertEqual(mission.drones, [])
         self.assertEqual(mission.rovers, [])
         self.assertIsNone(mission.control_center)
-        self.assertIsNone(mission.pool)
-        self.assertIsNone(mission.map_shm)
+        self.assertIsNone(mission.pathfinding.pool)
+        self.assertIsNone(mission.pathfinding.map_shm)
         self.assertIsInstance(mission.terrain_knowledge, TerrainKnowledge)
-        self.assertIs(
-            mission.known_roughness,
-            mission.terrain_knowledge.roughness,
-        )
-        self.assertIs(
-            mission.terrain_confidence,
-            mission.terrain_knowledge.confidence,
-        )
-        self.assertIs(mission.terrain_lock, mission.terrain_knowledge.lock)
         self.assertFalse(hasattr(mission, "last_pair_share"))
         self.assertFalse(hasattr(mission, "pair_share_cooldown"))
         self.assertEqual(mission.terrain_sharing.last_drone_share, {})
         self.assertEqual(mission.terrain_sharing.last_pair_share, {})
+        self.assertFalse(hasattr(mission, "toggle_terrain_heatmap"))
+        self.assertFalse(hasattr(mission, "toggle_drone_heatmap"))
+        self.assertFalse(hasattr(mission, "_update_visibility_state"))
+        self.assertFalse(hasattr(mission, "draw"))
+        self.assertFalse(hasattr(mission, "map_shm"))
+        self.assertFalse(hasattr(mission, "known_roughness"))
         self.assertIsInstance(mission.pathfinding, PathfindingService)
         self.assertIsInstance(mission.renderer, MissionRenderer)
         self.assertIs(
@@ -103,15 +104,13 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission._has_run)
         self.assertEqual(mission.compute_path((0, 0), (1, 1)), [])
         self.assertFalse(mission.is_mission_over())
-        with self.assertRaises(RuntimeError):
-            mission.draw()
 
         mission.pathfinding.shutdown = Mock()
         mission._shutdown_mission([])
         mission.pathfinding.shutdown.assert_called_once_with()
         self.assertTrue(mission.mission_event.is_set())
 
-    def test_pathfinding_methods_are_compatibility_facades(self) -> None:
+    def test_pathfinding_methods_delegate_to_owned_service(self) -> None:
         mission = MissionControl(FakeGame())
         mission.pathfinding.compute_path = Mock(
             return_value=[(0, 0), (1, 1)],
@@ -134,11 +133,11 @@ class MissionLifecycleTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             weighted_args[0],
-            mission.known_roughness,
+            mission.terrain_knowledge.roughness,
         )
         np.testing.assert_array_equal(
             weighted_args[1],
-            mission.terrain_confidence,
+            mission.terrain_knowledge.confidence,
         )
         self.assertEqual(weighted_args[2:], ((0, 0), (0, 1)))
 
@@ -225,7 +224,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.completed = False
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
-        mission._share_terrain_with_rovers = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
         mission.stop_button_rect.x = 0
         mission.stop_button_rect.y = 0
         event = SimpleNamespace(
@@ -241,7 +240,7 @@ class MissionLifecycleTests(unittest.TestCase):
             mission._run_mission_loop()
 
         self.assertTrue(mission.completed)
-        mission._share_terrain_with_rovers.assert_not_called()
+        mission.terrain_sharing.share_with_rovers.assert_not_called()
         mission.update_sensors.assert_not_called()
         mission.renderer.draw.assert_not_called()
 
@@ -251,7 +250,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.completed = False
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
-        mission._share_terrain_with_rovers = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
         event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
             button=1,
@@ -266,7 +265,7 @@ class MissionLifecycleTests(unittest.TestCase):
 
         self.assertTrue(mission.completed)
         self.assertTrue(mission.restart_requested)
-        mission._share_terrain_with_rovers.assert_not_called()
+        mission.terrain_sharing.share_with_rovers.assert_not_called()
         mission.update_sensors.assert_not_called()
         mission.renderer.draw.assert_not_called()
 
@@ -280,7 +279,7 @@ class MissionLifecycleTests(unittest.TestCase):
         )
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
-        mission._share_terrain_with_rovers = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
         mission.is_mission_over = Mock()
         pause_event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
@@ -304,7 +303,7 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.pause_event.is_set())
         mission.control_center.pause_timer.assert_called_once_with()
         mission.control_center.resume_timer.assert_not_called()
-        mission._share_terrain_with_rovers.assert_not_called()
+        mission.terrain_sharing.share_with_rovers.assert_not_called()
         mission.is_mission_over.assert_not_called()
         mission.update_sensors.assert_not_called()
         mission.renderer.draw.assert_called_once_with()
@@ -323,6 +322,49 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertTrue(mission.pause_event.is_set())
         mission.control_center.pause_timer.assert_called_once_with()
         mission.control_center.resume_timer.assert_called_once_with()
+
+    def test_pause_waits_for_inflight_move_and_blocks_followup_sharing(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.delay = 0.01
+        move_started = threading.Event()
+        release_move = threading.Event()
+        pause_finished = threading.Event()
+
+        def move() -> None:
+            move_started.set()
+            release_move.wait(2.0)
+
+        drone = SimpleNamespace(
+            mission_completed=Mock(return_value=False),
+            move=move,
+        )
+        mission.drones = [drone]
+        mission.terrain_sharing.share_with_nearby_drones = Mock()
+        worker = threading.Thread(target=mission.drone_thread, args=(0,))
+        pauser = threading.Thread(
+            target=lambda: (
+                mission.toggle_pause(),
+                pause_finished.set(),
+            )
+        )
+
+        worker.start()
+        self.assertTrue(move_started.wait(2.0))
+        pauser.start()
+        self.assertFalse(pause_finished.wait(0.05))
+
+        release_move.set()
+        self.assertTrue(pause_finished.wait(2.0))
+
+        self.assertTrue(mission.is_paused)
+        mission.terrain_sharing.share_with_nearby_drones.assert_not_called()
+
+        mission.mission_event.set()
+        mission.pause_coordinator.stop()
+        worker.join(2.0)
+        pauser.join(2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(pauser.is_alive())
 
     def test_restart_run_does_not_return_to_windowed_mode(self) -> None:
         mission = MissionControl(FakeGame())
@@ -351,7 +393,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.completed = False
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
-        mission._share_terrain_with_rovers = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
         mission.is_mission_over = Mock(return_value=True)
 
         timestamps = [

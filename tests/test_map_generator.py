@@ -1,7 +1,5 @@
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -9,9 +7,11 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-import MapGenerator as map_generator_module
 from MapGenerator import MapGenerator, _image_path_from_key
+from SimulationConfig import MissionConfig, SimulationConfig
+from asset_config.gameplay import Display
 from asset_config.media import Images
+from generation import CaveGenerationResult
 
 
 class MapGeneratorTests(unittest.TestCase):
@@ -23,108 +23,62 @@ class MapGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "Unknown image key"):
             _image_path_from_key("missing")
 
-    def test_set_starts_is_deterministic_and_within_bounds(self) -> None:
-        first = object.__new__(MapGenerator)
-        first.width = 200
-        first.height = 180
-        first.rng = np.random.default_rng(5)
-        second = object.__new__(MapGenerator)
-        second.width = 200
-        second.height = 180
-        second.rng = np.random.default_rng(5)
-
-        first.set_starts()
-        second.set_starts()
-
-        self.assertEqual(first.worm_x, second.worm_x)
-        self.assertEqual(first.worm_y, second.worm_y)
-        self.assertEqual(len(first.worm_x), MapGenerator.NUM_PROCESSES)
-        self.assertTrue(all(0 <= x < first.width for x in first.worm_x))
-        self.assertTrue(all(0 <= y < first.height for y in first.worm_y))
-
-    def test_terrain_roughness_is_floor_only_bounded_and_reproducible(self) -> None:
-        cave = np.ones((8, 8), dtype=np.uint8)
-        cave[1:7, 1:7] = 0
-
-        first = object.__new__(MapGenerator)
-        first.width = 8
-        first.height = 8
-        first.bin_map = cave
-        first.rng = np.random.default_rng(9)
-        second = object.__new__(MapGenerator)
-        second.width = 8
-        second.height = 8
-        second.bin_map = cave.copy()
-        second.rng = np.random.default_rng(9)
-
-        first.build_terrain_roughness()
-        second.build_terrain_roughness()
-
-        np.testing.assert_allclose(
-            first.terrain_roughness,
-            second.terrain_roughness,
+    def test_facade_generates_writes_and_exposes_mission_inputs(self) -> None:
+        bin_map = np.array([[1, 0], [0, 1]], dtype=np.uint8)
+        roughness = np.array([[0.0, 0.2], [0.4, 0.0]], dtype=np.float32)
+        result = CaveGenerationResult(
+            bin_map=bin_map,
+            terrain_roughness=roughness,
+            worm_x=[1, 2],
+            worm_y=[3, 4],
+            worm_inputs=(5, 6, 7),
+            completed_workers=2,
+            worker_crashed=False,
         )
-        self.assertTrue(np.all(first.terrain_roughness[cave == 1] == 0.0))
-        self.assertGreaterEqual(float(first.terrain_roughness.min()), 0.0)
-        self.assertLessEqual(float(first.terrain_roughness.max()), 1.0)
-
-    def test_dig_map_delegates_workers_copies_result_and_cleans_up(self) -> None:
-        generator = object.__new__(MapGenerator)
-        generator.bin_map = np.ones((3, 4), dtype=np.float32)
-        generator.height = 3
-        generator.width = 4
-        generator.worm_x = [1, 2]
-        generator.worm_y = [1, 2]
-        generator.worm_inputs = (3, 4, 5)
-        generator.settings = SimpleNamespace(seed=7)
-        generator.rng = np.random.default_rng(7)
-        generator.proc_counter = 0
-        generator.game = SimpleNamespace(
-            menu=SimpleNamespace(blit_loading=Mock()),
+        cave_generator = Mock()
+        cave_generator.generate.return_value = result
+        game = SimpleNamespace(menu=SimpleNamespace(blit_loading=Mock()))
+        settings = SimulationConfig(
+            mission_config=MissionConfig(seed=7, map_dim="SMALL")
         )
-        shm = SimpleNamespace(name="test-map")
-        shared_result = np.zeros((3, 4), dtype=np.uint8)
 
-        def monitor(_processes, callback):
-            callback()
-            callback()
-            return False
+        with patch("MapGenerator.CaveGenerator", return_value=cave_generator) as generator_cls:
+            with patch("MapGenerator.MapArtifactWriter") as writer_cls:
+                cartographer = MapGenerator(game, settings)
 
-        with patch("MapGenerator.os.cpu_count", return_value=2):
-            with patch(
-                "MapGenerator.safe_shm_create",
-                return_value=(shm, shared_result),
-            ):
-                with patch(
-                    "MapGenerator.start_worms",
-                    return_value=["p0", "p1"],
-                ) as start_worms:
-                    with patch(
-                        "MapGenerator.monitor_worms",
-                        side_effect=monitor,
-                    ):
-                        with patch("MapGenerator.safe_shm_close") as close:
-                            generator.dig_map(4)
+        generator_cls.assert_called_once_with(
+            Display.FULL_W - Display.LEGEND_WIDTH,
+            Display.FULL_H,
+            7,
+            "SMALL",
+            MapGenerator.NUM_PROCESSES,
+        )
+        cave_generator.generate.assert_called_once()
+        progress = cave_generator.generate.call_args.args[0]
+        progress.on_digging()
+        progress.on_post_processing()
+        self.assertEqual(
+            game.menu.blit_loading.call_args_list,
+            [
+                unittest.mock.call(["Digging..."]),
+                unittest.mock.call(["Breeding bats..."]),
+            ],
+        )
+        writer = writer_cls.return_value
+        self.assertIs(writer.write.call_args.args[0], bin_map)
+        self.assertIs(cartographer.bin_map, bin_map)
+        self.assertIs(cartographer.terrain_roughness, roughness)
+        self.assertEqual(cartographer.worm_x, [1, 2])
+        self.assertEqual(cartographer.worm_y, [3, 4])
+        self.assertEqual(cartographer.worm_inputs, (5, 6, 7))
+        self.assertEqual(cartographer.proc_counter, 2)
+        self.assertFalse(cartographer.worker_crashed)
 
-        self.assertEqual(generator.proc_counter, 2)
-        np.testing.assert_array_equal(generator.bin_map, shared_result)
-        start_worms.assert_called_once()
-        close.assert_called_once_with(shm)
+    def test_digging_progress_ignores_missing_loading_overlay(self) -> None:
+        cartographer = object.__new__(MapGenerator)
+        cartographer.game = SimpleNamespace()
 
-    def test_save_map_writes_image_and_matrix_under_project_assets(self) -> None:
-        generator = object.__new__(MapGenerator)
-        generator.bin_map = np.array([[1, 0], [0, 1]], dtype=np.uint8)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_module = Path(temp_dir) / "MapGenerator.py"
-            with patch.object(map_generator_module, "__file__", str(fake_module)):
-                generator.save_map()
-
-            map_dir = Path(temp_dir) / "Assets" / "Map"
-            self.assertTrue((map_dir / "map.png").exists())
-            self.assertTrue((map_dir / "map_matrix.txt").exists())
-            saved_matrix = np.loadtxt(map_dir / "map_matrix.txt")
-            np.testing.assert_array_equal(saved_matrix, generator.bin_map)
+        cartographer._show_digging_progress()
 
 
 if __name__ == "__main__":

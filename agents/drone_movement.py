@@ -2,13 +2,13 @@
 
 import math
 import random as rand
-import time
 from typing import Any, List, Tuple
 
 import numpy as np
 
 from SlamMap import FREE
 from asset_config.helpers import next_cell_coords
+from mission.service_dependencies import DroneMovementDependencies
 
 
 Position = Tuple[int, int]
@@ -17,31 +17,34 @@ Position = Tuple[int, int]
 class DroneMovementController:
     """Drive one drone's exploration state machine."""
 
-    def __init__(self, drone: Any) -> None:
+    def __init__(
+        self,
+        drone: Any,
+        dependencies: DroneMovementDependencies,
+    ) -> None:
         self.drone = drone
+        self.dependencies = dependencies
         settings = drone.settings
 
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Position, float] = {}
-        self.frontier_rebuild_cooldown = float(
-            getattr(settings, "frontier_rebuild_cooldown", 0.25)
-        )
-        self.last_frontier_rebuild = 0.0
-        self.frontier_stride = int(getattr(settings, "frontier_stride", 4))
-        self.frontier_confidence_threshold = float(
-            getattr(settings, "frontier_confidence_threshold", 0.6)
+        self.frontier_stride = settings.frontier.stride
+        self.frontier_confidence_threshold = (
+            settings.frontier.confidence_threshold
         )
 
     def move(self) -> None:
         """Advance the drone's exploration or homing state."""
         drone = self.drone
-        if drone.done:
+        done, returning_home = (
+            drone.runtime_state.evaluate_mission_state()
+        )
+        if done:
             return
 
-        if drone.returning_home or (drone.explored and not drone.border):
-            drone.returning_home = True
+        if returning_home:
             if self.reach_start_point():
-                drone.done = True
+                drone.runtime_state.mark_done()
             return
 
         node_found = False
@@ -63,15 +66,16 @@ class DroneMovementController:
     def reach_start_point(self) -> bool:
         """Follow an A* path back to the drone's starting position."""
         drone = self.drone
-        if drone.pos == drone.start_pos:
+        snapshot = drone.snapshot()
+        if snapshot.position == drone.start_pos:
             return True
 
-        path = self._compute_path(drone.pos, drone.start_pos)
+        path = self._compute_path(snapshot.position, drone.start_pos)
         if not path:
             return False
 
         self._follow_path(path)
-        return drone.pos == drone.start_pos
+        return drone.snapshot().position == drone.start_pos
 
     def find_new_node(
         self,
@@ -81,6 +85,8 @@ class DroneMovementController:
         Raises `AssertionError` when no valid direction remains.
         """
         drone = self.drone
+        snapshot = drone.snapshot()
+        current_position = snapshot.position
         directions = 360
         all_dirs = list(range(directions))
         targets = [[0, 0] for _ in all_dirs]
@@ -89,12 +95,12 @@ class DroneMovementController:
         dir_blacklist = []
         for direction in all_dirs:
             targets[direction][0], targets[direction][1] = next_cell_coords(
-                *drone.pos,
+                *current_position,
                 drone.radius + 1,
                 direction * dir_res,
             )
-            if not drone.graph.is_valid(
-                drone.pos,
+            if not drone.runtime_state.graph_is_valid(
+                current_position,
                 (*targets[direction],),
             ):
                 dir_blacklist.append(direction)
@@ -110,15 +116,27 @@ class DroneMovementController:
         ]
         assert valid_dirs
 
-        drone.dir = rand.choice(valid_dirs)
-        target = next_cell_coords(*drone.pos, drone.step, drone.dir)
-        while not drone.graph.is_valid(drone.pos, target):
-            valid_dirs.remove(drone.dir)
-            valid_targets.remove((*targets[drone.dir],))
+        chosen_direction = rand.choice(valid_dirs)
+        target = next_cell_coords(
+            *current_position,
+            drone.step,
+            chosen_direction,
+        )
+        while not drone.runtime_state.graph_is_valid(
+            current_position,
+            target,
+        ):
+            valid_dirs.remove(chosen_direction)
+            valid_targets.remove((*targets[chosen_direction],))
             assert valid_dirs
-            drone.dir = rand.choice(valid_dirs)
-            target = next_cell_coords(*drone.pos, drone.step, drone.dir)
+            chosen_direction = rand.choice(valid_dirs)
+            target = next_cell_coords(
+                *current_position,
+                drone.step,
+                chosen_direction,
+            )
 
+        drone.runtime_state.set_direction(chosen_direction)
         return valid_dirs, valid_targets, target
 
     def explore(
@@ -129,13 +147,15 @@ class DroneMovementController:
     ) -> bool:
         """Attempt exploration toward `chosen_target`."""
         drone = self.drone
-        drone.explored = True
-        drone.dir_log.append(drone.dir)
-        drone.border.extend(valid_targets)
-        drone.border = list(set(drone.border))
-        valid_dirs.remove(drone.dir)
+        snapshot = drone.snapshot()
+        chosen_direction = snapshot.direction
+        drone.runtime_state.begin_exploration(
+            chosen_direction,
+            valid_targets,
+        )
+        valid_dirs.remove(chosen_direction)
 
-        path = self._compute_path(drone.pos, chosen_target)
+        path = self._compute_path(snapshot.position, chosen_target)
         if not path:
             return False
 
@@ -145,22 +165,38 @@ class DroneMovementController:
     def reach_border(self) -> bool:
         """Follow an A* path to the nearest viable frontier."""
         drone = self.drone
-        drone.border.sort(key=self.get_distance)
+        snapshot = drone.snapshot()
+        frontiers = sorted(
+            snapshot.frontiers,
+            key=lambda target: self._distance_from(
+                snapshot.position,
+                target,
+            ),
+        )
 
-        if not drone.border:
+        if not frontiers:
             self.maybe_rebuild_frontiers()
-            if not drone.border:
+            snapshot = drone.snapshot()
+            frontiers = sorted(
+                snapshot.frontiers,
+                key=lambda target: self._distance_from(
+                    snapshot.position,
+                    target,
+                ),
+            )
+            if not frontiers:
                 return False
 
-        now = time.perf_counter()
-        for target in list(drone.border):
-            if target == drone.pos:
+        now = self._simulation_time()
+        for target in frontiers:
+            current_position = drone.snapshot().position
+            if target == current_position:
                 continue
             retry_at = self.border_retry_until.get(target, 0.0)
             if now < retry_at:
                 continue
 
-            path = self._compute_path(drone.pos, target)
+            path = self._compute_path(current_position, target)
             if not path or len(path) <= 1:
                 self.border_retry_until[target] = (
                     now + self.border_retry_cooldown
@@ -168,8 +204,7 @@ class DroneMovementController:
                 continue
 
             self._follow_path(path)
-            if target in drone.border:
-                drone.border.remove(target)
+            drone.runtime_state.remove_frontier(target)
             self.border_retry_until.pop(target, None)
             return True
 
@@ -181,13 +216,10 @@ class DroneMovementController:
 
     def maybe_rebuild_frontiers(self) -> bool:
         """Rebuild frontiers if the configured cooldown has elapsed."""
-        now = time.perf_counter()
-        if (
-            now - self.last_frontier_rebuild
-        ) < self.frontier_rebuild_cooldown:
+        now = self._simulation_time()
+        if not self.drone.runtime_state.reserve_frontier_rebuild(now):
             return False
 
-        self.last_frontier_rebuild = now
         self.rebuild_frontiers(
             stride=max(1, self.frontier_stride),
             confidence_threshold=self.frontier_confidence_threshold,
@@ -201,9 +233,9 @@ class DroneMovementController:
     ) -> None:
         """Extract frontier cells from local SLAM and terrain confidence."""
         drone = self.drone
-        with drone.slam_lock:
-            occupancy = drone.slam_map.occupancy.copy()
-            slam_confidence = drone.slam_map.confidence.copy()
+        slam = drone.slam_map.snapshot(point_limit=0)
+        occupancy = slam.occupancy
+        slam_confidence = slam.confidence
 
         height, width = occupancy.shape
         cave = np.asarray(drone.cave)
@@ -243,21 +275,18 @@ class DroneMovementController:
             for y, x in zip(ys, xs)
         ]
 
-        with drone.exploration_lock:
-            drone.border = frontiers
-            self.border_retry_until = {}
+        drone.runtime_state.replace_frontiers(frontiers)
+        self.border_retry_until = {}
 
     def mission_completed(self) -> bool:
         """Return True once exploration is exhausted and the drone is home."""
         drone = self.drone
-        if not drone.explored:
+        snapshot = drone.snapshot()
+        if not snapshot.explored:
             return False
 
-        if not drone.border and not drone.done:
-            drone.returning_home = True
-            return False
-
-        if drone.done:
+        done, _ = drone.runtime_state.evaluate_mission_state()
+        if done:
             print(f"Drone {drone.id} has completed the mission!")
             return True
 
@@ -265,41 +294,41 @@ class DroneMovementController:
 
     def get_distance(self, target: Position) -> float:
         """Return distance to a frontier, deprioritizing already-visible cells."""
-        drone = self.drone
-        distance = math.dist(drone.pos, target)
-        if distance <= drone.radius:
-            return float(drone.game.width)
-        return distance
+        return self._distance_from(
+            self.drone.snapshot().position,
+            target,
+        )
 
-    def update_heading(self, previous: Position, current: Position) -> None:
-        """Update the drone heading from two consecutive positions."""
-        dx = current[0] - previous[0]
-        dy = current[1] - previous[1]
-        if dx == 0 and dy == 0:
-            return
-        drone = self.drone
-        drone.heading_deg = math.degrees(math.atan2(dx, -dy))
+    def _distance_from(
+        self,
+        position: Position,
+        target: Position,
+    ) -> float:
+        distance = math.dist(position, target)
+        if distance <= self.drone.radius:
+            return float(self.drone.game.width)
+        return distance
 
     def _compute_path(
         self,
         start: Position,
         goal: Position,
     ) -> List[Position]:
-        control = self.drone.control
-        if not hasattr(control, "compute_path"):
-            return []
-        return control.compute_path(start, goal)
+        return self.dependencies.compute_path(start, goal)
 
-    def _follow_path(self, path: List[Position]) -> None:
+    def _simulation_time(self) -> float:
+        return self.dependencies.simulation_time()
+
+    def _follow_path(self, path: List[Position]) -> bool:
         drone = self.drone
         for node in path:
-            previous = drone.pos
-            drone.pos = node
-            self.update_heading(previous, drone.pos)
-            drone.graph.add_node(node)
-            if hasattr(drone.control, "mission_event"):
-                drone.control.mission_event.wait(
-                    drone.delay / drone.speed_factor
-                )
-            else:
-                time.sleep(drone.delay / drone.speed_factor)
+            if not self.dependencies.pause_checkpoint():
+                return False
+
+            drone.runtime_state.move_to(node)
+
+            if not self.dependencies.wait_simulation_delay(
+                drone.delay / drone.speed_factor
+            ):
+                return False
+        return True

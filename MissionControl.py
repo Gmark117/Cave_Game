@@ -15,17 +15,30 @@ import pygame
 from asset_config.helpers import wall_hit
 from AgentFactory import AgentFactory
 from ControlCenter import ControlCenter
+from mapping.rover_targets import RoverTargetService
+from mapping.terrain_fusion import TerrainFusionService
 from mapping.terrain_knowledge import TerrainKnowledge
+from mapping.terrain_sharing import TerrainSharingService
+from mission.debug_info import MissionDebugInfo
 from mission.frame_timing import FrameProfiler
+from mission.pause_control import PauseCoordinator, SimulationClock
+from mission.service_dependencies import (
+    MissionDebugDependencies,
+    MissionRendererDependencies,
+    RoverTargetDependencies,
+    SlamViewDependencies,
+    TerrainFusionDependencies,
+    TerrainSharingDependencies,
+)
 from navigation.pathfinding import PathfindingService
 from PresentationAdapter import PresentationAdapter
 from SlamRenderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
-from MissionControlTerrain import MissionControlTerrainMixin
+from rendering.slam_view import SlamViewService
 from MissionControlLifecycle import MissionControlLifecycleMixin
 
 
-class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
+class MissionControl(MissionControlLifecycleMixin):
     """Orchestrates the simulation mission.
 
     Construction is side-effect-light and does not start threads, processes,
@@ -40,7 +53,7 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
                   to avoid circular imports).
         """
         # Set the seed from the settings
-        rand.seed(game.sim_settings.seed)
+        rand.seed(game.sim_settings.mission_config.seed)
 
         self.game         = game
         self.settings     = game.sim_settings 
@@ -60,26 +73,24 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         self.rover_assignment_lock = threading.Lock()
         self.rover_assignments = {}
         self.completed_rover_targets = set()
-        self.min_share_new_info_ratio = 0.04
-        self.min_share_overlap_diff_ratio = 0.18
-        self.min_share_roughness_delta = 0.12
-        self.share_compare_stride = 8
         # Temporary switch: keep rovers stationary
         self.rover_motion_enabled = False
 
         # Runtime resources are initialized explicitly by run().
         self.pathfinding = PathfindingService(
             self.map_matrix,
-            self.settings.num_drones,
+            self.settings.mission_config.num_drones,
         )
         self.mission_event = threading.Event()
+        self.simulation_clock = SimulationClock()
+        self.pause_coordinator = PauseCoordinator(self.mission_event)
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.is_paused = False
         self.clock: Optional[pygame.time.Clock] = None
         self.drones = []
         self.rovers = []
-        self.num_drones = self.settings.num_drones
+        self.num_drones = self.settings.mission_config.num_drones
         self.num_rovers = 0
         self.control_center: Optional[ControlCenter] = None
         self._runtime_initialized = False
@@ -92,16 +103,80 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
 
 
         # Initialize mission settings (0 for exploration, 1 for search & rescue)
-        self.mission   = self.settings.mission
+        self.mission   = self.settings.mission_config.objective
         self.completed = False # Track whether the mission is completed
 
         # Initialize presentation adapter for UI state and map rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
         self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
-        self._init_terrain_services()
-        self.renderer = MissionRenderer(self)
         self.last_explored_update = 0.0
         self.explored_update_interval = 0.5
+        self.terrain_fusion_dependencies = TerrainFusionDependencies(
+            terrain_knowledge=self.terrain_knowledge,
+            get_control_center=lambda: self.control_center,
+            presentation=self.presentation,
+            simulation_time=self.simulation_time,
+            explored_update_interval=self.explored_update_interval,
+            last_explored_update=self.last_explored_update,
+        )
+        self.terrain_fusion = TerrainFusionService(
+            self.terrain_fusion_dependencies
+        )
+        self.terrain_sharing = TerrainSharingService(
+            TerrainSharingDependencies(
+                sharing=self.settings.sharing,
+                cave_map=np.asarray(self.map_matrix),
+                map_width=self.map_w,
+                map_height=self.map_h,
+                terrain_knowledge=self.terrain_knowledge,
+                get_drones=lambda: self.drones,
+                get_rovers=lambda: self.rovers,
+                presentation=self.presentation,
+                simulation_time=self.simulation_time,
+            )
+        )
+        self.rover_targets = RoverTargetService(
+            RoverTargetDependencies(
+                cave_map=np.asarray(self.map_matrix),
+                terrain_knowledge=self.terrain_knowledge,
+                assignment_lock=self.rover_assignment_lock,
+                assignments=self.rover_assignments,
+                completed_targets=self.completed_rover_targets,
+                norm_width=self.game.width,
+                norm_height=self.game.height,
+            )
+        )
+        self.slam_view = SlamViewService(
+            SlamViewDependencies(
+                rendering=self.settings.rendering,
+                terrain_knowledge=self.terrain_knowledge,
+                presentation=self.presentation,
+                slam_renderer=self.slam_renderer,
+                get_drones=lambda: self.drones,
+                get_window=lambda: self.game.window,
+            )
+        )
+        self.debug_info = MissionDebugInfo(
+            MissionDebugDependencies(
+                get_drones=lambda: self.drones,
+                presentation=self.presentation,
+                dirty_map_count=self.slam_view.dirty_map_count,
+                simulation_time=self.simulation_time,
+                frame_profiler=self.frame_profiler,
+            )
+        )
+        self.renderer = MissionRenderer(
+            MissionRendererDependencies(
+                get_window=lambda: self.game.window,
+                slam_view=self.slam_view,
+                debug_info=self.debug_info,
+                get_control_center=lambda: self.control_center,
+                get_drones=lambda: self.drones,
+                get_rovers=lambda: self.rovers,
+                presentation=self.presentation,
+                is_paused=lambda: self.is_paused,
+            )
+        )
         
         # Set the starting position for drones
         self.start_point = None
@@ -117,34 +192,20 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         self.pause_event.set()
         self.is_paused = False
         self.game.display = self.game.to_maximised()
-        self.control_center = ControlCenter(
-            self.game,
-            self.settings.num_drones,
-        )
+        self.control_center = ControlCenter(self.game)
 
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
 
-        self.presentation.show_terrain_heatmap = False
-        self.presentation.selected_drone_heatmap_id = None
-        self.presentation.terrain_heatmap_dirty = True
-        for drone in self.drones:
-            drone.show_path = True
-            drone.show_vision = True
+        self.presentation.reset(self.drones)
 
         self.clock = pygame.time.Clock()
-        self._setup_pathfinding_resources()
+        self.pathfinding.start()
         self._runtime_initialized = True
 
         self.update_sensors()
         self.renderer.draw()
         pygame.display.update()
-        pygame.time.wait(1000)
-
-    def _setup_pathfinding_resources(self) -> None:
-        """Compatibility wrapper for pathfinding resource initialization."""
-        self.pathfinding.start()
-
 
     def set_start_point(self) -> None:
         """Pick a viable start point from the map generator worm starts.
@@ -175,18 +236,26 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
             - Movement speed is controlled by self.delay using an interruptible wait.
             - The wait mechanism allows for immediate response when mission_event is set.
         """
-        # Continue moving the drone until mission event is set or the drone completes its mission
-        while not self.mission_event.is_set() and not self.drones[drone_id].mission_completed():
-            if not self._wait_until_resumed():
-                break
-            self.drones[drone_id].move()  # Move the drone
-            
-            # Periodically share terrain data with nearby drones
-            self._share_terrain_with_nearby_drones(drone_id)
+        label = ("drone", drone_id)
+        if not self.pause_coordinator.register_current_worker(label):
+            return
+        try:
+            while (
+                not self.mission_event.is_set()
+                and not self.drones[drone_id].mission_completed()
+            ):
+                if not self.pause_checkpoint():
+                    break
+                self.drones[drone_id].move()
 
-            # Control the speed of movement
-            # Use Event.wait so the sleep is interruptible when `mission_event` is set
-            self.mission_event.wait(self.delay)
+                if not self.pause_checkpoint():
+                    break
+                self.terrain_sharing.share_with_nearby_drones(drone_id)
+
+                if not self.wait_simulation_delay(self.delay):
+                    break
+        finally:
+            self.pause_coordinator.unregister_current_worker()
 
 
     def compute_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
@@ -209,62 +278,59 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
         )
 
 
-    def toggle_terrain_heatmap(self) -> None:
-        """Toggle terrain heatmap visibility via presentation adapter."""
-        self.presentation.toggle_terrain_heatmap()
-        self._update_visibility_state()
-
-    def toggle_drone_heatmap(self, drone_id: int) -> None:
-        """Toggle per-drone heatmap visibility via presentation adapter."""
-        if drone_id < 0 or drone_id >= len(self.drones):
-            return
-        self.presentation.toggle_drone_heatmap(drone_id)
-        self._update_visibility_state()
-
     def rover_thread(self, rover_id: int) -> None:
         """Drive rover movement using the terrain-aware weighted planner."""
-        while not self.mission_event.is_set():
-            if not self._wait_until_resumed():
-                break
-            self.rovers[rover_id].move()
-            self.mission_event.wait(self.delay)
+        label = ("rover", rover_id)
+        if not self.pause_coordinator.register_current_worker(label):
+            return
+        try:
+            while not self.mission_event.is_set():
+                if not self.pause_checkpoint():
+                    break
+                self.rovers[rover_id].move()
+                if not self.wait_simulation_delay(self.delay):
+                    break
+        finally:
+            self.pause_coordinator.unregister_current_worker()
 
-    def _wait_until_resumed(self) -> bool:
-        """Block an agent while paused and return False when shutting down."""
-        while not self.mission_event.is_set():
-            if self.pause_event.wait(0.05):
-                return True
-        return False
+    def pause_checkpoint(self) -> bool:
+        """Park the calling simulation worker at a safe pause boundary."""
+        return self.pause_coordinator.checkpoint()
+
+    def wait_simulation_delay(self, duration: float) -> bool:
+        """Wait for active simulation time, excluding paused intervals."""
+        return self.pause_coordinator.wait(duration)
+
+    def simulation_time(self) -> float:
+        """Return monotonic mission time with paused intervals removed."""
+        return self.simulation_clock.now()
 
     def toggle_pause(self) -> None:
-        """Toggle mission updates and agent movement between paused and running."""
-        self.is_paused = not self.is_paused
-        if self.is_paused:
+        """Atomically park or resume all mission workers and simulation time."""
+        if not self.is_paused:
+            self.is_paused = True
             self.pause_event.clear()
+            self.simulation_clock.pause()
             if self.control_center is not None:
                 self.control_center.pause_timer()
+            self.pause_coordinator.pause()
             return
 
-        self.pause_event.set()
+        self.simulation_clock.resume()
         if self.control_center is not None:
             self.control_center.resume_timer()
+        self.is_paused = False
+        self.pause_event.set()
+        self.pause_coordinator.resume()
 
     def update_sensors(self) -> None:
         """Update every drone's SLAM and terrain knowledge."""
         for drone in self.drones:
             drone.update_sensors()
 
-    def draw_stop_button(self) -> None:
-        """Compatibility wrapper for stop-button rendering."""
-        self.renderer.draw_stop_button()
-
-    def draw(self) -> None:
-        """Compatibility wrapper for complete mission rendering."""
-        self.renderer.draw()
-
     @property
     def stop_button_rect(self) -> pygame.Rect:
-        """Legacy access to the renderer-owned stop-button hit area."""
+        """Expose the renderer-owned stop-button hit area."""
         return self.renderer.stop_button_rect
 
     @property
@@ -276,48 +342,3 @@ class MissionControl(MissionControlTerrainMixin, MissionControlLifecycleMixin):
     def pause_button_rect(self) -> pygame.Rect:
         """Expose the renderer-owned pause/play-button hit area."""
         return self.renderer.pause_button_rect
-
-    @property
-    def map_shm(self) -> Any:
-        """Legacy access to pathfinding shared memory."""
-        return self.pathfinding.map_shm
-
-    @property
-    def map_shape(self) -> Optional[Tuple[int, int]]:
-        """Legacy access to the shared pathfinding map shape."""
-        return self.pathfinding.map_shape
-
-    @property
-    def pool(self) -> Any:
-        """Legacy access to the pathfinding worker pool."""
-        return self.pathfinding.pool
-
-    @property
-    def pool_sem(self) -> Any:
-        """Legacy access to the pathfinding submission semaphore."""
-        return self.pathfinding.pool_sem
-
-    @property
-    def known_roughness(self) -> np.ndarray:
-        """Compatibility access to mission terrain roughness."""
-        return self.terrain_knowledge.roughness
-
-    @property
-    def terrain_confidence(self) -> np.ndarray:
-        """Compatibility access to mission terrain confidence."""
-        return self.terrain_knowledge.confidence
-
-    @property
-    def terrain_lock(self) -> Any:
-        """Compatibility access to the mission terrain lock."""
-        return self.terrain_knowledge.lock
-
-    @property
-    def floor_mask(self) -> np.ndarray:
-        """Compatibility access to the mission cave floor mask."""
-        return self.terrain_knowledge.floor_mask
-
-    @property
-    def floor_cells(self) -> int:
-        """Compatibility access to the mission floor-cell count."""
-        return max(1, self.terrain_knowledge.floor_cells)

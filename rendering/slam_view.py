@@ -5,18 +5,25 @@ from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
+from mission.service_dependencies import SlamViewDependencies
+
 
 class SlamViewService:
     """Build and draw cached SLAM/terrain map surfaces for MissionControl."""
 
-    def __init__(self, control: Any) -> None:
-        self.control = control
-        settings = getattr(control, "settings", None)
-        self.refresh_interval = max(
-            0.0,
-            float(getattr(settings, "slam_render_interval", 0.1)),
-        )
+    def __init__(self, dependencies: SlamViewDependencies) -> None:
+        self.dependencies = dependencies
+        self.refresh_interval = dependencies.rendering.refresh_interval
         self.last_refresh_time: float | None = None
+        self.rendered_versions: dict[int, int] = {}
+
+    def dirty_map_count(self) -> int:
+        """Return the number of drone maps newer than their rendered version."""
+        return sum(
+            1
+            for drone_id, drone in enumerate(self.dependencies.get_drones())
+            if self._map_is_dirty(drone_id, drone.slam_map)
+        )
 
     def refresh(self, drone_id: Optional[int] = None) -> None:
         """Rebuild the cached SLAM map surface.
@@ -25,39 +32,41 @@ class SlamViewService:
         terrain heatmap toggle is enabled. If a per-drone heatmap is selected,
         renders only that drone's SLAM/terrain data.
         """
-        control = self.control
-        if not control.drones:
-            control.slam_renderer.surface.fill((0, 0, 0, 0))
-            control.presentation.terrain_heatmap_dirty = False
+        dependencies = self.dependencies
+        drones = dependencies.get_drones()
+        if not drones:
+            dependencies.slam_renderer.surface.fill((0, 0, 0, 0))
+            dependencies.presentation.terrain_heatmap_dirty = False
+            self.rendered_versions.clear()
             self.last_refresh_time = time.perf_counter()
             return
 
-        h, w = control.floor_mask.shape
-        render_tail = int(getattr(control.settings, "slam_render_point_tail", 400))
+        h, w = dependencies.terrain_knowledge.floor_mask.shape
+        render_tail = dependencies.rendering.point_tail
 
-        selected_id = control.presentation.selected_drone_heatmap_id
-        if selected_id is not None and 0 <= selected_id < len(control.drones):
+        selected_id = (
+            drone_id
+            if drone_id is not None
+            else dependencies.presentation.selected_drone_heatmap_id
+        )
+        if selected_id is not None and 0 <= selected_id < len(drones):
             self._render_selected_drone(selected_id, h, w, render_tail)
         else:
             self._render_combined(h, w, render_tail)
 
-        control.presentation.terrain_heatmap_dirty = False
+        dependencies.presentation.terrain_heatmap_dirty = False
         self.last_refresh_time = time.perf_counter()
 
     def draw(self) -> None:
         """Blit the cached SLAM map overlay, refreshing it when dirty."""
-        control = self.control
-        if not control.drones:
+        dependencies = self.dependencies
+        if not dependencies.get_drones():
             return
 
-        any_dirty = control.presentation.terrain_heatmap_dirty
-        for drone in control.drones:
-            if (
-                getattr(drone, "slam_map", None) is not None
-                and drone.slam_map.dirty
-            ):
-                any_dirty = True
-                break
+        view_dirty = (
+            dependencies.presentation.terrain_heatmap_dirty
+            or self._current_view_is_dirty()
+        )
 
         now = time.perf_counter()
         refresh_due = (
@@ -65,22 +74,20 @@ class SlamViewService:
             or now < self.last_refresh_time
             or (now - self.last_refresh_time) >= self.refresh_interval
         )
-        if any_dirty and refresh_due:
+        if view_dirty and refresh_due:
             self.refresh()
 
-        control.game.window.blit(control.slam_renderer.surface, (0, 0))
+        dependencies.get_window().blit(dependencies.slam_renderer.surface, (0, 0))
 
     def _render_selected_drone(
         self, selected_id: int, h: int, w: int, render_tail: int
     ) -> None:
-        control = self.control
-        drone = control.drones[selected_id]
-
-        with drone.slam_lock:
-            occ = drone.slam_map.occupancy.copy()
-            conf = drone.slam_map.confidence.copy()
-            points = drone.slam_map.recent_points(render_tail)
-            drone.slam_map.dirty = False
+        dependencies = self.dependencies
+        drone = dependencies.get_drones()[selected_id]
+        slam = drone.slam_map.snapshot(point_limit=render_tail)
+        occ = slam.occupancy
+        conf = slam.confidence
+        points = list(slam.point_cloud)
 
         padded_occ = np.full((h, w), -1, dtype=np.int8)
         padded_conf = np.zeros((h, w), dtype=np.float32)
@@ -91,9 +98,9 @@ class SlamViewService:
             padded_occ[:eh, :ew] = occ[:eh, :ew]
             padded_conf[:eh, :ew] = conf[:eh, :ew]
 
-        if control.presentation.show_terrain_heatmap:
+        if dependencies.presentation.show_terrain_heatmap:
             terrain = drone.terrain_knowledge.snapshot()
-            control.slam_renderer.render(
+            dependencies.slam_renderer.render(
                 None,
                 None,
                 points,
@@ -102,22 +109,25 @@ class SlamViewService:
                 roughness_conf=terrain.confidence,
             )
         else:
-            control.slam_renderer.render(
+            dependencies.slam_renderer.render(
                 padded_occ, padded_conf, points, draw_points=False
             )
+        self.rendered_versions[selected_id] = slam.version
 
     def _render_combined(self, h: int, w: int, render_tail: int) -> None:
-        control = self.control
+        dependencies = self.dependencies
         combined_occ = np.full((h, w), -1, dtype=np.int8)
         combined_conf = np.zeros((h, w), dtype=np.float32)
         combined_points: List[Tuple[int, int]] = []
 
-        for drone in control.drones:
-            with drone.slam_lock:
-                occ = drone.slam_map.occupancy
-                conf = drone.slam_map.confidence
-                combined_points.extend(drone.slam_map.recent_points(render_tail))
-                drone.slam_map.dirty = False
+        snapshots = [
+            drone.slam_map.snapshot(point_limit=render_tail)
+            for drone in dependencies.get_drones()
+        ]
+        for slam in snapshots:
+            occ = slam.occupancy
+            conf = slam.confidence
+            combined_points.extend(slam.point_cloud)
 
             eh = min(h, occ.shape[0], conf.shape[0])
             ew = min(w, occ.shape[1], conf.shape[1])
@@ -130,9 +140,9 @@ class SlamViewService:
             combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
             target_conf[higher_conf] = source_conf[higher_conf]
 
-        if control.presentation.show_terrain_heatmap:
-            terrain = control.terrain_knowledge.snapshot()
-            control.slam_renderer.render(
+        if dependencies.presentation.show_terrain_heatmap:
+            terrain = dependencies.terrain_knowledge.snapshot()
+            dependencies.slam_renderer.render(
                 None,
                 None,
                 combined_points,
@@ -141,6 +151,27 @@ class SlamViewService:
                 roughness_conf=terrain.confidence,
             )
         else:
-            control.slam_renderer.render(
+            dependencies.slam_renderer.render(
                 combined_occ, combined_conf, combined_points, draw_points=False
             )
+
+        for drone_id, slam in enumerate(snapshots):
+            self.rendered_versions[drone_id] = slam.version
+
+    def _current_view_is_dirty(self) -> bool:
+        dependencies = self.dependencies
+        drones = dependencies.get_drones()
+        selected_id = dependencies.presentation.selected_drone_heatmap_id
+        if selected_id is not None and 0 <= selected_id < len(drones):
+            return self._map_is_dirty(
+                selected_id,
+                drones[selected_id].slam_map,
+            )
+        return any(
+            self._map_is_dirty(drone_id, drone.slam_map)
+            for drone_id, drone in enumerate(drones)
+        )
+
+    def _map_is_dirty(self, drone_id: int, slam_map: Any) -> bool:
+        rendered_version = self.rendered_versions.get(drone_id, -1)
+        return slam_map.has_changed_since(rendered_version)

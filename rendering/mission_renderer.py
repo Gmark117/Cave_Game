@@ -1,50 +1,66 @@
 """Top-level mission scene composition."""
 
 import math
-from typing import Any
 
 import pygame
 
 from asset_config.rendering import Colors
+from mission.service_dependencies import MissionRendererDependencies
+from rendering.control_center_view_model import (
+    build_drone_status_views,
+    build_rover_status_views,
+)
 
 
 class MissionRenderer:
     """Render the complete mission scene in a stable layer order."""
 
-    def __init__(self, control: Any) -> None:
-        self.control = control
+    def __init__(self, dependencies: MissionRendererDependencies) -> None:
+        self.dependencies = dependencies
         self.stop_button_rect = pygame.Rect(10, 10, 40, 40)
         self.restart_button_rect = pygame.Rect(58, 10, 40, 40)
         self.pause_button_rect = pygame.Rect(106, 10, 40, 40)
 
     def draw(self) -> None:
         """Render SLAM, agents, control center, and mission controls."""
-        control = self.control
-        if control.control_center is None:
+        dependencies = self.dependencies
+        control_center = dependencies.get_control_center()
+        if control_center is None:
             raise RuntimeError("Mission runtime is not initialized")
 
-        control.game.window.fill(Colors.BLACK.value)
-        control.slam_view.draw()
+        drones = tuple(dependencies.get_drones())
+        rovers = tuple(dependencies.get_rovers())
+        drone_snapshots = tuple(drone.snapshot() for drone in drones)
+        window = dependencies.get_window()
+        window.fill(Colors.BLACK.value)
+        dependencies.slam_view.draw()
 
-        for drone in control.drones:
-            drone.renderer.draw_path()
-        for rover in control.rovers:
+        for drone, snapshot in zip(drones, drone_snapshots):
+            drone.renderer.draw_path(snapshot)
+        for rover in rovers:
             rover.renderer.draw_path()
 
-        for drone in control.drones:
-            drone.renderer.draw_vision_overlay()
+        for drone, snapshot in zip(drones, drone_snapshots):
+            drone.renderer.draw_vision_overlay(snapshot)
 
-        for i, drone in enumerate(control.drones):
-            drone.renderer.draw_icon()
-            if i < len(control.rovers):
-                control.rovers[i].renderer.draw_icon()
+        for i, (drone, snapshot) in enumerate(
+            zip(drones, drone_snapshots)
+        ):
+            drone.renderer.draw_icon(snapshot)
+            if i < len(rovers):
+                rovers[i].renderer.draw_icon()
 
-        debug_lines = control.debug_info.build_lines()
-        control.control_center.draw_control_center(
-            control.drones,
-            control.rovers,
-            control.presentation.show_terrain_heatmap,
-            control.presentation.selected_drone_heatmap_id,
+        debug_lines = dependencies.debug_info.build_lines(drone_snapshots)
+        drone_statuses = build_drone_status_views(
+            drones,
+            drone_snapshots,
+        )
+        rover_statuses = build_rover_status_views(rovers)
+        control_center.draw_control_center(
+            drone_statuses,
+            rover_statuses,
+            dependencies.presentation.show_terrain_heatmap,
+            dependencies.presentation.selected_drone_heatmap_id,
             debug_lines,
         )
 
@@ -54,7 +70,7 @@ class MissionRenderer:
 
     def draw_stop_button(self) -> None:
         """Draw the mission stop control."""
-        window = self.control.game.window
+        window = self.dependencies.get_window()
         pygame.draw.rect(window, Colors.RED.value, self.stop_button_rect)
         pygame.draw.rect(
             window,
@@ -78,10 +94,10 @@ class MissionRenderer:
 
     def draw_restart_button(self) -> None:
         """Draw the current-mission restart control."""
-        window = self.control.game.window
+        window = self.dependencies.get_window()
         pygame.draw.rect(
             window,
-            Colors.OCHRE.value,
+            Colors.BLUE.value,
             self.restart_button_rect,
         )
         pygame.draw.rect(
@@ -153,10 +169,14 @@ class MissionRenderer:
 
     def draw_pause_button(self) -> None:
         """Draw a pause icon while running and a play icon while paused."""
-        window = self.control.game.window
+        window = self.dependencies.get_window()
         pygame.draw.rect(
             window,
-            Colors.GREEN.value if getattr(self.control, "is_paused", False) else Colors.BLUE.value,
+            (
+                Colors.GREEN.value
+                if self.dependencies.is_paused()
+                else Colors.OCHRE.value
+            ),
             self.pause_button_rect,
         )
         pygame.draw.rect(
@@ -167,7 +187,7 @@ class MissionRenderer:
         )
 
         center_x, center_y = self.pause_button_rect.center
-        if getattr(self.control, "is_paused", False):
+        if self.dependencies.is_paused():
             pygame.draw.polygon(
                 window,
                 Colors.WHITE.value,

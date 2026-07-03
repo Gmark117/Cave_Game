@@ -5,7 +5,6 @@ sampling. It deliberately contains no drawing code, so sensing continues
 regardless of whether the vision overlay is visible.
 """
 
-import time
 from typing import Any, Iterable
 
 import numpy as np
@@ -13,19 +12,23 @@ import numpy as np
 from RoughnessSampler import RoughnessSampler
 from VisionSensor import RayHit, VisionSensor
 from mapping.terrain_knowledge import TerrainSample
+from mission.service_dependencies import DroneSensorDependencies
 
 
 class DroneSensorController:
     """Update one drone's local SLAM and terrain knowledge."""
 
-    def __init__(self, drone: Any) -> None:
+    def __init__(
+        self,
+        drone: Any,
+        dependencies: DroneSensorDependencies,
+    ) -> None:
         self.drone = drone
+        self.dependencies = dependencies
         settings = drone.settings
-        scan_rays = int(getattr(settings, "slam_scan_rays", 60))
+        scan_rays = settings.slam.scan_rays
 
-        self.scan_interval = float(
-            getattr(settings, "slam_scan_interval", 0.25)
-        )
+        self.scan_interval = settings.slam.scan_interval
         self.last_scan_time = 0.0
         self.vision_sensor = VisionSensor(
             drone.cave,
@@ -34,45 +37,50 @@ class DroneSensorController:
             step=2,
         )
         self.roughness_sampler = RoughnessSampler(
-            drone.control.terrain_roughness,
+            dependencies.terrain_roughness,
             drone.cave,
         )
 
     def update(self) -> None:
         """Cast rays and update the drone's SLAM and terrain knowledge."""
         drone = self.drone
-        ray_hits = self.vision_sensor.cast_cone(drone.pos, drone.heading_deg)
-        drone.ray_points = [hit.end for hit in ray_hits]
+        snapshot = drone.snapshot()
+        origin = snapshot.position
+        ray_hits = self.vision_sensor.cast_cone(
+            origin,
+            snapshot.heading_deg,
+        )
+        drone.runtime_state.set_ray_points(hit.end for hit in ray_hits)
 
-        with drone.slam_lock:
-            drone.slam_map.update_from_rays(drone.pos, ray_hits)
+        drone.slam_map.update_from_rays(origin, ray_hits)
 
-        self.scan_terrain(ray_hits)
+        self.scan_terrain(ray_hits, origin=origin)
 
-    def scan_terrain(self, ray_hits: Iterable[RayHit]) -> None:
+    def scan_terrain(
+        self,
+        ray_hits: Iterable[RayHit],
+        origin: tuple[int, int] | None = None,
+    ) -> None:
         """Sample visible roughness and update local and mission terrain maps."""
         drone = self.drone
-        control = drone.control
-        if not hasattr(control, "terrain_roughness"):
-            return
-
-        terrain = control.terrain_roughness
+        terrain = self.dependencies.terrain_roughness
         if terrain.shape != np.asarray(drone.cave).shape:
             return
 
-        now = time.perf_counter()
+        now = self.dependencies.simulation_time()
         if (now - self.last_scan_time) < self.scan_interval:
             return
         self.last_scan_time = now
 
         self.roughness_sampler.terrain_roughness = terrain
+        if origin is None:
+            origin = drone.snapshot().position
         samples = self.roughness_sampler.sample_from_rays(
-            drone.pos,
+            origin,
             ray_hits,
         )
         self.record_local_scan(samples)
-        if hasattr(control, "record_terrain_scan"):
-            control.record_terrain_scan(samples)
+        self.dependencies.record_terrain_scan(samples)
 
     def record_local_scan(self, samples: Iterable[TerrainSample]) -> None:
         """Fuse terrain observations into this drone's local knowledge maps."""
