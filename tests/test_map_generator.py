@@ -7,8 +7,8 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from MapGenerator import MapGenerator, _image_path_from_key
-from SimulationConfig import MissionConfig, SimulationConfig
+from generation.map_generator import MapGenerator, _image_path_from_key
+from config.simulation_config import MissionConfig, SimulationConfig
 from asset_config.gameplay import Display
 from asset_config.media import Images
 from generation import CaveGenerationResult
@@ -42,8 +42,11 @@ class MapGeneratorTests(unittest.TestCase):
             mission_config=MissionConfig(seed=7, map_dim="SMALL")
         )
 
-        with patch("MapGenerator.CaveGenerator", return_value=cave_generator) as generator_cls:
-            with patch("MapGenerator.MapArtifactWriter") as writer_cls:
+        with patch(
+            "generation.map_generator.CaveGenerator",
+            return_value=cave_generator,
+        ) as generator_cls:
+            with patch("generation.map_generator.MapArtifactWriter") as writer_cls:
                 cartographer = MapGenerator(game, settings)
 
         generator_cls.assert_called_once_with(

@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from ControlCenter import ControlCenter
-from ControlCenterController import ControlHitMap
+from ui.control_center.controller import ControlHitMap
+from ui.control_center.facade import ControlCenter
 from asset_config.rendering import Colors
 
 

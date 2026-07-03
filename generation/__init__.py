@@ -8,6 +8,7 @@ from generation.cave_generator import (
 )
 from generation.cave_post_processor import CavePostProcessor
 from generation.map_artifact_writer import MapArtifactWriter, image_path_from_key
+from generation.map_generator import MapGenerator
 from generation.terrain_roughness_generator import TerrainRoughnessGenerator
 from generation.worm_process_runner import WormProcessRunner, WormRunResult
 
@@ -17,6 +18,7 @@ __all__ = [
     "CaveGenerator",
     "CavePostProcessor",
     "MapArtifactWriter",
+    "MapGenerator",
     "TerrainRoughnessGenerator",
     "WormProcessRunner",
     "WormRunResult",

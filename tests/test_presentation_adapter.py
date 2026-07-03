@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from PresentationAdapter import PresentationAdapter
+from mission.presentation_adapter import PresentationAdapter
 
 
 def make_drones(count: int = 3):

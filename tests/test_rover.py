@@ -9,8 +9,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from Rover import Rover
-from SimulationConfig import MissionConfig, SimulationConfig
+from agents.rover import Rover
+from config.simulation_config import MissionConfig, SimulationConfig
 
 
 class RoverTests(unittest.TestCase):

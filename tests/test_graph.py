@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from Graph import Graph
+from agents.graph import Graph
 
 
 class GraphTests(unittest.TestCase):
@@ -22,4 +22,3 @@ class GraphTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

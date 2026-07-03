@@ -6,7 +6,7 @@ import pygame
 
 from asset_config.rendering import Colors
 from mission.service_dependencies import MissionRendererDependencies
-from rendering.control_center_view_model import (
+from ui.control_center.view_model import (
     build_drone_status_views,
     build_rover_status_views,
 )

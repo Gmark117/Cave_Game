@@ -4,7 +4,7 @@ This guide follows the project from the executable entry point into the
 mission loop, agent threads, sensing, SLAM, terrain sharing, pathfinding, and
 UI rendering. It is intended as a first-read map for a new developer.
 
-Generated from the current worktree on 2026-06-21.
+Generated from the current worktree on 2026-07-03.
 
 ## 1. Big Picture
 
@@ -30,9 +30,9 @@ flowchart TD
     Rovers["Rover objects<br/>terrain-aware support state"]
     Knowledge["TerrainKnowledge<br/>roughness, confidence, lock, snapshots, merge"]
     Navigation["PathfindingService<br/>shared map, worker pool, route API"]
-    Path["AStarPathfinder<br/>A* algorithms"]
+    Path["navigation.astar_pathfinder<br/>A* algorithms"]
     Terrain["Focused mission services<br/>fusion, sharing, rover targets, SLAM view, debug"]
-    UI["ControlCenter façade + controller<br/>timer, tabs, action tokens"]
+    UI["ControlCenter facade + controller<br/>timer, tabs, action tokens"]
     ControlRender["ControlCenterRenderer<br/>Pygame layout, caches, hit map"]
     Render["SlamRenderer<br/>occupancy or terrain heatmap surface"]
     SceneRender["MissionRenderer<br/>complete frame composition"]
@@ -134,7 +134,7 @@ Primary startup classes:
 
 ## 3. Menu and Settings Flow
 
-`Menu` is the façade used by `Game`. Typed row models describe each screen,
+`Menu` is the facade used by `Game`. Typed row models describe each screen,
 while focused collaborators own navigation, rendering, persistence, and audio.
 
 ```mermaid
@@ -243,7 +243,7 @@ Key types:
 - `generation.MapArtifactWriter`
   - writes `map.png`, `map_matrix.txt`, `walls.png`, and `floor.png`.
 
-Important helper functions in `MapGenHelpers.py`:
+Important helper functions in `generation/mapgen_helpers.py`:
 
 - `safe_shm_create(init_map: np.ndarray)` -> shared memory object and ndarray view.
 - `safe_shm_close(shm) -> None` -> closes and unlinks shared memory.
@@ -432,7 +432,7 @@ flowchart TD
     ReachBorder["DroneMovementController.reach_border()"]
     Path["MissionControl.compute_path(start, goal)"]
     Service["PathfindingService.compute_path(start, goal)"]
-    AStar["AStarPathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
+    AStar["astar_pathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
     Runtime["DroneRuntimeState.move_to(node)<br/>position, heading, Graph history"]
 
     Thread --> Complete
@@ -667,8 +667,8 @@ flowchart TD
     Compute["MissionControl.compute_path(start, goal)"]
     Service["PathfindingService.compute_path(start, goal)"]
     Pool["bounded ProcessPoolExecutor.submit(...)"]
-    Shared["AStarPathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
-    Weighted["AStarPathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, ...)"]
+    Shared["astar_pathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
+    Weighted["astar_pathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, ...)"]
     Rover["Rover.move()"]
     RoverControl["MissionControl.compute_rover_path(start, goal)"]
     RoverService["PathfindingService.compute_weighted_path(...)"]
@@ -685,7 +685,7 @@ flowchart TD
 - `shutdown()` idempotently closes the pool and closes/unlinks shared memory.
 - Construction is allocation-free so `MissionControl.__init__()` remains setup-only.
 
-`AStarPathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000) -> list[tuple[int, int]]`
+`navigation.astar_pathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000) -> list[tuple[int, int]]`
 
 - Attaches to `multiprocessing.shared_memory.SharedMemory(name=shm_name)`.
 - Treats `arr[y, x] == 0` as traversable.
@@ -694,7 +694,7 @@ flowchart TD
 - Prevents tight diagonal corner cutting when both adjacent orthogonal cells are walls.
 - Returns a path from start to goal, inclusive, or `[]`.
 
-`AStarPathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, max_iters=200000, roughness_weight=4.0, unknown_penalty=2.5, low_confidence_penalty=1.5) -> list[tuple[int, int]]`
+`navigation.astar_pathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, max_iters=200000, roughness_weight=4.0, unknown_penalty=2.5, low_confidence_penalty=1.5) -> list[tuple[int, int]]`
 
 - Uses the same 8-neighbor A* structure.
 - Adds cost for unknown cells.
@@ -720,7 +720,7 @@ flowchart TD
     Target["roughness >= 0.35<br/>confidence >= 0.25"]
     Path["MissionControl.compute_rover_path(start, goal)"]
     Service["PathfindingService.compute_weighted_path(...)"]
-    Weighted["AStarPathfinder.compute_weighted_path(...)"]
+    Weighted["astar_pathfinder.compute_weighted_path(...)"]
     Release["rover_targets.release(rover_id, completed)"]
 
     Thread --> Move --> HasPath
@@ -766,7 +766,7 @@ flowchart TD
     Icons["drone.renderer.draw_icon(snapshot)<br/>rover.renderer.draw_icon()"]
     Debug["debug_info.build_lines(snapshots)"]
     Status["build detached DroneStatusView<br/>and RoverStatusView tuples"]
-    FrameModel["ControlCenter façade builds<br/>ControlCenterViewModel"]
+    FrameModel["ControlCenter facade builds<br/>ControlCenterViewModel"]
     CCRender["ControlCenterRenderer.render(view)<br/>returns ControlHitMap"]
     Stop["MissionRenderer.draw_stop_button()"]
 
@@ -800,13 +800,13 @@ flowchart TD
 Important UI classes:
 
 - `PresentationAdapter(map_w, map_h)`
-  - stores `show_terrain_heatmap`, `selected_drone_heatmap_id`, `terrain_heatmap_dirty`, and a heatmap surface.
+  - stores `show_terrain_heatmap`, `selected_drone_heatmap_id`, and `terrain_heatmap_dirty`.
   - solely owns heatmap selection and path/vision visibility transitions.
   - resets presentation state when runtime agents are created.
   - routes action tokens from the hit-testing-only `ControlCenter.handle_click(...)`.
 
 - `ControlCenter(game)`
-  - is the mission-facing façade.
+  - is the mission-facing facade.
   - delegates timer, progress, tab selection, and hit interpretation to
     `ControlCenterController`.
   - builds one immutable `ControlCenterViewModel` per frame.
@@ -873,7 +873,7 @@ External and standard libraries by responsibility:
 - `pathlib.Path` and `os`: resource and config paths.
 - `logging`: non-fatal diagnostics.
 
-Internal module relationships:
+Internal package and class relationships:
 
 ```mermaid
 flowchart LR
@@ -883,7 +883,7 @@ flowchart LR
     Game --> MissionControl
     Menu --> SimulationConfig
     Menu --> asset_config
-    MapGenerator --> MapGenHelpers
+    MapGenerator --> GenerationHelpers["generation.mapgen_helpers"]
     MapGenerator --> asset_config
     MissionControl --> AgentFactory
     MissionControl --> PathfindingService
@@ -899,7 +899,7 @@ flowchart LR
     MissionControl --> MissionDebugInfo
     MissionControl --> MissionControlLifecycle
     MissionControlLifecycle --> PathfindingService
-    PathfindingService --> AStarPathfinder
+    PathfindingService --> AStarModule["navigation.astar_pathfinder"]
     MissionControlLifecycle --> MissionRenderer
     MissionRenderer --> SlamViewService
     MissionRenderer --> MissionDebugInfo
@@ -940,7 +940,9 @@ flowchart LR
 ### `Game.py`
 
 - Libraries: `os`, `sys`, `pygame`, `typing.NoReturn`.
-- Internal imports: `Display`, `Images`, `MapGenerator`, `MissionControl`, `Menu`.
+- Internal imports: `asset_config.gameplay.Display`,
+  `asset_config.media.Images`, `generation.map_generator.MapGenerator`,
+  `mission.control.MissionControl`, and `ui.menu.facade.Menu`.
 - Class: `Game`
   - `__init__(self)`: initializes Pygame, key flags, window, and menu.
   - `run(self)`: menu loop.
@@ -948,26 +950,26 @@ flowchart LR
   - `check_events(self)`: maps Pygame events to `UP_KEY`, `DOWN_KEY`, `START_KEY`, `BACK_KEY`, `LEFT_KEY`, `RIGHT_KEY`.
   - `reset_keys(self)`, `blit_screen(self)`, `_setup_window(self, width, height)`, `to_maximised(self)`, `to_windowed(self)`.
 
-### `Menu.py`
+### `ui/menu/facade.py`
 
 - Class: `Menu`.
-- Stable façade used by `Game`; creates typed screens, coordinates focused
+- Stable facade used by `Game`; creates typed screens, coordinates focused
   collaborators, builds `SimulationConfig`, and starts missions.
 - Main methods:
   - `Menu.display()`, `_handle_global_input()`, `_draw()`, `build_sim_settings()`, `start_mission()`.
 
 ### Menu collaborators
 
-- `MenuModels.py`: typed screen, action, title, button, selector, text-input,
+- `ui/menu/models.py`: typed screen, action, title, button, selector, text-input,
   and slider models.
-- `MenuController.py`: navigation, input transitions, selection, and named
+- `ui/menu/controller.py`: navigation, input transitions, selection, and named
   action dispatch.
-- `MenuRenderer.py`: Pygame resources and all menu/loading-screen drawing.
-- `MenuSettingsRepository.py`: audio persistence, current simulation-format
+- `ui/menu/renderer.py`: Pygame resources and all menu/loading-screen drawing.
+- `ui/menu/settings_repository.py`: audio persistence, current simulation-format
   serialization, and legacy simulation-format import.
-- `MenuAudioService.py`: mixer resources and audio preference application.
+- `ui/menu/audio_service.py`: mixer resources and audio preference application.
 
-### `SimulationConfig.py` and `SimSettings.py`
+### `config/simulation_config.py` and `config/sim_settings.py`
 
 - `SimulationConfig` is the immutable validated runtime model passed from
   `Menu` to `MapGenerator` and `MissionControl`.
@@ -975,7 +977,7 @@ flowchart LR
 - `SimSettings` adapts the former flat constructor for compatibility tests and
   external callers; production consumers use nested sections.
 
-### `MapGenerator.py`
+### `generation/map_generator.py`
 
 - Libraries: `logging`, `pygame`.
 - Internal imports: display/config constants and generation services.
@@ -994,7 +996,7 @@ flowchart LR
 - `terrain_roughness_generator.py`: floor-only roughness synthesis.
 - `map_artifact_writer.py`: generated image, layer, and matrix persistence.
 
-### `MapGenHelpers.py`
+### `generation/mapgen_helpers.py`
 
 - Libraries: `math`, `logging`, `contextmanager`, `time`, `multiprocessing.Process`, `multiprocessing.shared_memory`, `numpy`, `cv2`, `pygame`.
 - Internal imports: `next_cell_coords`, `MapGen`.
@@ -1012,13 +1014,16 @@ flowchart LR
   - `homing_helper(rng, x, y, target_x, target_y)`
   - `make_derangement(n, rng)`
 
-### `MissionControl.py`
+### `mission/control.py`
 
 - Libraries: `random`, `threading`, `typing`, `numpy`, `pygame`.
-- Internal imports: `wall_hit`, `AgentFactory`, `ControlCenter`,
-  `TerrainKnowledge`, the focused mission services, `PathfindingService`,
-  `PresentationAdapter`, `SlamRenderer`, `MissionRenderer`, and the lifecycle
-  mixin.
+- Internal imports: `asset_config.helpers.wall_hit`,
+  `agents.factory.AgentFactory`, `ui.control_center.facade.ControlCenter`,
+  `mapping.terrain_knowledge.TerrainKnowledge`, the focused mission services,
+  `navigation.pathfinding.PathfindingService`,
+  `mission.presentation_adapter.PresentationAdapter`,
+  `rendering.slam_renderer.SlamRenderer`,
+  `rendering.mission_renderer.MissionRenderer`, and the lifecycle mixin.
 - Class: `MissionControl(MissionControlLifecycleMixin)`
   - `__init__(game)`: setup-only mission state construction.
   - `_initialize_runtime()`: window, control center, agents, resources, and first frame.
@@ -1029,7 +1034,7 @@ flowchart LR
   - `rover_thread(rover_id)`.
   - `update_sensors()`.
 
-### `MissionControlLifecycle.py`
+### `mission/lifecycle.py`
 
 - Libraries: `threading`, `time`, `typing.List`, `pygame`.
 - Class: `MissionControlLifecycleMixin`
@@ -1190,7 +1195,7 @@ flowchart LR
 - Copies live agent data into detached status views before drawing the control
   center.
 
-### `rendering/control_center_view_model.py`
+### `ui/control_center/view_model.py`
 
 - Libraries: `dataclasses`, `typing`.
 - Dataclasses: `AgentRosterEntry`, `DroneStatusView`, `RoverStatusView`.
@@ -1229,7 +1234,7 @@ flowchart LR
 - Owns exponentially smoothed frame-loop telemetry independently from mission
   orchestration and rendering.
 
-### `AgentFactory.py`
+### `agents/factory.py`
 
 - Libraries: `math`, `random`, `typing.Tuple`, `pygame`.
 - Internal imports: game options, media paths, colors, `Drone`, `Rover`.
@@ -1241,7 +1246,7 @@ flowchart LR
   - `get_drone_icon_dim(map_dim) -> tuple[int, int]`
   - `get_rover_icon_dim(map_dim) -> tuple[int, int]`
 
-### `Drone.py`
+### `agents/drone.py`
 
 - Libraries: `random`, `typing`.
 - Internal imports: `DroneRuntimeState`, `SlamMap`, `TerrainKnowledge`,
@@ -1258,7 +1263,7 @@ flowchart LR
   - Keeps the legacy constructor signature for factory compatibility, but only
     extracts the narrow mission callbacks needed by movement and sensing.
 
-### `Rover.py`
+### `agents/rover.py`
 
 - Libraries: `random`, `typing`.
 - Internal imports: `Graph`, `TerrainKnowledge`, `RoverRenderer`,
@@ -1275,7 +1280,7 @@ flowchart LR
 ### `navigation/pathfinding.py`
 
 - Libraries: `logging`, `os`, `threading`, `concurrent.futures.ProcessPoolExecutor`, `multiprocessing.shared_memory`, `typing`, `numpy`.
-- Internal import: `AStarPathfinder`.
+- Internal import: `navigation.astar_pathfinder`.
 - Class: `PathfindingService`
   - `start()`
   - `compute_path(start, goal)`
@@ -1283,14 +1288,14 @@ flowchart LR
   - `shutdown()`
 - Owns the mission pathfinding shared map, worker pool, submission semaphore, and rover algorithm delegation.
 
-### `AStarPathfinder.py`
+### `navigation/astar_pathfinder.py`
 
 - Libraries: `heapq`, `math`, `typing`, `numpy`, `multiprocessing.shared_memory`.
 - Functions:
   - `compute_path(shm_name, shape, start, goal, max_iters=200000)`
   - `compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, max_iters=200000, roughness_weight=4.0, unknown_penalty=2.5, low_confidence_penalty=1.5)`
 
-### `Graph.py`
+### `agents/graph.py`
 
 - Libraries: `typing`.
 - Internal import: `wall_hit`.
@@ -1300,7 +1305,7 @@ flowchart LR
   - `is_valid(curr_pos, candidate_pos)`
   - `cross_obs(x1, y1, x2, y2)`
 
-### `VisionSensor.py`
+### `mapping/vision_sensor.py`
 
 - Libraries: `dataclasses.dataclass`, `typing`, `math`.
 - Internal import: `wall_hit`.
@@ -1311,7 +1316,7 @@ flowchart LR
   - `cast_cone(origin, heading_deg)`
   - `_cast_single_ray(origin, angle_deg)`
 
-### `SlamMap.py`
+### `mapping/slam_map.py`
 
 - Libraries: `collections.deque`, `dataclasses`, `itertools.islice`,
   `threading`, `typing`, `math`, `numpy`.
@@ -1327,7 +1332,7 @@ flowchart LR
 - Owns synchronization, private arrays, bounded point storage,
   confidence-dominant merging, detached snapshots, and version advancement.
 
-### `SlamRenderer.py`
+### `rendering/slam_renderer.py`
 
 - Libraries: `typing`, `numpy`, `pygame`.
 - Internal imports: `FREE`, `OCCUPIED`.
@@ -1335,7 +1340,7 @@ flowchart LR
   - `__init__(map_w, map_h)`
   - `render(occupancy, confidence, point_cloud=None, draw_points=True, roughness=None, roughness_conf=None)`
 
-### `RoughnessSampler.py`
+### `mapping/roughness_sampler.py`
 
 - Libraries: `typing`, `math`, `numpy`.
 - Class: `RoughnessSampler`
@@ -1343,7 +1348,7 @@ flowchart LR
   - `sample_from_rays(origin, ray_hits, step=4)`
   - `_line_points(x0, y0, x1, y1, step)`
 
-### `PresentationAdapter.py`
+### `mission/presentation_adapter.py`
 
 - Libraries: `typing`, `pygame`.
 - Class: `PresentationAdapter`
@@ -1355,7 +1360,7 @@ flowchart LR
   - `toggle_drone_vision(drone_id, drone_objects)`
   - `handle_click(mouse_pos, control_center, drone_objects)`
 
-### `ControlCenter.py`
+### `ui/control_center/facade.py`
 
 - Libraries: `typing`.
 - Internal imports: `ControlCenterController`, `ControlHitMap`,
@@ -1366,9 +1371,9 @@ flowchart LR
   - `handle_click(mouse_pos)`
   - `start_timer()`, `pause_timer()`, `resume_timer()`, `format_timer()`
   - `set_explored_percent(value)`
-- Provides the stable mission-facing façade without owning Pygame resources.
+- Provides the stable mission-facing facade without owning Pygame resources.
 
-### `ControlCenterController.py`
+### `ui/control_center/controller.py`
 
 - Libraries: `dataclasses`, `time`, `typing`, `pygame`.
 - Dataclass: `ControlHitMap`.
@@ -1379,7 +1384,7 @@ flowchart LR
 - Owns non-rendering state and preserves all existing presentation action
   tokens.
 
-### `ControlCenterRenderer.py`
+### `ui/control_center/renderer.py`
 
 - Libraries: `pathlib`, `time`, `typing`, `pygame`.
 - Internal imports: display/media/rendering resources, immutable frame models,
@@ -1389,7 +1394,7 @@ flowchart LR
   - owns the control surface, layout constants, font/image caches, text/status
     composition, every draw helper, and hit-rectangle production.
 
-### `POI.py`
+### `mapping/poi.py`
 
 - Libraries: `dataclasses`, `typing`.
 - Class: `POI`
@@ -1407,12 +1412,12 @@ flowchart LR
 
 ## 15. New Developer Reading Order
 
-1. Start with `main.py`, `Game.py`, and `Menu.py` to understand launch and configuration.
-2. Read `SimulationConfig.py`, `MenuSettingsRepository.py`, and
+1. Start with `main.py`, `Game.py`, and `ui/menu/facade.py` to understand launch and configuration.
+2. Read `config/simulation_config.py`, `ui/menu/settings_repository.py`, and
    `asset_config/` to understand runtime configuration and persistence.
-3. Read `MapGenerator.py` and `generation/`, then skim `MapGenHelpers.py` for
+3. Read `generation/map_generator.py` and `generation/`, then skim `generation/mapgen_helpers.py` for
    the multiprocessing worker entrypoint and low-level map helpers.
-4. Read `MissionControl.py`, then `MissionControlLifecycle.py`.
+4. Read `mission/control.py`, then `mission/lifecycle.py`.
 5. Read the focused services: `mapping/terrain_knowledge.py`,
    `agents/drone_runtime_state.py`, `agents/drone_movement.py`,
    `navigation/pathfinding.py`, `mapping/drone_sensor.py`,
@@ -1420,11 +1425,11 @@ flowchart LR
    `mapping/rover_targets.py`, `rendering/mission_renderer.py`,
    `rendering/slam_view.py`, `rendering/agent_renderer.py`,
    `mission/debug_info.py`, and `mission/frame_timing.py`.
-6. Read `Drone.py` with `agents/drone_runtime_state.py`, `Graph.py`,
-   `VisionSensor.py`, `SlamMap.py`, and `RoughnessSampler.py` open beside it.
-7. Read `AStarPathfinder.py` after `navigation/pathfinding.py` when you need the algorithm details.
-8. Read `PresentationAdapter.py`, `ControlCenter.py`, `ControlCenterRenderer.py`, and `SlamRenderer.py` to understand interaction and visualization.
-9. Read `Rover.py` last; its motion code is built, but rover threads are currently off by default.
+6. Read `agents/drone.py` with `agents/drone_runtime_state.py`, `agents/graph.py`,
+   `mapping/vision_sensor.py`, `mapping/slam_map.py`, and `mapping/roughness_sampler.py` open beside it.
+7. Read `navigation/astar_pathfinder.py` after `navigation/pathfinding.py` when you need the algorithm details.
+8. Read `mission/presentation_adapter.py`, `ui/control_center/facade.py`, `ui/control_center/renderer.py`, and `rendering/slam_renderer.py` to understand interaction and visualization.
+9. Read `agents/rover.py` last; its motion code is built, but rover threads are currently off by default.
 
 ## 16. Practical Notes and Gotchas
 
@@ -1451,7 +1456,7 @@ flowchart LR
 - `wall_hit(map_matrix, pos)` assumes `pos` is in bounds. Most callers validate bounds first; new callers should do the same.
 - Positions are `(x, y)`, but NumPy arrays are indexed `[y, x]`.
 - Shared memory exists in two places:
-  - map generation workers mutate a shared cave buffer in `MapGenHelpers`.
-  - `PathfindingService` owns the shared cave map read by mission workers in `AStarPathfinder.compute_path`.
+  - map generation workers mutate a shared cave buffer in `generation.mapgen_helpers`.
+  - `PathfindingService` owns the shared cave map read by mission workers in `navigation.astar_pathfinder.compute_path`.
 - `rover_motion_enabled` is currently `False`, so rovers are created and rendered, but rover movement threads do not run unless that flag changes.
 - The global cave image is not the authoritative runtime map. `bin_map`, local SLAM occupancy, roughness, and confidence arrays drive behavior.

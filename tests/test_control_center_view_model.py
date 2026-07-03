@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from agents.drone_runtime_state import DroneRuntimeState
-from rendering.control_center_view_model import (
+from ui.control_center.view_model import (
     ControlCenterViewModel,
     build_drone_status_views,
     build_rover_status_views,

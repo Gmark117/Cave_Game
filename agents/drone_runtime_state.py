@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Tuple
 
-from Graph import Graph
+from agents.graph import Graph
 
 
 Position = Tuple[int, int]

@@ -1,9 +1,9 @@
 import unittest
 from dataclasses import FrozenInstanceError
 
-from POI import POI
-from SimSettings import SimSettings
-from SimulationConfig import SimulationConfig, SlamConfig
+from config.sim_settings import SimSettings
+from config.simulation_config import SimulationConfig, SlamConfig
+from mapping.poi import POI
 from asset_config.gameplay import GameOptions
 from asset_config.helpers import next_cell_coords, wall_hit
 from asset_config.media import Audio, Images

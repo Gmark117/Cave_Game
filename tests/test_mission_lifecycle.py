@@ -11,8 +11,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from Game import Game
-from MissionControl import MissionControl
-from SimulationConfig import MissionConfig, SimulationConfig
+from mission.control import MissionControl
+from config.simulation_config import MissionConfig, SimulationConfig
 from mapping.terrain_knowledge import TerrainKnowledge
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
@@ -204,7 +204,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission._run_mission_loop = Mock()
         mission._shutdown_mission = Mock()
 
-        with patch("MissionControlLifecycle.pygame.get_init", return_value=False):
+        with patch("mission.lifecycle.pygame.get_init", return_value=False):
             mission.run()
 
         mission._initialize_runtime.assert_called_once_with()
@@ -234,7 +234,7 @@ class MissionLifecycleTests(unittest.TestCase):
         )
 
         with patch(
-            "MissionControlLifecycle.pygame.event.get",
+            "mission.lifecycle.pygame.event.get",
             return_value=[event],
         ):
             mission._run_mission_loop()
@@ -258,7 +258,7 @@ class MissionLifecycleTests(unittest.TestCase):
         )
 
         with patch(
-            "MissionControlLifecycle.pygame.event.get",
+            "mission.lifecycle.pygame.event.get",
             return_value=[event],
         ):
             mission._run_mission_loop()
@@ -293,10 +293,10 @@ class MissionLifecycleTests(unittest.TestCase):
         )
 
         with patch(
-            "MissionControlLifecycle.pygame.event.get",
+            "mission.lifecycle.pygame.event.get",
             side_effect=[[pause_event], [stop_event]],
         ):
-            with patch("MissionControlLifecycle.pygame.display.update"):
+            with patch("mission.lifecycle.pygame.display.update"):
                 mission._run_mission_loop()
 
         self.assertTrue(mission.is_paused)
@@ -382,7 +382,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission._run_mission_loop = Mock(side_effect=request_restart)
         mission._shutdown_mission = Mock()
 
-        with patch("MissionControlLifecycle.pygame.get_init", return_value=True):
+        with patch("mission.lifecycle.pygame.get_init", return_value=True):
             mission.run()
 
         self.assertEqual(mission.game.windowed_calls, 0)
@@ -407,12 +407,12 @@ class MissionLifecycleTests(unittest.TestCase):
             0.052,
         ]
         with patch(
-            "MissionControlLifecycle.pygame.event.get",
+            "mission.lifecycle.pygame.event.get",
             return_value=[],
         ):
-            with patch("MissionControlLifecycle.pygame.display.update"):
+            with patch("mission.lifecycle.pygame.display.update"):
                 with patch(
-                    "MissionControlLifecycle.time.perf_counter",
+                    "mission.lifecycle.time.perf_counter",
                     side_effect=timestamps,
                 ):
                     mission._run_mission_loop()

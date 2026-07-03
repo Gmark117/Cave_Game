@@ -4,9 +4,9 @@ import pygame
 from asset_config.gameplay import Display
 from asset_config.media import Images
 from typing import NoReturn
-from MapGenerator import MapGenerator
-from MissionControl import MissionControl
-from Menu import Menu
+from generation.map_generator import MapGenerator
+from mission.control import MissionControl
+from ui.menu.facade import Menu
 
 class Game:
     """Main game class handling initialization, menus, and simulation."""

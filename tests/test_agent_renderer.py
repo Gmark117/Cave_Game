@@ -9,9 +9,9 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from Drone import Drone
-from Rover import Rover
-from SimulationConfig import MissionConfig, SimulationConfig, SlamConfig
+from agents.drone import Drone
+from agents.rover import Rover
+from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
 from rendering.agent_renderer import DroneRenderer, RoverRenderer
 
 

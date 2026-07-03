@@ -5,8 +5,8 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from SlamMap import FREE, OCCUPIED, UNKNOWN
-from SlamRenderer import SlamRenderer
+from mapping.slam_map import FREE, OCCUPIED, UNKNOWN
+from rendering.slam_renderer import SlamRenderer
 
 
 class SlamRendererTests(unittest.TestCase):

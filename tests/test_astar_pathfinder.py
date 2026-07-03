@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-import AStarPathfinder
+from navigation import astar_pathfinder
 
 
 class AStarPathfinderTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class AStarPathfinderTests(unittest.TestCase):
             shared_map = np.ndarray(cave.shape, dtype=np.uint8, buffer=shm.buf)
             shared_map[:] = cave
 
-            return AStarPathfinder.compute_path(
+            return astar_pathfinder.compute_path(
                 shm.name,
                 cave.shape,
                 start,
@@ -44,13 +44,13 @@ class AStarPathfinderTests(unittest.TestCase):
             shared_map = np.ndarray(cave.shape, dtype=np.uint8, buffer=shm.buf)
             shared_map[:] = cave
 
-            blocked = AStarPathfinder.compute_path(
+            blocked = astar_pathfinder.compute_path(
                 shm.name,
                 cave.shape,
                 (0, 0),
                 (1, 1),
             )
-            outside = AStarPathfinder.compute_path(
+            outside = astar_pathfinder.compute_path(
                 shm.name,
                 cave.shape,
                 (0, 0),
@@ -96,10 +96,10 @@ class AStarPathfinderTests(unittest.TestCase):
         worker_shm = SimpleNamespace(buf=shared_buffer, close=Mock())
 
         with patch(
-            "AStarPathfinder.shared_memory.SharedMemory",
+            "navigation.astar_pathfinder.shared_memory.SharedMemory",
             return_value=worker_shm,
         ):
-            path = AStarPathfinder.compute_path(
+            path = astar_pathfinder.compute_path(
                 "mission-map",
                 cave.shape,
                 (0, 0),
@@ -117,7 +117,7 @@ class AStarPathfinderTests(unittest.TestCase):
         confidence = np.ones((5, 5), dtype=np.float32)
 
         shared_path = self._compute_shared_path(cave, (0, 0), (4, 4))
-        weighted_path = AStarPathfinder.compute_weighted_path(
+        weighted_path = astar_pathfinder.compute_weighted_path(
             cave,
             roughness,
             confidence,
@@ -136,7 +136,7 @@ class AStarPathfinderTests(unittest.TestCase):
         confidence = np.ones((5, 5), dtype=np.float32)
         roughness[2, 1:4] = 1.0
 
-        path = AStarPathfinder.compute_weighted_path(
+        path = astar_pathfinder.compute_weighted_path(
             cave,
             roughness,
             confidence,

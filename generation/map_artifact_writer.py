@@ -9,7 +9,7 @@ import pygame
 
 from asset_config.media import GAME_DIR, Images
 from asset_config.rendering import Colors
-from MapGenHelpers import with_surfarrays
+from generation.mapgen_helpers import with_surfarrays
 
 
 def image_path_from_key(key: str) -> Path:

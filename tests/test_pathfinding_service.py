@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-import AStarPathfinder
+from navigation import astar_pathfinder
 from navigation.pathfinding import PathfindingService
 
 
@@ -82,7 +82,7 @@ class PathfindingServiceTests(unittest.TestCase):
 
         self.assertEqual(result, [(0, 0), (1, 1)])
         pool.submit.assert_called_once_with(
-            AStarPathfinder.compute_path,
+            astar_pathfinder.compute_path,
             "mission-map",
             cave_map.shape,
             (0, 0),
@@ -126,7 +126,7 @@ class PathfindingServiceTests(unittest.TestCase):
         service = PathfindingService(cave_map, agent_count=1)
 
         with patch(
-            "navigation.pathfinding.AStarPathfinder.compute_weighted_path",
+            "navigation.pathfinding.astar_pathfinder.compute_weighted_path",
             return_value=[(0, 0), (1, 1)],
         ) as compute_weighted_path:
             result = service.compute_weighted_path(

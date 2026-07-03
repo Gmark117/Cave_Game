@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-import AStarPathfinder
+from navigation import astar_pathfinder
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class PathfindingService:
             pool_sem.acquire()
             acquired = True
             future = pool.submit(
-                AStarPathfinder.compute_path,
+                astar_pathfinder.compute_path,
                 map_shm.name,
                 map_shape,
                 start,
@@ -129,7 +129,7 @@ class PathfindingService:
         goal: Tuple[int, int],
     ) -> List[Tuple[int, int]]:
         """Compute a rover path using terrain roughness and confidence."""
-        return AStarPathfinder.compute_weighted_path(
+        return astar_pathfinder.compute_weighted_path(
             self.cave_map,
             roughness_map,
             confidence_map,

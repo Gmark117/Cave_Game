@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from RoughnessSampler import RoughnessSampler
+from mapping.roughness_sampler import RoughnessSampler
 
 
 class RoughnessSamplerTests(unittest.TestCase):
@@ -15,7 +15,10 @@ class RoughnessSamplerTests(unittest.TestCase):
         sampler = RoughnessSampler(terrain, cave)
         hit = SimpleNamespace(end=(4, 0))
 
-        with patch("RoughnessSampler.np.random.uniform", return_value=0.0):
+        with patch(
+            "mapping.roughness_sampler.np.random.uniform",
+            return_value=0.0,
+        ):
             samples = sampler.sample_from_rays((0, 0), [hit], step=1)
 
         self.assertEqual(

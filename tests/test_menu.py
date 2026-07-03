@@ -5,10 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from Menu import Menu
-from MenuModels import SelectorItem, TextInputItem
-from MenuSettingsRepository import MenuSettingsRepository
-from SimulationConfig import SimulationConfig
+from ui.menu.facade import Menu
+from ui.menu.models import SelectorItem, TextInputItem
+from ui.menu.settings_repository import MenuSettingsRepository
+from config.simulation_config import SimulationConfig
 
 
 def make_simulation_items(

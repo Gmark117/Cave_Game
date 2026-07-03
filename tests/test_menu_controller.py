@@ -4,8 +4,8 @@ from unittest.mock import Mock, patch
 
 import pygame
 
-from MenuController import MenuController
-from MenuModels import (
+from ui.menu.controller import MenuController
+from ui.menu.models import (
     ButtonItem,
     MenuAction,
     MenuScreen,
@@ -130,7 +130,7 @@ class MenuControllerTests(unittest.TestCase):
         controller.current_index = 2
 
         with patch(
-            "MenuController.pygame.key.get_pressed",
+            "ui.menu.controller.pygame.key.get_pressed",
             return_value=PressedKeys(pygame.K_KP1),
         ):
             controller.handle_input(game_flags())

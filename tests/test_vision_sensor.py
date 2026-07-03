@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from VisionSensor import VisionSensor
+from mapping.vision_sensor import VisionSensor
 
 
 class VisionSensorTests(unittest.TestCase):

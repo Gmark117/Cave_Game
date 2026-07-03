@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from MenuModels import ButtonItem, TitleItem
-from MenuRenderer import MenuRenderer
+from ui.menu.models import ButtonItem, TitleItem
+from ui.menu.renderer import MenuRenderer
 
 
 class MenuRendererTests(unittest.TestCase):

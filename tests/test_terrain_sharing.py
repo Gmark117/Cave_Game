@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from SlamMap import UNKNOWN, SlamMap, SlamSnapshot
-from SimulationConfig import SharingConfig, SimulationConfig
+from config.simulation_config import SharingConfig, SimulationConfig
+from mapping.slam_map import UNKNOWN, SlamMap, SlamSnapshot
 from agents.drone_runtime_state import DroneRuntimeState
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.terrain_sharing import TerrainSharingService

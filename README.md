@@ -4,19 +4,19 @@ Cave Game is a distributed-systems simulation built with Pygame. It models a tea
 
 ## Overview
 
-The codebase is organized around a simple control chain: `main.py` creates the game shell, `Game.py` manages menus and mission startup, and `MissionControl.py` coordinates the live simulation. From there, multiple subsystems work together:
+The codebase is organized around a simple control chain: `main.py` creates the game shell, `Game.py` manages menus and mission startup, and `mission/control.py` coordinates the live simulation. From there, multiple subsystems work together:
 
-- `MapGenerator.py` builds the cave using multiprocessing and shared memory.
-- `Drone.py` models local exploration, vision, and terrain knowledge.
-- `Rover.py` acts as a mobile or stationary support agent depending on mission setup.
+- `generation/map_generator.py` builds the cave using multiprocessing and shared memory.
+- `agents/drone.py` models local exploration, vision, and terrain knowledge.
+- `agents/rover.py` acts as a mobile or stationary support agent depending on mission setup.
 - `mapping/terrain_knowledge.py` owns terrain arrays, synchronization, snapshots, observation fusion, and merging.
 - `navigation/pathfinding.py` owns pathfinding workers, shared memory, and mission-facing route requests.
-- `AStarPathfinder.py` contains the drone and terrain-weighted A* algorithms.
-- `Graph.py` tracks valid movement and exploration connectivity.
-- `ControlCenter.py` is the UI façade, `ControlCenterController.py` owns timer
-  and input state, and `ControlCenterRenderer.py` owns Pygame layout and
+- `navigation/astar_pathfinder.py` contains the drone and terrain-weighted A* algorithms.
+- `agents/graph.py` tracks valid movement and exploration connectivity.
+- `ui/control_center/facade.py` is the UI facade, `ui/control_center/controller.py` owns timer
+  and input state, and `ui/control_center/renderer.py` owns Pygame layout and
   drawing.
-- `PresentationAdapter.py` keeps UI state and presentation toggles isolated from mission logic.
+- `mission/presentation_adapter.py` keeps UI state and presentation toggles isolated from mission logic.
 - `asset_config/` contains the enums and constants that keep gameplay, rendering, media, and map generation consistent.
 
 The design goal is realism through constraint: agents do not start with omniscient knowledge, terrain is discovered incrementally, sharing is event-driven, and the visualization is built from the same distributed data model the agents use.
@@ -95,13 +95,13 @@ still blitted every frame.
 
 ### Agent Responsibilities
 
-`Drone.py` focuses on exploration. Each drone moves through the cave, scans its surroundings, records terrain observations locally, and uses pathfinding when it needs to reach a frontier or a chosen target.
+`agents/drone.py` focuses on exploration. Each drone moves through the cave, scans its surroundings, records terrain observations locally, and uses pathfinding when it needs to reach a frontier or a chosen target.
 
-`Rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
+`agents/rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
 
 ### Support Systems
 
-`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `AStarPathfinder.py` contains the algorithms themselves. `Graph.py` stores and validates exploration connectivity, while `ControlCenter.py` and `PresentationAdapter.py` keep UI concerns outside the simulation core.
+`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `navigation/astar_pathfinder.py` contains the algorithms themselves. `agents/graph.py` stores and validates exploration connectivity, while `ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI concerns outside the simulation core.
 
 ## Runtime and Data Flow
 
@@ -150,7 +150,7 @@ This makes the simulation feel distributed rather than centralized. Agents learn
 
 ## Cave Generation
 
-The cave is produced by `MapGenerator.py`, which uses parallel worker processes to erode an initially solid map into a navigable cave system. The generator uses shared memory so the workers can write into the same binary terrain buffer without copying the entire map between processes.
+The cave is produced by `generation/map_generator.py`, which uses parallel worker processes to erode an initially solid map into a navigable cave system. The generator uses shared memory so the workers can write into the same binary terrain buffer without copying the entire map between processes.
 
 The generation pipeline is roughly:
 
@@ -180,7 +180,7 @@ This is why the game feels like an exploration system rather than a simple sprit
 
 The rendering path is deliberately separated from mission logic.
 
-`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. The control-center façade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `PresentationAdapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
+`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. The control-center facade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
 
 Rendering is layered so the visual output stays readable:
 
@@ -230,7 +230,8 @@ Simulation settings available in-game:
 |---|---|---|
 | Terrain roughness map | Implemented | Available in current simulation flow |
 | Known map visualization | Implemented | Available in current simulation flow |
-| Distributed data sharing (terrain, POI, paths) | In progress | Core sharing exists, integration is ongoing |
+| Distributed terrain sharing | Implemented | Drone-to-drone and rover terrain sharing are active |
+| POI and path sharing | Planned | POI model exists; runtime integration is deferred |
 | Waypoints for optimal path segmentation | Planned | Not yet implemented |
 | Battery management | Planned | Not yet implemented |
 | Non-random exploration logic | Planned | Current behavior includes random exploration components |
@@ -251,4 +252,4 @@ python -m pip install --force-reinstall opencv-python
 
 - This repository is under active development.
 - Some modules contain extension points for future mission logic.
-- The standalone `docs/` files were consolidated into this README so this file is now the primary documentation entry point.
+- Historical planning docs live in `docs/archive/`; current architecture notes live in this README, `CODEFLOW.md`, and `TESTING.md`.

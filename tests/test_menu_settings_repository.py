@@ -4,8 +4,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from MenuSettingsRepository import AudioSettings, MenuSettingsRepository
-from SimulationConfig import SimulationConfig
+from ui.menu.settings_repository import AudioSettings, MenuSettingsRepository
+from config.simulation_config import SimulationConfig
 
 
 class MenuSettingsRepositoryTests(unittest.TestCase):

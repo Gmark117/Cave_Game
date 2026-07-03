@@ -9,8 +9,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from AgentFactory import AgentFactory
-from SimulationConfig import MissionConfig, SimulationConfig
+from agents.factory import AgentFactory
+from config.simulation_config import MissionConfig, SimulationConfig
 
 
 class AgentFactoryTests(unittest.TestCase):
@@ -36,8 +36,8 @@ class AgentFactoryTests(unittest.TestCase):
             created.append(drone)
             return drone
 
-        with patch("AgentFactory.pygame.image.load", return_value=self.icon):
-            with patch("AgentFactory.Drone", side_effect=make_drone) as drone_cls:
+        with patch("agents.factory.pygame.image.load", return_value=self.icon):
+            with patch("agents.factory.Drone", side_effect=make_drone) as drone_cls:
                 AgentFactory.build_drones(self.control)
 
         self.assertEqual(self.control.num_drones, 5)
@@ -49,13 +49,13 @@ class AgentFactoryTests(unittest.TestCase):
         self.assertEqual(self.control.drone_icon.get_size(), (25, 25))
 
     def test_build_rovers_delegates_complete_agent_construction(self) -> None:
-        with patch("AgentFactory.pygame.image.load", return_value=self.icon):
+        with patch("agents.factory.pygame.image.load", return_value=self.icon):
             with patch(
-                "AgentFactory.AgentFactory.choose_rover_color",
+                "agents.factory.AgentFactory.choose_rover_color",
                 return_value=(1, 2, 3),
             ):
                 with patch(
-                    "AgentFactory.Rover",
+                    "agents.factory.Rover",
                     side_effect=lambda *args: SimpleNamespace(args=args),
                 ) as rover_cls:
                     AgentFactory.build_rovers(self.control)

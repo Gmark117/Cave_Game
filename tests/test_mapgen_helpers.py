@@ -9,7 +9,7 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from MapGenHelpers import (
+from generation.mapgen_helpers import (
     add_wall_transition_noise,
     apply_cv_brush,
     border_control_helper,
@@ -122,7 +122,10 @@ class MapGenHelperTests(unittest.TestCase):
 
     def test_start_worms_builds_and_starts_each_process(self) -> None:
         processes = [Mock(), Mock()]
-        with patch("MapGenHelpers.Process", side_effect=processes) as process_cls:
+        with patch(
+            "generation.mapgen_helpers.Process",
+            side_effect=processes,
+        ) as process_cls:
             result = start_worms(
                 "map",
                 2,
@@ -156,8 +159,8 @@ class MapGenHelperTests(unittest.TestCase):
         callback = Mock()
 
         with redirect_stdout(io.StringIO()):
-            with patch("MapGenHelpers.pygame.event.pump"):
-                with patch("MapGenHelpers.time.sleep"):
+            with patch("generation.mapgen_helpers.pygame.event.pump"):
+                with patch("generation.mapgen_helpers.time.sleep"):
                     any_crashed = monitor_worms(
                         [healthy, crashed],
                         callback,

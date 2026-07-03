@@ -6,7 +6,10 @@ import cv2
 import numpy as np
 
 from asset_config.mapgen import MapGen
-from MapGenHelpers import add_wall_transition_noise, remove_hermit_caves
+from generation.mapgen_helpers import (
+    add_wall_transition_noise,
+    remove_hermit_caves,
+)
 
 
 logger = logging.getLogger(__name__)

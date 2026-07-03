@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from MapGenHelpers import (
+from generation.mapgen_helpers import (
     make_derangement,
     monitor_worms,
     safe_shm_close,

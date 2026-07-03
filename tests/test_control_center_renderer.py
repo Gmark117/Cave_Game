@@ -7,8 +7,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from ControlCenterRenderer import ControlCenterRenderer
-from rendering.control_center_view_model import (
+from ui.control_center.renderer import ControlCenterRenderer
+from ui.control_center.view_model import (
     ControlCenterViewModel,
     DroneStatusView,
     RoverStatusView,

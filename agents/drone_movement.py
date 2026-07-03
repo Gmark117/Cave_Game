@@ -6,7 +6,7 @@ from typing import Any, List, Tuple
 
 import numpy as np
 
-from SlamMap import FREE
+from mapping.slam_map import FREE
 from asset_config.helpers import next_cell_coords
 from mission.service_dependencies import DroneMovementDependencies
 

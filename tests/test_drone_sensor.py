@@ -8,9 +8,9 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from Drone import Drone
-from SimulationConfig import MissionConfig, SimulationConfig, SlamConfig
-from SlamMap import OCCUPIED, UNKNOWN, SlamSnapshot
+from agents.drone import Drone
+from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
+from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
 
 

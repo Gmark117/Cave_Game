@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from ControlCenterController import ControlCenterController, ControlHitMap
+from ui.control_center.controller import ControlCenterController, ControlHitMap
 
 
 class ControlCenterControllerTests(unittest.TestCase):
@@ -12,7 +12,7 @@ class ControlCenterControllerTests(unittest.TestCase):
         controller = ControlCenterController()
 
         with patch(
-            "ControlCenterController.time.perf_counter",
+            "ui.control_center.controller.time.perf_counter",
             side_effect=[10.0, 40.0, 100.0, 120.0],
         ):
             controller.start_timer()

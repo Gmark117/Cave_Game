@@ -3,14 +3,14 @@ import threading
 
 import numpy as np
 
-from SlamMap import (
+from mapping.slam_map import (
     FREE,
     OCCUPIED,
     UNKNOWN,
     SlamMap,
     SlamSnapshot,
 )
-from VisionSensor import RayHit
+from mapping.vision_sensor import RayHit
 
 
 def make_snapshot(

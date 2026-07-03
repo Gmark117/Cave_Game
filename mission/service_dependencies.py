@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Protocol, Sequence, Tuple
 
 import numpy as np
 
-from SimulationConfig import RenderingConfig, SharingConfig
+from config.simulation_config import RenderingConfig, SharingConfig
 from mapping.terrain_knowledge import TerrainSample
 
 

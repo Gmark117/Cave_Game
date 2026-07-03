@@ -10,8 +10,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from SlamMap import UNKNOWN, SlamMap, SlamSnapshot
-from SimulationConfig import RenderingConfig, SimulationConfig
+from config.simulation_config import RenderingConfig, SimulationConfig
+from mapping.slam_map import UNKNOWN, SlamMap, SlamSnapshot
 from mapping.terrain_knowledge import TerrainKnowledge
 from mission.service_dependencies import SlamViewDependencies
 from rendering.slam_view import SlamViewService

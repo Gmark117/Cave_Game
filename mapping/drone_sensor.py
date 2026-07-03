@@ -9,8 +9,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from RoughnessSampler import RoughnessSampler
-from VisionSensor import RayHit, VisionSensor
+from mapping.roughness_sampler import RoughnessSampler
+from mapping.vision_sensor import RayHit, VisionSensor
 from mapping.terrain_knowledge import TerrainSample
 from mission.service_dependencies import DroneSensorDependencies
 

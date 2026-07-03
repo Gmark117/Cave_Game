@@ -60,9 +60,9 @@ they protect.
 | Presentation transitions | `test_presentation_adapter.py` | State-machine | One owner resets and applies every heatmap/path/vision transition, including invalid action handling. |
 | Control-center frame models | `test_control_center_view_model.py` | Characterization | Immutable complete-frame, drone, and rover values expose live display state without retaining mutable references. |
 | Control-center controller | `test_control_center_controller.py` | Unit | Timer/pause accounting, active tabs, immutable hit maps, and existing action tokens are independent from rendering. |
-| Control-center façade | `test_control_center.py` | Interaction | The mission-facing object builds one frame model, delegates rendering, retains hit geometry, and exposes stable timer/progress methods. |
+| Control-center facade | `test_control_center.py` | Interaction | The mission-facing object builds one frame model, delegates rendering, retains hit geometry, and exposes stable timer/progress methods. |
 | Control-center rendering | `test_control_center_renderer.py` | Surface/interaction | The renderer consumes only an immutable frame model, owns Pygame resources and layout, and returns detached hit geometry. |
-| Menu façade and settings conversion | `test_menu.py` | Unit/file integration | The `Game`-facing API, mission start, default seed ownership, settings conversion, and simulation INI round trips remain stable. |
+| Menu facade and settings conversion | `test_menu.py` | Unit/file integration | The `Game`-facing API, mission start, default seed ownership, settings conversion, and simulation INI round trips remain stable. |
 | Menu controller | `test_menu_controller.py` | Unit/state-machine | Navigation, named actions, selector/slider bounds, and top-row/numpad seed entry are independent from rendering. |
 | Menu rendering | `test_menu_renderer.py` | Surface/interaction | Background and row composition are renderer-owned and consume typed menu rows. |
 | Menu settings repository | `test_menu_settings_repository.py` | File integration | Current-format round trips, legacy import, new-file precedence, untouched legacy files, and section-level malformed-value fallback are protected. |
@@ -170,7 +170,7 @@ audio, or full-frame layout:
 
 The following remain smoke or manual checks:
 
-- Full `MapGenerator.__init__()` with all worm processes and production-size maps.
+- Full `generation/map_generator.py` runtime facade with all worm processes and production-size maps.
 - Long-running concurrent missions and race/stress behavior.
 - Mixer initialization, music playback, and speaker volume.
 - Full control-center visual layout across display scaling and operating systems.
