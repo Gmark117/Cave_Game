@@ -101,6 +101,7 @@ sequenceDiagram
     Menu->>Menu: save_simulation_settings()
     Menu->>Game: start_mission()
     Game->>Menu: build_sim_settings()
+    Game->>Game: build_mission_objective(...)
     Game->>Map: MapGenerator(self, sim_settings)
     Game->>MC: MissionControl(self)
     Game->>MC: run()
@@ -111,16 +112,17 @@ sequenceDiagram
 Entry point:
 
 - `main.py`
-  - imports `os` and `Game`
+  - imports `os`, `logging`, `pygame`, and `Game` from `game.py`
   - hides the Pygame support prompt with `PYGAME_HIDE_SUPPORT_PROMPT`
   - creates `Game()` and calls `game.run()`
+  - owns process termination for unrecoverable startup/runtime errors
 
 Primary startup classes:
 
 - `Game`
   - `__init__(self) -> None`: initializes Pygame, sets window state, creates `Menu`.
-  - `run(self) -> NoReturn`: repeatedly calls `self.menu.display()`.
-  - `start_mission(self) -> None`: builds `SimulationConfig`, creates one `MapGenerator`, then constructs and runs fresh `MissionControl` instances while restart is requested.
+  - `run(self) -> None`: repeatedly calls `self.menu.display()`.
+  - `start_mission(self) -> None`: builds `SimulationConfig`, validates the selected objective, creates one `MapGenerator`, then constructs and runs fresh `MissionControl` instances while restart is requested.
   - `check_events(self) -> None`: converts Pygame events into key flags consumed by menus.
   - `blit_screen(self) -> None`: blits the internal display to the window and resets key flags.
 
@@ -171,8 +173,8 @@ Important types and arguments:
   - owns menu backgrounds, fonts, layout, arrows, sliders, and loading-screen
     drawing.
 - `MenuSettingsRepository`
-  - writes `simulation.ini`, prefers it when present, and imports the legacy
-    `symSettings.ini` only when the new file is absent.
+  - writes ignored local settings, reads committed defaults, and imports the
+    legacy `symSettings.ini` only when no current-format file is present.
 - `MenuAudioService`
   - owns mixer initialization, music transitions, volume, and button sounds.
 - `SimulationConfig`
@@ -185,8 +187,8 @@ Important types and arguments:
 Libraries used here:
 
 - `pygame` and `pygame.mixer`: rendering, input, fonts, audio.
-- `configparser`: reads/writes `GameConfig/options.ini` and
-  `GameConfig/simulation.ini`, with read-only legacy import from
+- `configparser`: reads committed `GameConfig/*.default.ini` files, writes
+  ignored `GameConfig/*.local.ini` files, and can import the legacy
   `GameConfig/symSettings.ini`.
 - `pathlib.Path` and `os`: asset and config paths.
 
@@ -241,7 +243,8 @@ Key types:
     wall-distance bias, and clustered noise.
 
 - `generation.MapArtifactWriter`
-  - writes `map.png`, `map_matrix.txt`, `walls.png`, and `floor.png`.
+  - writes ignored runtime artifacts `map.png`, `map_matrix.txt`,
+    `walls.png`, and `floor.png`.
 
 Important helper functions in `generation/mapgen_helpers.py`:
 
@@ -592,7 +595,7 @@ Distributed terrain follows four ownership rules:
 2. Mission terrain is an aggregate for progress telemetry and combined UI
    rendering, not an agent knowledge source.
 3. Local knowledge moves between agents only through explicit sharing.
-4. Rover target and route logic is provisional while rover motion is disabled;
+4. Rover target and route logic is disabled while rover motion is disabled;
    it must be converted to rover-local received knowledge before activation.
 
 Mission control, every drone, and every rover own distinct `TerrainKnowledge`
@@ -707,7 +710,7 @@ flowchart TD
 Rover movement is present but disabled by default because
 `MissionControl.rover_motion_enabled` is currently set to `False`.
 The current target selection and weighted routing read mission telemetry and
-are retained only as provisional scaffolding. They are not the final
+are retained only as disabled rover-motion scaffolding. They are not the final
 distributed rover semantics and must not be enabled unchanged.
 
 ```mermaid
@@ -937,12 +940,13 @@ flowchart LR
 - Calls: `Game()`, `Game.run()`.
 - Use it as the executable entry point.
 
-### `Game.py`
+### `game.py`
 
-- Libraries: `os`, `sys`, `pygame`, `typing.NoReturn`.
+- Libraries: `os`, `logging`, `pygame`.
 - Internal imports: `asset_config.gameplay.Display`,
   `asset_config.media.Images`, `generation.map_generator.MapGenerator`,
-  `mission.control.MissionControl`, and `ui.menu.facade.Menu`.
+  `mission.control.MissionControl`, `mission.objectives`, and
+  `ui.menu.facade.Menu`.
 - Class: `Game`
   - `__init__(self)`: initializes Pygame, key flags, window, and menu.
   - `run(self)`: menu loop.
@@ -1054,6 +1058,14 @@ flowchart LR
 - `SimulationClock` removes paused wall time from sensing, sharing, frontier,
   and progress-update cooldowns.
 
+### `mission/objectives.py`
+
+- Class/protocol: `MissionObjective`.
+- Implemented objective: `ExplorationObjective`.
+- Factory: `build_mission_objective(objective_index)`.
+- Search and Rescue remains planned; selecting it fails fast instead of
+  silently using exploration completion rules.
+
 ### `mapping/terrain_knowledge.py`
 
 - Libraries: `threading`, `dataclasses`, `typing`, `numpy`.
@@ -1067,7 +1079,7 @@ flowchart LR
   - `explored_ratio(threshold=0.0)`
 - Owns terrain arrays, floor masking, synchronization, snapshot isolation, observation fusion, and confidence-weighted merging.
 
-### `mission/service_dependencies.py`
+### `contracts.py`
 
 - Libraries: `dataclasses`, `typing`, `numpy`.
 - Dataclasses:
@@ -1084,7 +1096,8 @@ flowchart LR
   and SLAM-renderer APIs.
 - Keeps `MissionControl` as the only broad composition root while allowing
   terrain, sharing, rendering, movement, sensing, and rover navigation
-  collaborators to receive narrow, explicit inputs.
+  collaborators to receive narrow, explicit inputs without importing
+  `mission`.
 
 ### `mapping/terrain_fusion.py`
 
@@ -1391,8 +1404,13 @@ flowchart LR
   and `ControlHitMap`.
 - Class: `ControlCenterRenderer`
   - `render(view_model) -> ControlHitMap`
-  - owns the control surface, layout constants, font/image caches, text/status
-    composition, every draw helper, and hit-rectangle production.
+  - owns the control surface, layout constants, cache state, and top-level
+    frame flow.
+- Helper mixins:
+  - `ui/control_center/panels.py`: tab contents and agent status rows.
+  - `ui/control_center/widgets.py`: tabs, toggles, icons, and hit rectangles.
+  - `ui/control_center/text_helpers.py`: font caching, text wrapping, and
+    composed status surfaces.
 
 ### `mapping/poi.py`
 
@@ -1412,12 +1430,12 @@ flowchart LR
 
 ## 15. New Developer Reading Order
 
-1. Start with `main.py`, `Game.py`, and `ui/menu/facade.py` to understand launch and configuration.
+1. Start with `main.py`, `game.py`, and `ui/menu/facade.py` to understand launch and configuration.
 2. Read `config/simulation_config.py`, `ui/menu/settings_repository.py`, and
    `asset_config/` to understand runtime configuration and persistence.
 3. Read `generation/map_generator.py` and `generation/`, then skim `generation/mapgen_helpers.py` for
    the multiprocessing worker entrypoint and low-level map helpers.
-4. Read `mission/control.py`, then `mission/lifecycle.py`.
+4. Read `mission/control.py`, `mission/objectives.py`, then `mission/lifecycle.py`.
 5. Read the focused services: `mapping/terrain_knowledge.py`,
    `agents/drone_runtime_state.py`, `agents/drone_movement.py`,
    `navigation/pathfinding.py`, `mapping/drone_sensor.py`,

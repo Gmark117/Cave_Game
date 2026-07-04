@@ -18,6 +18,7 @@ class TerrainSnapshot:
     confidence: np.ndarray
 
     def __post_init__(self) -> None:
+        """Validate that paired terrain arrays describe the same grid."""
         if self.roughness.shape != self.confidence.shape:
             raise ValueError("Terrain snapshot arrays must have the same shape")
 
@@ -51,6 +52,8 @@ def fuse_terrain_samples(
         )
         total_conf = previous_conf + obs_conf
 
+        # Confidence weighting makes repeated measurements gradually dominate
+        # one-off noisy readings while keeping values bounded to 0..1.
         roughness[yi, xi] = (
             (previous_rough * previous_conf) + (obs_rough * obs_conf)
         ) / total_conf
@@ -69,6 +72,7 @@ class TerrainKnowledge:
         roughness: np.ndarray | None = None,
         confidence: np.ndarray | None = None,
     ) -> None:
+        """Create a synchronized terrain map shaped like the cave matrix."""
         cave = np.asarray(cave_map, dtype=np.uint8)
         if cave.ndim != 2:
             raise ValueError("Terrain cave map must be two-dimensional")
@@ -94,6 +98,7 @@ class TerrainKnowledge:
         fill: float,
         name: str,
     ) -> np.ndarray:
+        """Create or validate one terrain array."""
         if values is None:
             return np.full(self.cave_map.shape, fill, dtype=np.float32)
 
@@ -155,6 +160,9 @@ class TerrainKnowledge:
             if not np.any(valid):
                 return False
 
+            # Merge only known incoming floor cells. Unknown target cells take
+            # the incoming roughness as their baseline; known cells are averaged
+            # by confidence.
             target_conf_values = target_confidence[valid]
             incoming_conf_values = incoming_confidence[valid]
             incoming_rough_values = incoming_roughness[valid]

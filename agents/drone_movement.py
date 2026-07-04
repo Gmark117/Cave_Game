@@ -1,5 +1,6 @@
 """Drone exploration, frontier selection, and homing behavior."""
 
+import logging
 import math
 import random as rand
 from typing import Any, List, Tuple
@@ -8,10 +9,11 @@ import numpy as np
 
 from mapping.slam_map import FREE
 from asset_config.helpers import next_cell_coords
-from mission.service_dependencies import DroneMovementDependencies
+from contracts import DroneMovementDependencies
 
 
 Position = Tuple[int, int]
+logger = logging.getLogger(__name__)
 
 
 class DroneMovementController:
@@ -22,10 +24,13 @@ class DroneMovementController:
         drone: Any,
         dependencies: DroneMovementDependencies,
     ) -> None:
+        """Bind one drone to movement callbacks supplied by MissionControl."""
         self.drone = drone
         self.dependencies = dependencies
         settings = drone.settings
 
+        # Failed frontier paths are cooled down so a drone does not spend every
+        # frame retrying the same unreachable target.
         self.border_retry_cooldown = 1.5
         self.border_retry_until: dict[Position, float] = {}
         self.frontier_stride = settings.frontier.stride
@@ -87,6 +92,8 @@ class DroneMovementController:
         drone = self.drone
         snapshot = drone.snapshot()
         current_position = snapshot.position
+        # The original exploration behavior samples all 360 integer headings
+        # and then chooses randomly among those whose sight line is collision-free.
         directions = 360
         all_dirs = list(range(directions))
         targets = [[0, 0] for _ in all_dirs]
@@ -242,6 +249,9 @@ class DroneMovementController:
         terrain_confidence = drone.terrain_knowledge.snapshot().confidence
         floor_mask = cave == 0
 
+        # A frontier is a known free floor cell touching at least one still
+        # unknown floor cell. That gives the drone a useful target at the edge
+        # of its current knowledge.
         known_mask = (
             (slam_confidence >= confidence_threshold)
             | (terrain_confidence > 0.0)
@@ -287,7 +297,7 @@ class DroneMovementController:
 
         done, _ = drone.runtime_state.evaluate_mission_state()
         if done:
-            print(f"Drone {drone.id} has completed the mission!")
+            logger.info("Drone %s has completed the mission", drone.id)
             return True
 
         return False
@@ -304,6 +314,7 @@ class DroneMovementController:
         position: Position,
         target: Position,
     ) -> float:
+        """Return distance while pushing already-visible frontiers to the end."""
         distance = math.dist(position, target)
         if distance <= self.drone.radius:
             return float(self.drone.game.width)
@@ -314,12 +325,15 @@ class DroneMovementController:
         start: Position,
         goal: Position,
     ) -> List[Position]:
+        """Ask MissionControl's pathfinding service for a route."""
         return self.dependencies.compute_path(start, goal)
 
     def _simulation_time(self) -> float:
+        """Return mission time with paused duration removed."""
         return self.dependencies.simulation_time()
 
     def _follow_path(self, path: List[Position]) -> bool:
+        """Walk a path one node at a time, stopping cleanly on pause/shutdown."""
         drone = self.drone
         for node in path:
             if not self.dependencies.pause_checkpoint():

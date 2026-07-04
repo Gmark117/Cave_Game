@@ -1,4 +1,4 @@
-"""Mission-facing façade for the control-center controller and renderer."""
+"""Mission-facing facade for the control-center controller and renderer."""
 
 from typing import Any, Iterable, Optional
 
@@ -19,6 +19,7 @@ class ControlCenter:
     """Coordinate non-rendering UI state with the Pygame renderer."""
 
     def __init__(self, game: Any) -> None:
+        """Create controller/renderer collaborators for one mission UI."""
         self.game = game
         self._controller = ControlCenterController()
         self._renderer = ControlCenterRenderer(game)
@@ -28,38 +29,48 @@ class ControlCenter:
 
     @property
     def active_tab(self) -> str:
+        """Currently selected control-center tab."""
         return self._controller.active_tab
 
     @active_tab.setter
     def active_tab(self, value: str) -> None:
+        """Set the currently selected control-center tab."""
         self._controller.active_tab = str(value)
 
     @property
     def explored_percent(self) -> int:
+        """Latest mission explored percentage shown in the header."""
         return self._controller.explored_percent
 
     @explored_percent.setter
     def explored_percent(self, value: int) -> None:
+        """Update the mission explored percentage."""
         self.set_explored_percent(value)
 
     @property
     def num_drones(self) -> int:
+        """Number of drones represented in the latest rendered frame."""
         return self._num_drones
 
     @property
     def num_rovers(self) -> int:
+        """Number of rovers represented in the latest rendered frame."""
         return self._num_rovers
 
     def start_timer(self) -> None:
+        """Start mission elapsed-time tracking."""
         self._controller.start_timer()
 
     def pause_timer(self) -> None:
+        """Pause the displayed elapsed-time counter."""
         self._controller.pause_timer()
 
     def resume_timer(self) -> None:
+        """Resume the displayed elapsed-time counter."""
         self._controller.resume_timer()
 
     def format_timer(self) -> str:
+        """Return the mission elapsed time as ``MM:SS``."""
         return self._controller.format_timer()
 
     def set_explored_percent(self, value: int) -> None:

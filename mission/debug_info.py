@@ -3,13 +3,14 @@
 from typing import Iterable, List, Optional
 
 from agents.drone_runtime_state import DroneSnapshot
-from mission.service_dependencies import MissionDebugDependencies
+from contracts import MissionDebugDependencies
 
 
 class MissionDebugInfo:
     """Build small runtime status lines for the control center."""
 
     def __init__(self, dependencies: MissionDebugDependencies) -> None:
+        """Store callbacks used to build debug lines on demand."""
         self.dependencies = dependencies
 
     def build_lines(

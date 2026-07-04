@@ -104,6 +104,7 @@ def compute_weighted_path(
 
 
 def _unit_cell_cost(_x: int, _y: int) -> float:
+    """Return the normal cost for unweighted drone movement."""
     return 1.0
 
 
@@ -114,13 +115,16 @@ def _compute_astar_path(
     max_iters: int,
     cell_cost: CellCostPolicy,
 ) -> List[Position]:
+    """Run grid A* with 8-way movement and optional per-cell cost."""
     height, width = arr.shape
     size = width * height
 
     def inside(x: int, y: int) -> bool:
+        """Return whether a coordinate is inside the map."""
         return 0 <= x < width and 0 <= y < height
 
     def idx(x: int, y: int) -> int:
+        """Flatten a 2D map coordinate into a 1D array index."""
         return y * width + x
 
     start_x, start_y = int(start[0]), int(start[1])
@@ -139,6 +143,7 @@ def _compute_astar_path(
     g_score = np.full(size, np.inf, dtype=np.float32)
 
     def heuristic_flat(i: int) -> float:
+        """Octile-distance heuristic for 8-way grid movement."""
         x = i % width
         y = i // width
         dx = abs(x - goal_x)
@@ -183,6 +188,8 @@ def _compute_astar_path(
 
             move_cost = DIAG_COST if (dx != 0 and dy != 0) else ORTH_COST
             if dx != 0 and dy != 0:
+                # Prevent diagonal moves that squeeze through two touching
+                # wall corners.
                 adj1_x, adj1_y = cx + dx, cy
                 adj2_x, adj2_y = cx, cy + dy
                 ok1 = inside(adj1_x, adj1_y) and (arr[adj1_y, adj1_x] == 0)

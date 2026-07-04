@@ -11,13 +11,14 @@ from mapping.terrain_knowledge import (
     TerrainSample,
     fuse_terrain_samples,
 )
-from mission.service_dependencies import TerrainFusionDependencies
+from contracts import TerrainFusionDependencies
 
 
 class TerrainFusionService:
     """Fuse observations into mission telemetry without mutating agents."""
 
     def __init__(self, dependencies: TerrainFusionDependencies) -> None:
+        """Store mission-level telemetry dependencies."""
         self.dependencies = dependencies
 
     def record_scan(self, samples: Iterable[TerrainSample]) -> None:
@@ -26,6 +27,8 @@ class TerrainFusionService:
         map_updated = dependencies.terrain_knowledge.record_samples(samples)
 
         now = dependencies.simulation_time()
+        # Progress text is relatively expensive to redraw every sensor tick, so
+        # update it at a small interval while still marking the heatmap dirty.
         if (
             map_updated
             and (now - dependencies.last_explored_update)

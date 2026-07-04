@@ -26,6 +26,8 @@ class AgentFactory:
         mission = control.settings.mission_config
         control.num_drones = mission.num_drones
         icon_size = AgentFactory.get_drone_icon_dim(mission.map_dim)
+        # All drones share the same scaled surface; each drone stores only its
+        # color and runtime state.
         control.drone_icon = pygame.transform.scale(
             pygame.image.load(Images.DRONE.value),
             icon_size
@@ -63,6 +65,8 @@ class AgentFactory:
         rover_colors = list(RoverColors)
         control.rovers = []
         for i in range(control.num_rovers):
+            # Rovers are still built for display/telemetry even though their
+            # movement threads are disabled by MissionControl.
             color = AgentFactory.choose_rover_color(rover_colors)
             rover = Rover(
                 control.game,

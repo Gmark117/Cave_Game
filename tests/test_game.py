@@ -6,7 +6,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from Game import Game
+from game import Game
 
 
 class GameTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class GameTests(unittest.TestCase):
             pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT),
         ]
 
-        with patch("Game.pygame.event.get", return_value=events):
+        with patch("game.pygame.event.get", return_value=events):
             game.check_events()
 
         self.assertTrue(game.START_KEY)

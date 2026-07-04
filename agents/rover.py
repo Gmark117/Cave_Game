@@ -9,7 +9,7 @@ from typing import Tuple, List, Optional, TYPE_CHECKING
 
 from agents.graph import Graph
 from mapping.terrain_knowledge import TerrainKnowledge
-from mission.service_dependencies import RoverNavigationDependencies
+from contracts import RoverNavigationDependencies
 from rendering.agent_renderer import RoverRenderer
 
 if TYPE_CHECKING:
@@ -25,15 +25,18 @@ class Rover:
 
     def __init__(self, game: object, control: object, id: int, start_pos: Tuple[int, int],
                  color: Tuple[int, int, int], icon: 'pygame.Surface', cave: list) -> None:
+        """Initialize rover state and bind navigation callbacks."""
         self.game     = game
         self.settings = game.sim_settings
         self.cave     = cave
+        # Navigation is injected through a small dependency object so rover
+        # policy can be replaced without passing the whole MissionControl in.
         self.navigation = RoverNavigationDependencies(
             rover_targets=control.rover_targets,
             compute_rover_path=control.compute_rover_path,
         )
          
-        self.id       = id # Unique identifier of the drone
+        self.id       = id # Unique identifier of the rover
         self.map_size = self.settings.mission_config.map_dim # Map dimension
         self.radius   = self.calculate_radius() # Radius that represent the field of view # 39
         self.step     = 10 # Step of the drone
@@ -59,6 +62,8 @@ class Rover:
         self.pos       = start_pos
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
+        # Rovers maintain their own knowledge store even though movement is
+        # currently disabled; this is the place future rover policy should read.
         self.terrain_knowledge = TerrainKnowledge(cave)
         self.renderer  = RoverRenderer(self)
 
@@ -73,7 +78,7 @@ class Rover:
 
 
     def move(self) -> None:
-        """Run the provisional rover policy while rover motion is disabled.
+        """Run the disabled rover-motion policy.
 
         This implementation predates the distributed-knowledge contract.
         Replace its mission-global target and routing inputs with rover-local

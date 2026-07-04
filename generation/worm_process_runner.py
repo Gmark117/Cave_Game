@@ -1,6 +1,7 @@
 """Multiprocessing runner for cave-carving worms."""
 
 from dataclasses import dataclass
+import logging
 import os
 from typing import Callable, Optional
 
@@ -13,6 +14,9 @@ from generation.mapgen_helpers import (
     safe_shm_create,
     start_worms,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,8 @@ class WormProcessRunner:
         shm = None
         try:
             init_map = initial_map.astype(np.uint8)
+            # Workers carve the same map through SharedMemory; the final return
+            # copies it back into normal process-owned memory.
             shm, shm_arr = safe_shm_create(init_map)
             targets = make_derangement(worker_count, rng)
             proc_list = start_worms(
@@ -61,6 +67,7 @@ class WormProcessRunner:
             )
 
             def _update_finished() -> None:
+                """Record one finished worker and notify progress UI."""
                 nonlocal completed_workers
                 completed_workers += 1
                 if worker_finished is not None:
@@ -68,7 +75,7 @@ class WormProcessRunner:
 
             worker_crashed = monitor_worms(proc_list, _update_finished)
             if worker_crashed:
-                print("MapGenerator: one or more worms crashed during generation")
+                logger.warning("One or more cave-generation workers crashed")
             return WormRunResult(
                 bin_map=np.array(shm_arr, dtype=np.uint8),
                 completed_workers=completed_workers,

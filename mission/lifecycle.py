@@ -15,14 +15,8 @@ class MissionControlLifecycleMixin:
     """Mixin that encapsulates mission execution and teardown."""
 
     def is_mission_over(self) -> bool:
-        """Return True when all drones report mission completion."""
-        if not self.drones:
-            return False
-
-        for drone in self.drones:
-            if not drone.mission_completed():
-                return False
-        return True
+        """Return True when the selected objective reports completion."""
+        return self.objective.is_complete(self.drones, self.rovers)
 
     def _shutdown_mission(self, threads: List[threading.Thread]) -> None:
         """Stop workers, join threads, and release process/shared-memory resources."""
@@ -65,6 +59,8 @@ class MissionControlLifecycleMixin:
             self.clock.tick(fps)
             wait_finished = time.perf_counter()
 
+            # Input, state updates, sensing, and rendering stay in a fixed order
+            # so each displayed frame reflects a coherent simulation step.
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.completed = True

@@ -384,7 +384,11 @@ def monitor_worms(proc_list: list, update_callback, poll_interval: float = 0.05)
                     exitcode = p.exitcode
                     if exitcode is not None and exitcode != 0:
                         any_crashed = True
-                        print(f"MapGenerator: worker {idx} exited with code {exitcode}")
+                        logger.warning(
+                            "MapGenerator worker %s exited with code %s",
+                            idx,
+                            exitcode,
+                        )
                     try:
                         update_callback()
                     except (RuntimeError, ValueError) as exc:
@@ -392,11 +396,10 @@ def monitor_worms(proc_list: list, update_callback, poll_interval: float = 0.05)
                         pass
             time.sleep(poll_interval)
     except KeyboardInterrupt:
-        print('MapGenerator: generation interrupted by user')
+        logger.warning("Map generation interrupted by user")
         any_crashed = True
     except (OSError, RuntimeError, ValueError) as exc:
         logger.exception("Map generation watchdog failed")
-        print(f'MapGenerator: watchdog failed: {exc}')
         any_crashed = True
     finally:
         for p in proc_list:

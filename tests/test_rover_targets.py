@@ -6,7 +6,7 @@ import numpy as np
 
 from mapping.rover_targets import RoverTargetService
 from mapping.terrain_knowledge import TerrainKnowledge
-from mission.service_dependencies import RoverTargetDependencies
+from contracts import RoverTargetDependencies
 
 
 class RoverTargetServiceTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Provisional rover target selection and reservation logic.
+"""Rover target selection and reservation logic for disabled rover motion.
 
 Rover movement is disabled. This service currently reads mission telemetry and
 must be changed to rover-local received knowledge when rover policy is defined.
@@ -9,13 +9,14 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from mission.service_dependencies import RoverTargetDependencies
+from contracts import RoverTargetDependencies
 
 
 class RoverTargetService:
-    """Choose provisional terrain targets while rover movement is disabled."""
+    """Choose terrain targets while rover movement is disabled."""
 
     def __init__(self, dependencies: RoverTargetDependencies) -> None:
+        """Store target-selection inputs for disabled rover movement."""
         self.dependencies = dependencies
 
     def acquire(
@@ -39,6 +40,8 @@ class RoverTargetService:
             if not np.any(candidate_mask):
                 return None
 
+            # Prefer rough, confident cells, but subtract distance so rovers do
+            # not reserve faraway targets when similar nearby targets exist.
             ys, xs = np.where(candidate_mask)
             best_target = None
             best_score = float("-inf")

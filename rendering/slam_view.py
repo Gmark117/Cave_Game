@@ -5,13 +5,14 @@ from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
-from mission.service_dependencies import SlamViewDependencies
+from contracts import SlamViewDependencies
 
 
 class SlamViewService:
     """Build and draw cached SLAM/terrain map surfaces for MissionControl."""
 
     def __init__(self, dependencies: SlamViewDependencies) -> None:
+        """Store view dependencies and initialize render-cache versions."""
         self.dependencies = dependencies
         self.refresh_interval = dependencies.rendering.refresh_interval
         self.last_refresh_time: float | None = None
@@ -82,6 +83,7 @@ class SlamViewService:
     def _render_selected_drone(
         self, selected_id: int, h: int, w: int, render_tail: int
     ) -> None:
+        """Render only the selected drone's SLAM or terrain heatmap."""
         dependencies = self.dependencies
         drone = dependencies.get_drones()[selected_id]
         slam = drone.slam_map.snapshot(point_limit=render_tail)
@@ -92,6 +94,8 @@ class SlamViewService:
         padded_occ = np.full((h, w), -1, dtype=np.int8)
         padded_conf = np.zeros((h, w), dtype=np.float32)
 
+        # Drones may have differently shaped maps in tests; pad into the mission
+        # terrain shape before handing arrays to the renderer.
         eh = min(h, occ.shape[0])
         ew = min(w, occ.shape[1])
         if eh > 0 and ew > 0:
@@ -115,6 +119,7 @@ class SlamViewService:
         self.rendered_versions[selected_id] = slam.version
 
     def _render_combined(self, h: int, w: int, render_tail: int) -> None:
+        """Merge all drone SLAM views for the combined mission overlay."""
         dependencies = self.dependencies
         combined_occ = np.full((h, w), -1, dtype=np.int8)
         combined_conf = np.zeros((h, w), dtype=np.float32)
@@ -137,6 +142,8 @@ class SlamViewService:
             target_conf = combined_conf[:eh, :ew]
             source_conf = conf[:eh, :ew]
             higher_conf = source_conf > target_conf
+            # For each cell, keep the occupancy label with the highest reported
+            # confidence among all drone snapshots.
             combined_occ[:eh, :ew][higher_conf] = occ[:eh, :ew][higher_conf]
             target_conf[higher_conf] = source_conf[higher_conf]
 
@@ -159,6 +166,7 @@ class SlamViewService:
             self.rendered_versions[drone_id] = slam.version
 
     def _current_view_is_dirty(self) -> bool:
+        """Return whether the active combined/selected view needs refresh."""
         dependencies = self.dependencies
         drones = dependencies.get_drones()
         selected_id = dependencies.presentation.selected_drone_heatmap_id
@@ -173,5 +181,6 @@ class SlamViewService:
         )
 
     def _map_is_dirty(self, drone_id: int, slam_map: Any) -> bool:
+        """Compare a drone SLAM version with the last rendered version."""
         rendered_version = self.rendered_versions.get(drone_id, -1)
         return slam_map.has_changed_since(rendered_version)

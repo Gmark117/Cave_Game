@@ -6,13 +6,14 @@ from typing import Any, Tuple
 
 import numpy as np
 
-from mission.service_dependencies import TerrainSharingDependencies
+from contracts import TerrainSharingDependencies
 
 
 class TerrainSharingService:
     """Coordinate proximity-limited sharing between drones and rovers."""
 
     def __init__(self, dependencies: TerrainSharingDependencies) -> None:
+        """Copy sharing thresholds and initialize cooldown bookkeeping."""
         self.dependencies = dependencies
         sharing = dependencies.sharing
         self.drone_share_interval = sharing.drone_interval
@@ -77,6 +78,7 @@ class TerrainSharingService:
             return True
 
     def _simulation_time(self) -> float:
+        """Return pause-adjusted mission time for cooldown checks."""
         return self.dependencies.simulation_time()
 
     def has_line_of_sight(self, a: Tuple[int, int], b: Tuple[int, int]) -> bool:
@@ -119,6 +121,9 @@ class TerrainSharingService:
         dependencies = self.dependencies
         stride = self.compare_stride
 
+        # Compare a strided subset to keep sharing checks cheap on large maps.
+        # A share happens when the source has enough new cells or meaningfully
+        # different roughness for cells both agents already know.
         src_conf = source_confidence[::stride, ::stride]
         tgt_conf = target_confidence[::stride, ::stride]
         src_rough = source_roughness[::stride, ::stride]
@@ -161,6 +166,8 @@ class TerrainSharingService:
         """Return True when SLAM occupancy sharing adds meaningful info."""
         stride = self.compare_stride
 
+        # SLAM sharing uses the same "new info or meaningful disagreement"
+        # idea, but compares occupancy labels instead of roughness values.
         src_conf = source_conf[::stride, ::stride]
         tgt_conf = target_conf[::stride, ::stride]
         src_occ = source_occ[::stride, ::stride]
@@ -219,6 +226,7 @@ class TerrainSharingService:
             proximity_threshold = min(drone.radius, other_drone.radius)
             if distance >= 2 * proximity_threshold:
                 continue
+            # Agents need to be close and unobstructed; walls block data sharing.
             if not self.has_line_of_sight(
                 drone_snapshot.position,
                 other_snapshot.position,
@@ -322,6 +330,8 @@ class TerrainSharingService:
                 proximity_threshold = min(rover.radius, drone.radius)
                 if distance >= proximity_threshold:
                     continue
+                # Rover sharing is one-way today: drones can teach nearby
+                # rovers, but rover movement remains disabled.
                 if not self.has_line_of_sight(
                     rover.pos,
                     drone_snapshot.position,

@@ -10,7 +10,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
-from Game import Game
+from game import Game
 from mission.control import MissionControl
 from config.simulation_config import MissionConfig, SimulationConfig
 from mapping.terrain_knowledge import TerrainKnowledge
@@ -143,15 +143,17 @@ class MissionLifecycleTests(unittest.TestCase):
 
     def test_game_constructs_then_runs_mission(self) -> None:
         game = object.__new__(Game)
-        settings = SimpleNamespace(seed=11)
+        settings = SimulationConfig(
+            mission_config=MissionConfig(seed=11, objective=0)
+        )
         game.menu = SimpleNamespace(
             build_sim_settings=Mock(return_value=settings),
         )
         cartographer = object()
         mission = Mock()
 
-        with patch("Game.MapGenerator", return_value=cartographer) as generator:
-            with patch("Game.MissionControl", return_value=mission) as control:
+        with patch("game.MapGenerator", return_value=cartographer) as generator:
+            with patch("game.MissionControl", return_value=mission) as control:
                 game.start_mission()
 
         generator.assert_called_once_with(game, settings)
@@ -162,7 +164,9 @@ class MissionLifecycleTests(unittest.TestCase):
 
     def test_game_restart_reuses_settings_and_generated_cave(self) -> None:
         game = object.__new__(Game)
-        settings = SimpleNamespace(seed=11)
+        settings = SimulationConfig(
+            mission_config=MissionConfig(seed=11, objective=0)
+        )
         game.menu = SimpleNamespace(
             build_sim_settings=Mock(return_value=settings),
         )
@@ -176,9 +180,9 @@ class MissionLifecycleTests(unittest.TestCase):
             restart_requested=False,
         )
 
-        with patch("Game.MapGenerator", return_value=cartographer) as generator:
+        with patch("game.MapGenerator", return_value=cartographer) as generator:
             with patch(
-                "Game.MissionControl",
+                "game.MissionControl",
                 side_effect=[first_mission, second_mission],
             ) as control:
                 game.start_mission()
@@ -190,6 +194,24 @@ class MissionLifecycleTests(unittest.TestCase):
         second_mission.run.assert_called_once_with()
         self.assertIs(game.cartographer, cartographer)
         self.assertIs(game.mission_control, second_mission)
+
+    def test_game_rejects_unimplemented_objective_before_generation(self) -> None:
+        game = object.__new__(Game)
+        settings = SimulationConfig(
+            mission_config=MissionConfig(objective=1)
+        )
+        game.menu = SimpleNamespace(
+            build_sim_settings=Mock(return_value=settings),
+        )
+
+        with patch("game.MapGenerator") as generator:
+            with self.assertRaisesRegex(
+                NotImplementedError,
+                "Search and Rescue",
+            ):
+                game.start_mission()
+
+        generator.assert_not_called()
 
     def test_run_initializes_executes_and_shuts_down_once(self) -> None:
         mission = MissionControl(FakeGame())

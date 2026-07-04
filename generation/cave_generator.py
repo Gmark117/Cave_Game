@@ -93,6 +93,7 @@ class CaveGenerator:
         post_processor: Optional[CavePostProcessor] = None,
         roughness_generator: Optional[TerrainRoughnessGenerator] = None,
     ) -> None:
+        """Store generation parameters and injectable collaborators."""
         self.width = width
         self.height = height
         self.seed = seed
@@ -112,6 +113,8 @@ class CaveGenerator:
 
         rng = np.random.default_rng(self.seed)
         worm_inputs = tuple(WormInputs[self.map_dim].value)
+        # One RNG seeded here drives starts, worker target pairing, and terrain
+        # roughness so a mission seed remains reproducible.
         worm_x, worm_y = build_worm_starts(
             self.width,
             self.height,

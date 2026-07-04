@@ -10,7 +10,7 @@ from mapping.slam_map import UNKNOWN, SlamMap, SlamSnapshot
 from agents.drone_runtime_state import DroneRuntimeState
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.terrain_sharing import TerrainSharingService
-from mission.service_dependencies import TerrainSharingDependencies
+from contracts import TerrainSharingDependencies
 
 
 def make_agent(

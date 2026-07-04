@@ -1,6 +1,6 @@
-"""Menu façade for Cave Explorer.
+"""Menu facade for Cave Explorer.
 
-The façade preserves the API used by ``Game`` while delegating menu state,
+The facade preserves the API used by ``Game`` while delegating menu state,
 rendering, persistence, and audio to focused collaborators.
 """
 
@@ -41,6 +41,7 @@ class Menu:
     """Coordinate the menu controller, renderer, settings, and audio service."""
 
     def __init__(self, game: object) -> None:
+        """Build menus, load persisted settings, and wire collaborators."""
         self.game = game
         self.config = SimulationConfig()
 
@@ -75,14 +76,17 @@ class Menu:
 
     @property
     def current_menu(self) -> List[MenuRow]:
+        """Current screen rows; kept for tests and legacy callers."""
         return self.controller.current_items
 
     @property
     def current_index(self) -> int:
+        """Current selected row index."""
         return self.controller.current_index
 
     @current_index.setter
     def current_index(self, value: int) -> None:
+        """Set the selected row index."""
         self.controller.current_index = value
 
     def create_main_menu(self) -> None:
@@ -236,21 +240,27 @@ class Menu:
                     pygame.time.wait(10)
 
     def _draw(self) -> None:
+        """Draw the current menu screen."""
         self.renderer.draw(self.current_menu, self.current_index)
 
     def _handle_global_input(self) -> None:
+        """Pass one frame of game key flags to the menu controller."""
         self.controller.handle_input(self.game)
 
     def _number_key_pressed(self) -> bool:
+        """Return whether seed-entry keys are still held down."""
         return self.controller.number_key_pressed()
 
     def _get_first_selectable(self) -> int:
+        """Compatibility wrapper for the controller helper."""
         return self.controller.first_selectable()
 
     def _get_next_selectable(self, direction: str) -> int:
+        """Compatibility wrapper for directional row selection."""
         return self.controller.next_selectable(direction)
 
     def _handle_action(self, action: MenuAction) -> None:
+        """Translate controller actions into menu/game side effects."""
         if action is MenuAction.OPEN_SIMULATION:
             self.controller.open_screen(MenuScreen.SIMULATION, select_last=True)
         elif action is MenuAction.OPEN_AUDIO:
@@ -269,6 +279,7 @@ class Menu:
             self.show_menu = False
 
     def _play_button(self) -> None:
+        """Play the menu button sound if that option is enabled."""
         self.audio.play_button(self.button_on_off == "on")
 
     def load_options(self) -> None:
@@ -362,6 +373,7 @@ class Menu:
             self.show_menu = False
 
     def _config_from_menu(self) -> SimulationConfig:
+        """Convert current menu row values into a typed config object."""
         mission_item = cast(SelectorItem[str], self.simulation[1])
         map_item = cast(SelectorItem[str], self.simulation[2])
         seed_item = cast(TextInputItem, self.simulation[3])

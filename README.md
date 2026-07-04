@@ -4,7 +4,7 @@ Cave Game is a distributed-systems simulation built with Pygame. It models a tea
 
 ## Overview
 
-The codebase is organized around a simple control chain: `main.py` creates the game shell, `Game.py` manages menus and mission startup, and `mission/control.py` coordinates the live simulation. From there, multiple subsystems work together:
+The codebase is organized around a simple control chain: `main.py` creates the game shell, `game.py` manages menus and mission startup, and `mission/control.py` coordinates the live simulation. From there, multiple subsystems work together:
 
 - `generation/map_generator.py` builds the cave using multiprocessing and shared memory.
 - `agents/drone.py` models local exploration, vision, and terrain knowledge.
@@ -35,7 +35,7 @@ Install dependencies into your system Python:
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install pygame numpy opencv-python
+python -m pip install -r requirements.txt
 ```
 
 Run the simulation:
@@ -60,7 +60,7 @@ The runtime flow is intentionally layered so that each file owns one part of the
 ### Startup Path
 
 1. `main.py` instantiates `Game` and starts the application.
-2. `Game.py` creates the UI window, handles menu navigation, and collects mission settings.
+2. `game.py` creates the UI window, handles menu navigation, and collects mission settings.
 3. When the player starts a mission, `Game` prepares an immutable nested
    `SimulationConfig`, generates the cave, and constructs `MissionControl`.
 4. `Game` calls `MissionControl.run()`, which creates agents and runtime resources, launches worker threads, and enters the main loop.
@@ -113,7 +113,7 @@ The simulation works as a feedback loop:
 4. Each drone updates its local terrain knowledge and the mission telemetry aggregate.
 5. Nearby agents exchange data when the mission rules allow it.
 6. The UI aggregates that knowledge into a shared visualization.
-7. Mission completion is checked continuously until all requirements are satisfied.
+7. Mission completion is checked continuously through the selected objective policy.
 
 That flow is important because the game does not use a single global terrain oracle. Instead, knowledge is built from observations and exchanged through explicit events. This makes the heatmap, the agent behavior, and the mission state all consistent with one another.
 
@@ -136,7 +136,7 @@ The distributed-semantics contract is:
 - Mission-global terrain is telemetry and UI aggregation only.
 - Sharing is the only mechanism that transfers local knowledge between agents.
 - Rover movement remains disabled. Its existing target and route code is
-  provisional and must use rover-local received knowledge before activation.
+  disabled until it uses rover-local received knowledge before activation.
 
 ### Proximity-Based Sharing
 
@@ -196,12 +196,14 @@ Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 
 The project keeps its runtime settings and visual assets in predictable locations.
 
-- `GameConfig/options.ini` stores audio and user preference settings.
-- `GameConfig/simulation.ini` stores mission, SLAM, sharing, frontier, and
-  rendering configuration in separate sections.
+- `GameConfig/options.default.ini` and `GameConfig/simulation.default.ini`
+  store committed defaults.
+- `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
+  user changes and are ignored by Git.
 - `GameConfig/symSettings.ini` is the untouched legacy fallback used only when
-  `simulation.ini` is absent.
+  no current-format default or local simulation file is present.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
+- `Assets/Map/` contains cave images generated at runtime and ignored by Git.
 - `asset_config/` provides typed constants and enums so gameplay values, colors, asset paths, and map-generation parameters stay consistent across modules.
 
 This is a deliberate structural choice. Hard-coding file names and magic numbers across the codebase would make the simulation harder to tune and more brittle to change.
@@ -235,7 +237,7 @@ Simulation settings available in-game:
 | Waypoints for optimal path segmentation | Planned | Not yet implemented |
 | Battery management | Planned | Not yet implemented |
 | Non-random exploration logic | Planned | Current behavior includes random exploration components |
-| Search & Rescue mission logic | Planned | Objective exists in UI; full mission logic is pending |
+| Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |
 | Drift modeling | Planned | Not yet implemented |
 
 ## Troubleshooting

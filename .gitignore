@@ -1,1 +1,29 @@
-*.pyc
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, lint, and coverage outputs
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build/package outputs
+build/
+dist/
+*.egg-info/
+
+# Local runtime settings. Defaults live in GameConfig/*.default.ini.
+GameConfig/options.local.ini
+GameConfig/simulation.local.ini
+
+# Backward-compatible local files that older runs may still create.
+GameConfig/options.ini
+GameConfig/simulation.ini
+
+# Runtime-generated cave map artifacts.
+Assets/Map/*.png
+Assets/Map/*.txt

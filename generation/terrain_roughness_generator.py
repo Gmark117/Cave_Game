@@ -17,6 +17,8 @@ class TerrainRoughnessGenerator:
         height, width = bin_map.shape
         floor_mask = (bin_map == 0).astype(np.uint8)
 
+        # Blend broad smooth noise, smaller clusters, and wall proximity to make
+        # rough terrain feel cave-like instead of uniformly random.
         base_noise = rng.random((height, width), dtype=np.float32)
         base_noise = cv2.GaussianBlur(base_noise, (0, 0), sigmaX=18, sigmaY=18)
         base_noise = cv2.normalize(base_noise, None, 0.0, 1.0, cv2.NORM_MINMAX)

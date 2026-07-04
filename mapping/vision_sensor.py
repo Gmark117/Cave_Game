@@ -9,6 +9,8 @@ from asset_config.helpers import wall_hit
 
 @dataclass(frozen=True)
 class RayHit:
+    """One raycast result: endpoint, hit flag, distance, and angle."""
+
     end: Tuple[int, int]
     hit: bool
     distance: float
@@ -19,6 +21,7 @@ class VisionSensor:
     """Cast rays within a narrow FOV to detect walls using the map matrix."""
 
     def __init__(self, map_matrix: list, fov_deg: float = 60.0, num_rays: int = 60, step: int = 2) -> None:
+        """Configure a simple grid raycaster over the cave matrix."""
         self.map_matrix = map_matrix
         self.map_h = len(map_matrix)
         self.map_w = len(map_matrix[0]) if self.map_h else 0
@@ -44,6 +47,7 @@ class VisionSensor:
         return hits
 
     def _cast_single_ray(self, origin: Tuple[float, float], angle_deg: float) -> RayHit:
+        """Walk one ray until it reaches a wall or leaves the map."""
         rad = math.radians(angle_deg)
         dx = math.sin(rad)
         dy = -math.cos(rad)

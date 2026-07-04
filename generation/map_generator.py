@@ -30,12 +30,15 @@ class MapGenerator:
     NUM_PROCESSES = getattr(MapGen, "DEFAULT_NUM_PROCESSES", 8)
 
     def __init__(self, game, settings) -> None:
+        """Generate a cave map and expose legacy attributes for MissionControl."""
         self.game = game
         self.settings = settings
         self.width = Display.FULL_W - Display.LEGEND_WIDTH
         self.height = Display.FULL_H
 
         mission_config = self.settings.mission_config
+        # The pure generator returns arrays and metadata; this facade handles UI
+        # progress callbacks and writing runtime map artifacts afterward.
         generator = CaveGenerator(
             self.width,
             self.height,

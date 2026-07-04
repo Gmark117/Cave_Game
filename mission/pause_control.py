@@ -12,6 +12,7 @@ class SimulationClock:
         self,
         time_source: Callable[[], float] = time.perf_counter,
     ) -> None:
+        """Store a monotonic time source and paused-time counters."""
         self._time_source = time_source
         self._lock = threading.Lock()
         self._paused_at: float | None = None
@@ -49,6 +50,7 @@ class PauseCoordinator:
     PAUSED = "paused"
 
     def __init__(self, stop_event: threading.Event) -> None:
+        """Create a pause barrier linked to the mission stop event."""
         self._stop_event = stop_event
         self._condition = threading.Condition()
         self._paused = False

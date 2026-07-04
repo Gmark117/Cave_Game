@@ -5,7 +5,7 @@ import math
 import pygame
 
 from asset_config.rendering import Colors
-from mission.service_dependencies import MissionRendererDependencies
+from contracts import MissionRendererDependencies
 from ui.control_center.view_model import (
     build_drone_status_views,
     build_rover_status_views,
@@ -16,6 +16,7 @@ class MissionRenderer:
     """Render the complete mission scene in a stable layer order."""
 
     def __init__(self, dependencies: MissionRendererDependencies) -> None:
+        """Store rendering dependencies and fixed mission-control buttons."""
         self.dependencies = dependencies
         self.stop_button_rect = pygame.Rect(10, 10, 40, 40)
         self.restart_button_rect = pygame.Rect(58, 10, 40, 40)
@@ -35,6 +36,8 @@ class MissionRenderer:
         window.fill(Colors.BLACK.value)
         dependencies.slam_view.draw()
 
+        # Layer order: historical paths, translucent vision cones, icons,
+        # control center, then mission buttons.
         for drone, snapshot in zip(drones, drone_snapshots):
             drone.renderer.draw_path(snapshot)
         for rover in rovers:
@@ -113,6 +116,8 @@ class MissionRenderer:
         end_angle = math.tau
         point_count = 48
         arc_points = []
+        # Build the restart symbol as an arc plus a small arrow head so it
+        # remains readable without requiring another image asset.
         for index in range(point_count):
             ratio = index / (point_count - 1)
             angle = start_angle + ((end_angle - start_angle) * ratio)

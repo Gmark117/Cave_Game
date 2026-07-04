@@ -26,6 +26,7 @@ class SlamSnapshot:
     version: int = 0
 
     def __post_init__(self) -> None:
+        """Validate that occupancy and confidence describe the same grid."""
         if self.occupancy.ndim != 2 or self.confidence.ndim != 2:
             raise ValueError("SLAM snapshot arrays must be two-dimensional")
         if self.occupancy.shape != self.confidence.shape:
@@ -36,6 +37,7 @@ class SlamMap:
     """Own synchronized SLAM arrays, point observations, and merge rules."""
 
     def __init__(self, map_h: int, map_w: int, max_points: int = 6000) -> None:
+        """Create an unknown occupancy grid and bounded point cloud."""
         self._lock = threading.RLock()
         self._occupancy = np.full(
             (map_h, map_w),
@@ -196,6 +198,7 @@ class SlamMap:
             return float(self._confidence[y, x]) >= threshold
 
     def _snapshot_points(self, point_limit: Optional[int]) -> Tuple[Point, ...]:
+        """Return all points or only the newest ``point_limit`` points."""
         if point_limit is None:
             return tuple(self._point_cloud)
 
@@ -211,6 +214,7 @@ class SlamMap:
         occupancy_value: int,
         confidence: float,
     ) -> bool:
+        """Apply one occupancy label to line points when confidence improves."""
         updated = False
         for x, y in points:
             if (
@@ -237,6 +241,7 @@ class SlamMap:
         return updated
 
     def _add_point(self, point: Point) -> bool:
+        """Append a unique occupied point while enforcing the point limit."""
         normalized = (int(point[0]), int(point[1]))
         if normalized in self._point_set or self.max_points == 0:
             return False

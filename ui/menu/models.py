@@ -12,6 +12,8 @@ T = TypeVar("T")
 
 
 class MenuScreen(Enum):
+    """Logical menu screens controlled by the menu controller."""
+
     MAIN = "main"
     SIMULATION = "simulation"
     AUDIO = "audio"
@@ -19,6 +21,8 @@ class MenuScreen(Enum):
 
 
 class MenuAction(Enum):
+    """Actions that can be triggered by selectable menu rows."""
+
     OPEN_SIMULATION = "open_simulation"
     OPEN_AUDIO = "open_audio"
     OPEN_CREDITS = "open_credits"
@@ -42,27 +46,37 @@ class MenuItem:
 
 @dataclass
 class TitleItem(MenuItem):
+    """Non-selectable title row."""
+
     selectable: bool = field(default=False, init=False)
 
 
 @dataclass
 class ButtonItem(MenuItem):
+    """Selectable row that triggers a ``MenuAction``."""
+
     action: MenuAction = MenuAction.BACK_TO_MAIN
 
 
 @dataclass
 class SelectorItem(MenuItem, Generic[T]):
+    """Left/right row for choosing one value from a sequence."""
+
     options: Sequence[T] = field(default_factory=tuple)
     value: int = 0
 
 
 @dataclass
 class TextInputItem(MenuItem):
+    """Row that stores simple numeric text input."""
+
     text: str = ""
 
 
 @dataclass
 class SliderItem(MenuItem):
+    """Left/right row for bounded numeric values such as volume."""
+
     value: int = 0
     minimum: int = 0
     maximum: int = 100

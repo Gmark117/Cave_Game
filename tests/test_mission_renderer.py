@@ -11,7 +11,7 @@ import pygame
 
 from agents.drone_runtime_state import DroneSnapshot
 from asset_config.rendering import Colors
-from mission.service_dependencies import MissionRendererDependencies
+from contracts import MissionRendererDependencies
 from rendering.mission_renderer import MissionRenderer
 
 

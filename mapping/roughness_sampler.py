@@ -10,6 +10,7 @@ class RoughnessSampler:
     """Samples terrain roughness along rays with distance-based confidence."""
 
     def __init__(self, terrain_roughness: np.ndarray, map_matrix: list) -> None:
+        """Store the generated roughness layer and cave collision map."""
         self.terrain_roughness = terrain_roughness
         self.map_matrix = map_matrix
         self.map_h = len(map_matrix)

@@ -12,7 +12,7 @@ import numpy as np
 from mapping.roughness_sampler import RoughnessSampler
 from mapping.vision_sensor import RayHit, VisionSensor
 from mapping.terrain_knowledge import TerrainSample
-from mission.service_dependencies import DroneSensorDependencies
+from contracts import DroneSensorDependencies
 
 
 class DroneSensorController:
@@ -23,6 +23,7 @@ class DroneSensorController:
         drone: Any,
         dependencies: DroneSensorDependencies,
     ) -> None:
+        """Create raycasting and terrain-sampling helpers for one drone."""
         self.drone = drone
         self.dependencies = dependencies
         settings = drone.settings
@@ -50,6 +51,8 @@ class DroneSensorController:
             origin,
             snapshot.heading_deg,
         )
+        # The renderer consumes endpoints only; the SLAM map consumes full hit
+        # records so it knows whether each ray ended at a wall.
         drone.runtime_state.set_ray_points(hit.end for hit in ray_hits)
 
         drone.slam_map.update_from_rays(origin, ray_hits)
@@ -72,6 +75,8 @@ class DroneSensorController:
             return
         self.last_scan_time = now
 
+        # Terrain roughness is generated once with the cave. The sampler adds
+        # small noise and confidence so repeated observations can be fused.
         self.roughness_sampler.terrain_roughness = terrain
         if origin is None:
             origin = drone.snapshot().position

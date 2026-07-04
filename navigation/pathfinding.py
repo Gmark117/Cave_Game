@@ -19,6 +19,7 @@ class PathfindingService:
     """Own drone A* workers and rover terrain-aware path planning."""
 
     def __init__(self, cave_map: np.ndarray, agent_count: int) -> None:
+        """Store the cave map and delay external resource allocation."""
         self.cave_map = np.asarray(cave_map, dtype=np.uint8)
         self.agent_count = max(1, int(agent_count))
         self.map_shm: Optional[shared_memory.SharedMemory] = None
@@ -69,6 +70,8 @@ class PathfindingService:
         cpu_count = os.cpu_count() or 1
         available_workers = max(1, cpu_count - 1)
         max_workers = min(self.agent_count, available_workers)
+        # Bound submissions with a semaphore so each drone thread cannot queue
+        # unbounded work into the process pool.
         try:
             self.pool = ProcessPoolExecutor(max_workers=max_workers)
         except (RuntimeError, ValueError, OSError):
@@ -99,6 +102,8 @@ class PathfindingService:
 
         acquired = False
         try:
+            # The worker process attaches to the shared cave map by name, so the
+            # large map is not pickled for every path request.
             pool_sem.acquire()
             acquired = True
             future = pool.submit(

@@ -40,6 +40,7 @@ class MenuController:
         play_button: Callable[[], None],
         audio_changed: Callable[[], None],
     ) -> None:
+        """Store menu data and callbacks without depending on rendering."""
         self.screens = screens
         self._action_handler = action_handler
         self._play_button = play_button
@@ -49,15 +50,18 @@ class MenuController:
 
     @property
     def current_items(self) -> List[MenuRow]:
+        """Return the rows for the currently open screen."""
         return self.screens[self.current_screen]
 
     def first_selectable(self) -> int:
+        """Return the first selectable row index for the active screen."""
         for index, item in enumerate(self.current_items):
             if item.selectable:
                 return index
         return 0
 
     def next_selectable(self, direction: str) -> int:
+        """Move selection up/down, wrapping around non-selectable rows."""
         step = 1 if direction == "down" else -1
         index = self.current_index
         for _ in range(len(self.current_items)):
@@ -72,12 +76,14 @@ class MenuController:
         *,
         select_last: bool = False,
     ) -> None:
+        """Switch screens and choose the initial selected row."""
         self.current_screen = screen
         self.current_index = (
             len(self.current_items) - 1 if select_last else self.first_selectable()
         )
 
     def handle_input(self, game: object) -> None:
+        """Apply one frame of keyboard flags to the current menu state."""
         if game.UP_KEY:
             self.current_index = self.next_selectable("up")
             return
@@ -97,6 +103,7 @@ class MenuController:
             self._audio_changed()
 
     def _handle_item_input(self, item: MenuRow, game: object) -> bool:
+        """Mutate selectors, sliders, or text inputs from left/right/keys."""
         if isinstance(item, SelectorItem):
             if game.LEFT_KEY and item.value > 0:
                 item.value -= 1
@@ -132,6 +139,7 @@ class MenuController:
 
     @staticmethod
     def _handle_text_input(item: TextInputItem) -> bool:
+        """Append digits or remove one character from a text-input row."""
         keys = pygame.key.get_pressed()
         modified = False
         for key in range(pygame.K_0, pygame.K_9 + 1):

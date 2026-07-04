@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 from config.sim_settings import SimSettings
 from config.simulation_config import SimulationConfig, SlamConfig
@@ -8,6 +9,9 @@ from asset_config.gameplay import GameOptions
 from asset_config.helpers import next_cell_coords, wall_hit
 from asset_config.media import Audio, Images
 from asset_config.rendering import Fonts
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class HelperAndModelTests(unittest.TestCase):
@@ -63,6 +67,30 @@ class HelperAndModelTests(unittest.TestCase):
             Fonts.BIG.value,
         ):
             self.assertTrue(resource.exists(), resource)
+
+    def test_dependency_manifest_lists_runtime_dependencies(self) -> None:
+        requirements = {
+            line.strip()
+            for line in (PROJECT_ROOT / "requirements.txt").read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+
+        self.assertGreaterEqual(
+            requirements,
+            {"pygame", "numpy", "opencv-python"},
+        )
+
+    def test_gitignore_excludes_runtime_outputs(self) -> None:
+        patterns = (PROJECT_ROOT / ".gitignore").read_text()
+
+        for pattern in (
+            "__pycache__/",
+            "GameConfig/options.local.ini",
+            "GameConfig/simulation.local.ini",
+            "Assets/Map/*.png",
+            "Assets/Map/*.txt",
+        ):
+            self.assertIn(pattern, patterns)
 
     def test_poi_identity_is_based_on_id(self) -> None:
         first = POI("poi-1", "chamber", (2, 3))

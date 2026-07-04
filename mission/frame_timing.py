@@ -20,6 +20,7 @@ class FrameProfiler:
     """Maintain exponentially smoothed frame and stage durations."""
 
     def __init__(self, smoothing: float = 0.15) -> None:
+        """Initialize smoothed frame timing with an exponential weight."""
         if not 0.0 < smoothing <= 1.0:
             raise ValueError("Frame timing smoothing must be in (0, 1]")
 
@@ -80,4 +81,5 @@ class FrameProfiler:
         )
 
     def _smooth(self, previous: float, current: float) -> float:
+        """Blend a new timing sample into the previous smoothed value."""
         return previous + self.smoothing * (current - previous)

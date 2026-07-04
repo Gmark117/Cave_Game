@@ -27,6 +27,7 @@ class MapArtifactWriter:
     """Persist generated cave images and matrix artifacts."""
 
     def __init__(self, base_dir: Path = GAME_DIR) -> None:
+        """Store the project directory used for generated output paths."""
         self.base_dir = Path(base_dir)
 
     def write(self, bin_map: np.ndarray) -> None:
@@ -59,6 +60,7 @@ class MapArtifactWriter:
         pygame.image.save(cave_map, self._image_path(output_key))
 
     def _image_path(self, key: str) -> Path:
+        """Resolve an image enum key relative to this writer's base directory."""
         path = image_path_from_key(key)
         try:
             return self.base_dir / path.relative_to(GAME_DIR)

@@ -9,6 +9,8 @@ from typing import Tuple, List
 from asset_config.helpers import wall_hit
 
 class Graph:
+    """Track visited positions and validate straight-line movement."""
+
     def __init__(self, x_start: int, y_start: int, cave_mat: list) -> None:
         """Initialize graph with starting node and a reference to cave matrix.
 

@@ -41,6 +41,7 @@ class SimSettings(SimulationConfig):
         min_share_overlap_diff_ratio: float = 0.18,
         min_share_roughness_delta: float = 0.12,
     ) -> None:
+        """Translate legacy flat arguments into nested config sections."""
         super().__init__(
             mission_config=MissionConfig(
                 objective=mission,
@@ -75,52 +76,65 @@ class SimSettings(SimulationConfig):
 
     @property
     def mission(self) -> int:
+        """Legacy alias for ``mission_config.objective``."""
         return self.mission_config.objective
 
     @property
     def map_dim(self) -> str:
+        """Legacy alias for ``mission_config.map_dim``."""
         return self.mission_config.map_dim
 
     @property
     def seed(self) -> int:
+        """Legacy alias for ``mission_config.seed``."""
         return self.mission_config.seed
 
     @property
     def num_drones(self) -> int:
+        """Legacy alias for ``mission_config.num_drones``."""
         return self.mission_config.num_drones
 
     @property
     def slam_scan_interval(self) -> float:
+        """Legacy alias for ``slam.scan_interval``."""
         return self.slam.scan_interval
 
     @property
     def slam_scan_rays(self) -> int:
+        """Legacy alias for ``slam.scan_rays``."""
         return self.slam.scan_rays
 
     @property
     def slam_point_cloud_max_points(self) -> int:
+        """Legacy alias for ``slam.point_cloud_max_points``."""
         return self.slam.point_cloud_max_points
 
     @property
     def slam_render_point_tail(self) -> int:
+        """Legacy alias for ``rendering.point_tail``."""
         return self.rendering.point_tail
 
     @property
     def slam_render_interval(self) -> float:
+        """Legacy alias for ``rendering.refresh_interval``."""
         return self.rendering.refresh_interval
 
     @property
     def rover_share_interval(self) -> float:
+        """Legacy alias for ``sharing.rover_interval``."""
         return self.sharing.rover_interval
 
     @property
     def frontier_stride(self) -> int:
+        """Legacy alias for ``frontier.stride``."""
         return self.frontier.stride
 
     @property
     def frontier_confidence_threshold(self) -> float:
+        """Legacy alias for ``frontier.confidence_threshold``."""
         return self.frontier.confidence_threshold
 
     @property
     def frontier_rebuild_cooldown(self) -> float:
+        """Legacy alias for ``frontier.rebuild_cooldown``."""
         return self.frontier.rebuild_cooldown

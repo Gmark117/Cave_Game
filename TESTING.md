@@ -128,7 +128,8 @@ tests noisy without protecting simulation behavior.
 ### File Tests
 
 Redirect configuration and generated-map output to `TemporaryDirectory`.
-Never let automated tests overwrite `GameConfig/` or `Assets/Map/`.
+Never let automated tests overwrite committed defaults in `GameConfig/` or
+runtime map output in `Assets/Map/`.
 
 ### Multiprocessing and Thread Tests
 

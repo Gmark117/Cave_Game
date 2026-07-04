@@ -23,6 +23,8 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class AudioSettings:
+    """Menu audio preferences stored in the options INI."""
+
     volume: int = 100
     music: str = "on"
     button: str = "on"
@@ -32,23 +34,54 @@ class MenuSettingsRepository:
     """Persist audio and typed simulation configuration."""
 
     def __init__(self, game_dir: Path) -> None:
+        """Store the project root used to resolve config file paths."""
         self.game_dir = Path(game_dir)
 
     @property
     def options_path(self) -> Path:
+        """Ignored per-user audio settings written at runtime."""
+        return self.game_dir / "GameConfig" / "options.local.ini"
+
+    @property
+    def options_default_path(self) -> Path:
+        """Committed default audio settings used on first run."""
+        return self.game_dir / "GameConfig" / "options.default.ini"
+
+    @property
+    def legacy_options_path(self) -> Path:
+        """Former committed audio settings path kept for migration."""
         return self.game_dir / "GameConfig" / "options.ini"
 
     @property
     def simulation_path(self) -> Path:
+        """Ignored per-user simulation settings written at runtime."""
+        return self.game_dir / "GameConfig" / "simulation.local.ini"
+
+    @property
+    def simulation_default_path(self) -> Path:
+        """Committed default simulation settings used on first run."""
+        return self.game_dir / "GameConfig" / "simulation.default.ini"
+
+    @property
+    def legacy_current_simulation_path(self) -> Path:
+        """Former current simulation path kept for migration."""
         return self.game_dir / "GameConfig" / "simulation.ini"
 
     @property
     def legacy_simulation_path(self) -> Path:
+        """Original legacy simulation settings path."""
         return self.game_dir / "GameConfig" / "symSettings.ini"
 
     def load_audio(self) -> AudioSettings:
+        """Load audio settings with defaults, legacy, then local precedence."""
         config = configparser.ConfigParser()
-        config.read(self.options_path)
+        config.read(
+            [
+                self.options_default_path,
+                self.legacy_options_path,
+                self.options_path,
+            ]
+        )
         return AudioSettings(
             volume=config.getint("Options", "volume", fallback=100),
             music=config.get("Options", "music", fallback="on"),
@@ -56,12 +89,14 @@ class MenuSettingsRepository:
         )
 
     def save_audio(self, settings: AudioSettings) -> None:
+        """Persist audio settings to the ignored local options file."""
         config = configparser.ConfigParser()
         config["Options"] = {
             "volume": str(settings.volume),
             "music": settings.music,
             "button": settings.button,
         }
+        self.options_path.parent.mkdir(parents=True, exist_ok=True)
         with self.options_path.open("w") as config_file:
             config.write(config_file)
 
@@ -70,9 +105,17 @@ class MenuSettingsRepository:
         defaults: SimulationConfig,
     ) -> Optional[SimulationConfig]:
         """Load the new format, falling back to the legacy file if absent."""
-        if self.simulation_path.exists():
+        for current_path in (
+            self.simulation_path,
+            self.legacy_current_simulation_path,
+            self.simulation_default_path,
+        ):
+            # Read local settings first, then legacy migration paths, then the
+            # committed defaults. Invalid sections fall back per section below.
+            if not current_path.exists():
+                continue
             config = configparser.ConfigParser()
-            config.read(self.simulation_path)
+            config.read(current_path)
             return self._load_current(config, defaults)
 
         if self.legacy_simulation_path.exists():
@@ -125,6 +168,7 @@ class MenuSettingsRepository:
                 settings.rendering.refresh_interval
             ),
         }
+        self.simulation_path.parent.mkdir(parents=True, exist_ok=True)
         with self.simulation_path.open("w") as config_file:
             config.write(config_file)
 
@@ -133,6 +177,7 @@ class MenuSettingsRepository:
         config: configparser.ConfigParser,
         defaults: SimulationConfig,
     ) -> SimulationConfig:
+        """Read the sectioned INI format introduced by the cleanup."""
         return SimulationConfig(
             mission_config=self._section_or_default(
                 lambda: self._read_mission(
@@ -182,6 +227,7 @@ class MenuSettingsRepository:
         config: configparser.ConfigParser,
         defaults: SimulationConfig,
     ) -> SimulationConfig:
+        """Read the older ``symSettings``/``SLAM`` format if present."""
         mission_section = (
             config["symSettings"] if config.has_section("symSettings") else {}
         )
@@ -318,9 +364,15 @@ class MenuSettingsRepository:
         section: object,
         defaults: MissionConfig,
     ) -> MissionConfig:
+        """Parse the mission section, using defaults for missing values."""
         return MissionConfig(
             objective=self._objective_index(
-                str(section.get("objective", self._objective_name(defaults.objective))),
+                str(
+                    section.get(
+                        "objective",
+                        self._objective_name(defaults.objective),
+                    )
+                ),
                 defaults.objective,
             ),
             map_dim=self._map_dimension(
@@ -333,6 +385,7 @@ class MenuSettingsRepository:
 
     @staticmethod
     def _read_slam(section: object, defaults: SlamConfig) -> SlamConfig:
+        """Parse the SLAM section."""
         return SlamConfig(
             scan_interval=float(
                 section.get("scan_interval", defaults.scan_interval)
@@ -351,6 +404,7 @@ class MenuSettingsRepository:
         section: object,
         defaults: SharingConfig,
     ) -> SharingConfig:
+        """Parse proximity-sharing thresholds and intervals."""
         return SharingConfig(
             drone_interval=float(
                 section.get("drone_interval", defaults.drone_interval)
@@ -389,6 +443,7 @@ class MenuSettingsRepository:
         section: object,
         defaults: FrontierConfig,
     ) -> FrontierConfig:
+        """Parse frontier detection settings."""
         return FrontierConfig(
             stride=int(section.get("stride", defaults.stride)),
             confidence_threshold=float(
@@ -410,6 +465,7 @@ class MenuSettingsRepository:
         section: object,
         defaults: RenderingConfig,
     ) -> RenderingConfig:
+        """Parse SLAM rendering cache settings."""
         return RenderingConfig(
             point_tail=int(
                 section.get("slam_point_tail", defaults.point_tail)
@@ -427,6 +483,7 @@ class MenuSettingsRepository:
         loader: Callable[[], T],
         default: T,
     ) -> T:
+        """Return a parsed section or its default when conversion fails."""
         try:
             return loader()
         except (TypeError, ValueError):
@@ -434,12 +491,14 @@ class MenuSettingsRepository:
 
     @staticmethod
     def _objective_name(objective: int) -> str:
+        """Convert a mission index to the menu label when possible."""
         if 0 <= objective < len(GameOptions.MISSION):
             return str(GameOptions.MISSION[objective])
         return str(objective)
 
     @staticmethod
     def _objective_index(name: str, default: int) -> int:
+        """Convert a mission label or numeric string to a mission index."""
         for index, option in enumerate(GameOptions.MISSION):
             if str(option).casefold() == name.casefold():
                 return index
@@ -450,6 +509,7 @@ class MenuSettingsRepository:
 
     @staticmethod
     def _map_name(map_dim: str) -> str:
+        """Normalize a map dimension to the menu spelling when possible."""
         for option in GameOptions.MAP_SIZE:
             if str(option).casefold() == map_dim.casefold():
                 return str(option)
@@ -457,6 +517,7 @@ class MenuSettingsRepository:
 
     @staticmethod
     def _map_dimension(name: str, default: str) -> str:
+        """Normalize a map dimension to the internal uppercase value."""
         for option in GameOptions.MAP_SIZE:
             if str(option).casefold() == name.casefold():
                 return str(option).upper()

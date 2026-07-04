@@ -23,16 +23,19 @@ class MenuRenderer:
     """Own backgrounds, fonts, layout, and menu drawing."""
 
     def __init__(self, game: object) -> None:
+        """Load background images used by menu screens."""
         self.game = game
         self.background = pygame.image.load(Images.CAVE.value)
         self.dark_background = pygame.image.load(Images.DARK_CAVE.value)
 
     def draw(self, items: Sequence[MenuRow], selected_index: int) -> None:
+        """Draw all rows in one menu screen."""
         self.game.display.blit(self.background, (0, 0))
         for index, item in enumerate(items):
             self._draw_item(item, index == selected_index)
 
     def draw_loading(self, text: Sequence[str]) -> None:
+        """Draw centered loading text over the dark cave background."""
         font_size = 100
         line_offset = 100
         self.game.display.blit(self.dark_background, (0, 0))
@@ -49,6 +52,7 @@ class MenuRenderer:
         self.game.blit_screen()
 
     def _draw_item(self, item: MenuRow, selected: bool) -> None:
+        """Draw one menu row and its optional value control."""
         x, y = item.position
         color = (
             Colors.EUCALYPTUS.value
@@ -103,6 +107,7 @@ class MenuRenderer:
         color: Tuple[int, int, int],
         align: str,
     ) -> None:
+        """Draw text using a Pygame rect anchor."""
         style = pygame.font.Font(font, size)
         text_surface = style.render(text, True, color)
         rect = text_surface.get_rect()
@@ -122,6 +127,7 @@ class MenuRenderer:
         direction: str,
         color: Tuple[int, int, int],
     ) -> None:
+        """Draw a simple triangular selector arrow."""
         center_x = int(center_x)
         center_y = int(center_y)
         half_width = max(3, int(size // 2))
@@ -141,6 +147,7 @@ class MenuRenderer:
         pygame.draw.polygon(self.game.display, color, points)
 
     def _draw_selector(self, item: SelectorItem[object], value_offset: int) -> None:
+        """Draw a selector value with arrows for available directions."""
         x, y = item.position
         value_text = str(item.options[item.value])
         value_x = x + value_offset
@@ -178,6 +185,7 @@ class MenuRenderer:
                 )
 
     def _draw_slider(self, item: SliderItem, value_offset: int) -> None:
+        """Draw the volume-style slider as five filled bars."""
         x, y = item.position
         slider_x = x + value_offset
         max_width = 200

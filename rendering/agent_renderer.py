@@ -12,6 +12,7 @@ class DroneRenderer:
     """Render a drone's path, vision overlay, start marker, and icon."""
 
     def __init__(self, drone: Any) -> None:
+        """Create reusable transparent surfaces for one drone."""
         self.drone = drone
         game = drone.game
 
@@ -97,6 +98,7 @@ class RoverRenderer:
     """Render a rover's path history and icon."""
 
     def __init__(self, rover: Any) -> None:
+        """Create reusable transparent surfaces for one rover."""
         self.rover = rover
         game = rover.game
 

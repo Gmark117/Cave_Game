@@ -42,7 +42,10 @@ class DroneRuntimeState:
         direction: int,
         frontier_rebuild_cooldown: float,
     ) -> None:
+        """Initialize synchronized drone state at the mission start position."""
         self._lock = threading.RLock()
+        # Graph owns the route history and collision checks; every access is
+        # guarded by this runtime-state lock.
         self._graph = Graph(*start_position, cave)
         self._position = start_position
         self._direction = int(direction)
@@ -104,6 +107,7 @@ class DroneRuntimeState:
             self._graph.add_node(position)
 
     def set_direction(self, direction: int) -> None:
+        """Store the current exploration heading in degrees."""
         with self._lock:
             self._direction = int(direction)
 
@@ -124,6 +128,7 @@ class DroneRuntimeState:
             self._frontiers = list(set(self._frontiers))
 
     def replace_frontiers(self, frontiers: Iterable[Position]) -> None:
+        """Replace all known frontier targets with a freshly computed set."""
         with self._lock:
             self._frontiers = [
                 (int(position[0]), int(position[1]))
@@ -131,6 +136,7 @@ class DroneRuntimeState:
             ]
 
     def merge_frontiers(self, frontiers: Iterable[Position]) -> None:
+        """Merge shared frontier targets from another drone."""
         with self._lock:
             merged = set(self._frontiers)
             merged.update(
@@ -140,11 +146,13 @@ class DroneRuntimeState:
             self._frontiers = list(merged)
 
     def remove_frontier(self, target: Position) -> None:
+        """Drop a frontier once it has been reached or abandoned."""
         with self._lock:
             if target in self._frontiers:
                 self._frontiers.remove(target)
 
     def set_returning_home(self, value: bool = True) -> None:
+        """Set whether the drone should navigate back to its start point."""
         with self._lock:
             self._returning_home = bool(value)
 
@@ -160,10 +168,12 @@ class DroneRuntimeState:
             return self._done, self._returning_home
 
     def mark_done(self) -> None:
+        """Mark this drone as fully complete for mission objective checks."""
         with self._lock:
             self._done = True
 
     def set_ray_points(self, ray_points: Iterable[Position]) -> None:
+        """Store the latest vision-ray endpoints for rendering the cone."""
         with self._lock:
             self._ray_points = [
                 (int(position[0]), int(position[1]))
@@ -171,14 +181,17 @@ class DroneRuntimeState:
             ]
 
     def set_battery(self, battery: int) -> None:
+        """Store the displayed battery percentage."""
         with self._lock:
             self._battery = int(battery)
 
     def toggle_path(self) -> None:
+        """Toggle path overlay visibility for this drone."""
         with self._lock:
             self._show_path = not self._show_path
 
     def toggle_vision(self) -> None:
+        """Toggle vision overlay visibility for this drone."""
         with self._lock:
             self._show_vision = not self._show_vision
 
@@ -188,6 +201,7 @@ class DroneRuntimeState:
         show_path: bool,
         show_vision: bool,
     ) -> None:
+        """Set both overlay flags together to avoid mixed UI states."""
         with self._lock:
             self._show_path = bool(show_path)
             self._show_vision = bool(show_vision)

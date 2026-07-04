@@ -8,7 +8,7 @@ from agents.drone_movement import DroneMovementController
 from agents.drone_runtime_state import DroneRuntimeState, DroneSnapshot
 from mapping.drone_sensor import DroneSensorController
 from mapping.terrain_knowledge import TerrainKnowledge
-from mission.service_dependencies import (
+from contracts import (
     DroneMovementDependencies,
     DroneSensorDependencies,
 )
@@ -38,7 +38,8 @@ class Drone:
         self.settings = game.sim_settings
         self.cave = cave
 
-        # Identity and movement
+        # Identity and movement. Radius is the sensor/visibility reach; step is
+        # the smaller movement increment used for each exploration move.
         self.id = id
         self.map_size = self.settings.mission_config.map_dim
         self.radius = self.calculate_radius()
@@ -57,7 +58,9 @@ class Drone:
         # Presentation and traversal configuration
         self.speed_factor = 4
 
-        # Local terrain knowledge (distributed mapping)
+        # Local terrain knowledge (distributed mapping). Agent decisions should
+        # use this local store; MissionControl keeps a separate aggregate only
+        # for progress and combined rendering.
         self.terrain_knowledge = TerrainKnowledge(self.cave)
 
         # Exploration bookkeeping
@@ -75,6 +78,7 @@ class Drone:
         map_w = len(self.cave[0]) if map_h else 0
         max_points = self.settings.slam.point_cloud_max_points
         self.slam_map = SlamMap(map_h, map_w, max_points=max_points)
+        # Controllers keep movement/sensing logic out of this data container.
         self.movement_controller = DroneMovementController(
             self,
             DroneMovementDependencies(
@@ -135,6 +139,8 @@ class Drone:
         valid_frontiers = []
         for border in other_border:
             position = (int(border[0]), int(border[1]))
+            # Shared frontiers may be stale by the time this thread receives
+            # them, so validate bounds and wall/floor state before merging.
             if (
                 0 <= position[1] < len(self.cave)
                 and 0 <= position[0] < len(self.cave[0])

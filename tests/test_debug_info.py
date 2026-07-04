@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from mission.frame_timing import FrameProfiler
 from mission.debug_info import MissionDebugInfo
-from mission.service_dependencies import MissionDebugDependencies
+from contracts import MissionDebugDependencies
 
 
 class MissionDebugInfoTests(unittest.TestCase):

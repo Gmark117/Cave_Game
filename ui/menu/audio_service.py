@@ -12,6 +12,7 @@ class MenuAudioService:
     """Own mixer resources and apply menu audio preferences."""
 
     def __init__(self, settings: AudioSettings) -> None:
+        """Initialize the mixer and apply persisted audio settings."""
         mix.init()
         mix.music.load(Audio.AMBIENT.value)
         self.button = mix.Sound(Audio.BUTTON.value)
@@ -21,15 +22,18 @@ class MenuAudioService:
             mix.music.play(-1)
 
     def apply_volume(self, volume: int) -> None:
+        """Apply a 0..100 volume value to music and button sound."""
         mix.music.set_volume(volume / 100)
         self.button.set_volume(volume / 100)
 
     def set_music(self, enabled: bool) -> None:
+        """Start or stop the looping menu background track."""
         if enabled:
             mix.music.play(-1)
         else:
             mix.music.stop()
 
     def play_button(self, enabled: bool) -> None:
+        """Play the click sound when button audio is enabled."""
         if enabled:
             self.button.play()

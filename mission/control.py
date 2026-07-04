@@ -21,8 +21,9 @@ from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.terrain_sharing import TerrainSharingService
 from mission.debug_info import MissionDebugInfo
 from mission.frame_timing import FrameProfiler
+from mission.objectives import build_mission_objective
 from mission.pause_control import PauseCoordinator, SimulationClock
-from mission.service_dependencies import (
+from contracts import (
     MissionDebugDependencies,
     MissionRendererDependencies,
     RoverTargetDependencies,
@@ -52,14 +53,23 @@ class MissionControl(MissionControlLifecycleMixin):
             game: The `Game` instance owning this mission (typed as `Any`
                   to avoid circular imports).
         """
-        # Set the seed from the settings
+        # Seed every mission from the menu settings so generated caves and
+        # agent color/order choices remain reproducible for a given seed.
         rand.seed(game.sim_settings.mission_config.seed)
 
         self.game         = game
         self.settings     = game.sim_settings 
+        self.objective    = (
+            getattr(game, "mission_objective", None)
+            or build_mission_objective(
+                self.settings.mission_config.objective
+            )
+        )
         self.cartographer = game.cartographer
         self.map_matrix   = self.cartographer.bin_map # Get the binary map representation
         self.map_h, self.map_w = np.asarray(self.map_matrix).shape
+        # Map generation may be bypassed or mocked in tests, so normalize the
+        # optional roughness layer to the cave matrix shape before sensors use it.
         terrain_roughness_src = np.array(
             getattr(self.cartographer, 'terrain_roughness', np.zeros_like(self.map_matrix)),
             dtype=np.float32
@@ -73,10 +83,12 @@ class MissionControl(MissionControlLifecycleMixin):
         self.rover_assignment_lock = threading.Lock()
         self.rover_assignments = {}
         self.completed_rover_targets = set()
-        # Temporary switch: keep rovers stationary
+        # Rover motion stays disabled until its local-knowledge policy is defined.
         self.rover_motion_enabled = False
 
         # Runtime resources are initialized explicitly by run().
+        # Pathfinding owns external resources (shared memory and a process pool)
+        # but does not allocate them until ``run`` calls ``start``.
         self.pathfinding = PathfindingService(
             self.map_matrix,
             self.settings.mission_config.num_drones,
@@ -109,6 +121,8 @@ class MissionControl(MissionControlLifecycleMixin):
         self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
         self.last_explored_update = 0.0
         self.explored_update_interval = 0.5
+        # Dependency bundles keep services decoupled from the large
+        # MissionControl object while still giving them the callbacks they need.
         self.terrain_fusion_dependencies = TerrainFusionDependencies(
             terrain_knowledge=self.terrain_knowledge,
             get_control_center=lambda: self.control_center,
@@ -195,6 +209,8 @@ class MissionControl(MissionControlLifecycleMixin):
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
 
+        # Reset presentation after agents exist so their path/vision toggles
+        # start from a known default each time a mission is run.
         self.presentation.reset(self.drones)
 
         self.clock = pygame.time.Clock()
@@ -242,6 +258,8 @@ class MissionControl(MissionControlLifecycleMixin):
                 not self.mission_event.is_set()
                 and not self.drones[drone_id].mission_completed()
             ):
+                # Worker threads only pause at cooperative checkpoints, which
+                # keeps shared drone state from being stopped mid-update.
                 if not self.pause_checkpoint():
                     break
                 self.drones[drone_id].move()
@@ -262,7 +280,7 @@ class MissionControl(MissionControlLifecycleMixin):
 
 
     def compute_rover_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Compute a provisional rover path using mission terrain telemetry.
+        """Compute the disabled rover path using mission terrain telemetry.
 
         Rover motion is disabled until its policy is defined. Before enabling
         it, route planning must consume the rover's own received knowledge.

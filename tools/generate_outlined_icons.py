@@ -1,3 +1,10 @@
+"""Generate semi-transparent outlined icon variants for the control center.
+
+The script reads the base drone/rover/debug/system images and writes matching
+``*_outlined.png`` files beside them. Those outlined images are preferred by
+the control-center tab renderer when available.
+"""
+
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageChops, ImageDraw
 

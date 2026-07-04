@@ -1,13 +1,21 @@
+"""Draw the SLAM confidence brightness curve used by ``SlamRenderer``.
+
+This developer helper creates ``generated-images/confidence-curve.png`` so the
+nonlinear confidence-to-brightness mapping can be inspected visually.
+"""
+
 from pathlib import Path
 
 import pygame
 
 
 def lerp(a: float, b: float, t: float) -> float:
+    """Linearly interpolate from ``a`` to ``b`` by fraction ``t``."""
     return a + (b - a) * t
 
 
 def main() -> None:
+    """Render and save the confidence-curve reference image."""
     pygame.init()
 
     width, height = 1100, 760

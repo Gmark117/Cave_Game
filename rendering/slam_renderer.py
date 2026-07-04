@@ -12,6 +12,7 @@ class SlamRenderer:
     """Renders SLAM occupancy and point data into a pygame surface."""
 
     def __init__(self, map_w: int, map_h: int) -> None:
+        """Create the transparent surface used for the map overlay."""
         self.surface = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
 
     def render(
@@ -95,6 +96,8 @@ class SlamRenderer:
         blue = np.clip(blue, 0.0, 255.0).astype(np.uint8)
         alpha = np.clip(alpha, 0.0, 255.0).astype(np.uint8)
 
+        # Pygame surfarray views are shaped (x, y), while NumPy map arrays are
+        # shaped (row/y, column/x), so the color planes are transposed.
         rgb_view = pygame.surfarray.pixels3d(self.surface)
         alpha_view = pygame.surfarray.pixels_alpha(self.surface)
         rgb_view[:, :, 0] = red.T

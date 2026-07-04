@@ -13,7 +13,7 @@ import pygame
 from config.simulation_config import RenderingConfig, SimulationConfig
 from mapping.slam_map import UNKNOWN, SlamMap, SlamSnapshot
 from mapping.terrain_knowledge import TerrainKnowledge
-from mission.service_dependencies import SlamViewDependencies
+from contracts import SlamViewDependencies
 from rendering.slam_view import SlamViewService
 
 

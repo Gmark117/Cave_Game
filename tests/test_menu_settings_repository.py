@@ -27,6 +27,36 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         config.read(repository.options_path)
         self.assertTrue(config.has_section("Options"))
 
+    def test_audio_defaults_load_before_local_overrides(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.options_default_path.write_text(
+            "[Options]\n"
+            "volume = 20\n"
+            "music = off\n"
+            "button = off\n"
+        )
+
+        self.assertEqual(
+            repository.load_audio(),
+            AudioSettings(20, "off", "off"),
+        )
+
+        repository.save_audio(AudioSettings(80, "on", "on"))
+
+        self.assertEqual(
+            repository.load_audio(),
+            AudioSettings(80, "on", "on"),
+        )
+        self.assertTrue(repository.options_path.exists())
+        self.assertEqual(
+            repository.options_default_path.read_text(),
+            "[Options]\n"
+            "volume = 20\n"
+            "music = off\n"
+            "button = off\n",
+        )
+
     def test_simulation_round_trip_uses_nested_sections(self) -> None:
         temporary_directory, repository = self.make_repository()
         self.addCleanup(temporary_directory.cleanup)
@@ -88,6 +118,34 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.frontier.stride, 2)
         self.assertEqual(loaded.rendering.refresh_interval, 0.2)
         self.assertFalse(repository.simulation_path.exists())
+
+    def test_simulation_default_loads_before_local_override(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.simulation_default_path.write_text(
+            "[MISSION]\n"
+            "objective = Exploration\n"
+            "map_dimension = Small\n"
+            "seed = 5\n"
+            "drones = 3\n"
+        )
+        defaults = SimulationConfig()
+
+        loaded_default = repository.load_simulation(defaults)
+        self.assertEqual(loaded_default.mission_config.seed, 5)
+
+        local = replace(
+            defaults,
+            mission_config=replace(
+                defaults.mission_config,
+                seed=99,
+            ),
+        )
+        repository.save_simulation(local)
+
+        loaded_local = repository.load_simulation(defaults)
+        self.assertEqual(loaded_local.mission_config.seed, 99)
+        self.assertTrue(repository.simulation_path.exists())
 
     def test_new_file_takes_precedence_over_legacy_file(self) -> None:
         temporary_directory, repository = self.make_repository()

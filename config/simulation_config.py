@@ -15,6 +15,7 @@ class MissionConfig:
     num_drones: int = 3
 
     def __post_init__(self) -> None:
+        """Validate values that are unsafe or ambiguous at runtime."""
         if self.objective < 0:
             raise ValueError("objective must be non-negative")
         if not self.map_dim:
@@ -32,6 +33,7 @@ class SlamConfig:
     point_cloud_max_points: int = 6000
 
     def __post_init__(self) -> None:
+        """Validate SLAM sampling and memory limits."""
         if self.scan_interval < 0.0:
             raise ValueError("scan_interval must be non-negative")
         if self.scan_rays <= 0:
@@ -53,6 +55,7 @@ class SharingConfig:
     min_roughness_delta: float = 0.12
 
     def __post_init__(self) -> None:
+        """Validate sharing cadence and comparison thresholds."""
         if min(self.drone_interval, self.pair_cooldown, self.rover_interval) < 0.0:
             raise ValueError("sharing intervals must be non-negative")
         if self.compare_stride <= 0:
@@ -76,6 +79,7 @@ class FrontierConfig:
     rebuild_cooldown: float = 0.25
 
     def __post_init__(self) -> None:
+        """Validate frontier sampling and rebuild timing."""
         if self.stride <= 0:
             raise ValueError("stride must be positive")
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -94,6 +98,7 @@ class RenderingConfig:
     refresh_interval: float = 0.1
 
     def __post_init__(self) -> None:
+        """Validate cached-rendering limits."""
         if self.point_tail < 0:
             raise ValueError("point_tail must be non-negative")
         if self.refresh_interval < 0.0:

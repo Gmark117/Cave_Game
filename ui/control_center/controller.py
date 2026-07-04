@@ -12,6 +12,7 @@ ControlAction = Tuple[str, Optional[int]]
 
 
 def _rect_value(rect: Optional[Sequence[int]]) -> Optional[RectValue]:
+    """Normalize a Pygame-like rect sequence into a plain tuple."""
     if rect is None:
         return None
     return tuple(int(value) for value in rect)  # type: ignore[return-value]
@@ -33,6 +34,7 @@ class ControlHitMap:
             tuple[int, str, Sequence[int]]
         ] = (),
     ) -> None:
+        """Copy mutable renderer rectangles into immutable tuple values."""
         object.__setattr__(
             self,
             "heatmap_toggle",
@@ -60,6 +62,7 @@ class ControlCenterController:
     """Own timer, progress, selected tab, and hit-test interpretation."""
 
     def __init__(self) -> None:
+        """Initialize non-rendering state for the control panel."""
         self.active_tab = "drones"
         self.explored_percent = 100
         self._tic: Optional[float] = None
@@ -67,21 +70,25 @@ class ControlCenterController:
         self._paused_duration = 0.0
 
     def start_timer(self) -> None:
+        """Start mission elapsed-time tracking."""
         self._tic = time.perf_counter()
         self._paused_at = None
         self._paused_duration = 0.0
 
     def pause_timer(self) -> None:
+        """Freeze elapsed-time display while the simulation is paused."""
         if self._tic is not None and self._paused_at is None:
             self._paused_at = time.perf_counter()
 
     def resume_timer(self) -> None:
+        """Resume elapsed-time display after a pause."""
         if self._paused_at is None:
             return
         self._paused_duration += time.perf_counter() - self._paused_at
         self._paused_at = None
 
     def format_timer(self) -> str:
+        """Return elapsed mission time as ``MM:SS``."""
         if self._tic is None:
             return "00:00"
         now = (
@@ -97,6 +104,7 @@ class ControlCenterController:
         return f"{minutes:02d}:{seconds:02d}"
 
     def set_explored_percent(self, value: int) -> None:
+        """Store explored percentage for the next rendered frame."""
         self.explored_percent = int(value)
 
     def handle_click(
@@ -104,6 +112,7 @@ class ControlCenterController:
         mouse_pos: tuple[int, int],
         hit_map: ControlHitMap,
     ) -> Optional[ControlAction]:
+        """Convert a mouse position and hit map into a semantic UI action."""
         if (
             hit_map.heatmap_toggle is not None
             and pygame.Rect(hit_map.heatmap_toggle).collidepoint(mouse_pos)

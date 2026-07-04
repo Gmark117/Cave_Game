@@ -9,7 +9,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 from mapping.terrain_fusion import TerrainFusionService, fuse_terrain_samples
 from mapping.terrain_knowledge import TerrainKnowledge
-from mission.service_dependencies import TerrainFusionDependencies
+from contracts import TerrainFusionDependencies
 
 
 class TerrainFusionTests(unittest.TestCase):

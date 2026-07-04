@@ -85,6 +85,7 @@ class ControlCenterViewModel:
         selected_drone_heatmap_id: int | None,
         debug_lines: Iterable[str],
     ) -> None:
+        """Copy mutable mission values into immutable display values."""
         object.__setattr__(self, "elapsed_time", str(elapsed_time))
         object.__setattr__(
             self,
@@ -120,12 +121,14 @@ class ControlCenterViewModel:
 
 
 def _roster_name(roster: tuple[AgentRosterEntry, ...], agent_id: int) -> str:
+    """Return a themed roster name, falling back for extra agents."""
     if 0 <= agent_id < len(roster):
         return roster[agent_id].name
     return f"Agent {agent_id + 1}"
 
 
 def _drone_status(snapshot: DroneSnapshot) -> str:
+    """Translate drone runtime flags into a user-facing status label."""
     if snapshot.done:
         return "Done"
     if snapshot.returning_home:
