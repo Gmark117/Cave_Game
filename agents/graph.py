@@ -4,7 +4,7 @@
 validation helpers (line-of-sight checks) used during exploration.
 """
 
-from typing import Tuple, List
+from typing import Tuple
 
 from asset_config.helpers import wall_hit
 

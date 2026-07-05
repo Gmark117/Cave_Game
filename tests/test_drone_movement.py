@@ -4,6 +4,7 @@ import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -12,6 +13,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from agents.drone import Drone
+from asset_config.helpers import next_cell_coords
 from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
 from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
 from agents.drone_movement import DroneMovementController
@@ -150,6 +152,92 @@ class DroneMovementTests(unittest.TestCase):
 
         self.assertEqual(controller.frontier_stride, 2)
         self.assertEqual(controller.border_retry_cooldown, 3.0)
+
+    def test_find_new_node_keeps_integer_degree_candidates(self) -> None:
+        current_position = self.drone.snapshot().position
+        calls = []
+
+        def graph_is_valid(current, candidate) -> bool:
+            calls.append((current, candidate))
+            return True
+
+        self.drone.runtime_state.graph_is_valid = graph_is_valid
+
+        with patch("agents.drone_movement.rand.choice", return_value=90):
+            valid_dirs, valid_targets, target = (
+                self.drone.movement_controller.find_new_node()
+            )
+
+        expected_target = next_cell_coords(
+            *current_position,
+            self.drone.step,
+            90,
+        )
+        self.assertEqual(valid_dirs, list(range(360)))
+        self.assertEqual(len(valid_targets), 360)
+        self.assertEqual(target, expected_target)
+        self.assertEqual(self.drone.snapshot().direction, 90)
+        self.assertEqual(len(calls), 361)
+        self.assertEqual(
+            calls[0],
+            (
+                current_position,
+                next_cell_coords(
+                    *current_position,
+                    self.drone.radius + 1,
+                    0,
+                ),
+            ),
+        )
+        self.assertEqual(
+            calls[359],
+            (
+                current_position,
+                next_cell_coords(
+                    *current_position,
+                    self.drone.radius + 1,
+                    359,
+                ),
+            ),
+        )
+        self.assertEqual(calls[-1], (current_position, expected_target))
+
+    def test_find_new_node_removes_rejected_short_step(self) -> None:
+        current_position = self.drone.snapshot().position
+        rejected_step = next_cell_coords(
+            *current_position,
+            self.drone.step,
+            90,
+        )
+        calls = 0
+
+        def graph_is_valid(current, candidate) -> bool:
+            nonlocal calls
+            calls += 1
+            return not (calls > 360 and candidate == rejected_step)
+
+        self.drone.runtime_state.graph_is_valid = graph_is_valid
+
+        with patch(
+            "agents.drone_movement.rand.choice",
+            side_effect=[90, 180],
+        ):
+            valid_dirs, valid_targets, target = (
+                self.drone.movement_controller.find_new_node()
+            )
+
+        self.assertNotIn(90, valid_dirs)
+        self.assertEqual(len(valid_dirs), 359)
+        self.assertEqual(len(valid_targets), 359)
+        self.assertEqual(
+            target,
+            next_cell_coords(
+                *current_position,
+                self.drone.step,
+                180,
+            ),
+        )
+        self.assertEqual(self.drone.snapshot().direction, 180)
 
     def test_mutable_runtime_fields_are_owned_by_state(self) -> None:
         self.assertFalse(hasattr(self.drone, "pos"))

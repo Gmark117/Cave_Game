@@ -7,10 +7,7 @@ active agent decisions.
 
 from typing import Iterable
 
-from mapping.terrain_knowledge import (
-    TerrainSample,
-    fuse_terrain_samples,
-)
+from mapping.terrain_knowledge import TerrainSample
 from contracts import TerrainFusionDependencies
 
 

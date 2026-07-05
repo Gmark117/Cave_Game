@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -100,6 +100,32 @@ class AgentRendererTests(unittest.TestCase):
             0,
         )
 
+    def test_drone_path_draws_only_new_segments(self) -> None:
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        drone = Drone(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (255, 0, 0),
+            icon,
+            self.cave,
+        )
+        drone.runtime_state.move_to((36, 32))
+        first_snapshot = drone.snapshot()
+
+        with patch(
+            "rendering.agent_renderer.pygame.draw.line",
+            return_value=pygame.Rect(0, 0, 1, 1),
+        ) as draw_line:
+            drone.renderer.draw_path(first_snapshot)
+            drone.renderer.draw_path(first_snapshot)
+
+            drone.runtime_state.move_to((40, 32))
+            drone.renderer.draw_path(drone.snapshot())
+
+        self.assertEqual(draw_line.call_count, 2)
+
     def test_rover_renderer_owns_path_surface(self) -> None:
         icon = pygame.Surface((4, 4), pygame.SRCALPHA)
         icon.fill((255, 255, 255, 255))
@@ -129,6 +155,31 @@ class AgentRendererTests(unittest.TestCase):
             ),
             0,
         )
+
+    def test_rover_path_draws_only_new_segments(self) -> None:
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        rover = Rover(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (0, 255, 0),
+            icon,
+            self.cave,
+        )
+        rover.graph.add_node((36, 32))
+
+        with patch(
+            "rendering.agent_renderer.pygame.draw.line",
+            return_value=pygame.Rect(0, 0, 1, 1),
+        ) as draw_line:
+            rover.renderer.draw_path()
+            rover.renderer.draw_path()
+
+            rover.graph.add_node((40, 32))
+            rover.renderer.draw_path()
+
+        self.assertEqual(draw_line.call_count, 2)
 
 
 if __name__ == "__main__":

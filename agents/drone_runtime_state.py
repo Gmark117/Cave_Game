@@ -151,11 +151,6 @@ class DroneRuntimeState:
             if target in self._frontiers:
                 self._frontiers.remove(target)
 
-    def set_returning_home(self, value: bool = True) -> None:
-        """Set whether the drone should navigate back to its start point."""
-        with self._lock:
-            self._returning_home = bool(value)
-
     def evaluate_mission_state(self) -> tuple[bool, bool]:
         """Atomically return `(done, homing)` and start homing if exhausted."""
         with self._lock:
@@ -179,11 +174,6 @@ class DroneRuntimeState:
                 (int(position[0]), int(position[1]))
                 for position in ray_points
             ]
-
-    def set_battery(self, battery: int) -> None:
-        """Store the displayed battery percentage."""
-        with self._lock:
-            self._battery = int(battery)
 
     def toggle_path(self) -> None:
         """Toggle path overlay visibility for this drone."""

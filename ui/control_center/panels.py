@@ -2,8 +2,6 @@
 
 from typing import Optional
 
-import pygame
-
 from asset_config.gameplay import Display
 from asset_config.rendering import Colors, Fonts, RectHandle
 from ui.control_center.view_model import (

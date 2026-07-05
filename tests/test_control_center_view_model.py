@@ -1,5 +1,5 @@
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,18 +43,21 @@ class ControlCenterViewModelTests(unittest.TestCase):
             frontier_rebuild_cooldown=0.25,
         )
 
-        initial = build_drone_status_views([drone], [state.snapshot()])
+        ready_snapshot = state.snapshot()
+        initial = build_drone_status_views([drone], [ready_snapshot])
 
-        state.set_battery(72)
         state.begin_exploration(0, [])
         state.toggle_path()
-        deployed = build_drone_status_views([drone], [state.snapshot()])
+        deployed_snapshot = replace(state.snapshot(), battery=72)
+        deployed = build_drone_status_views([drone], [deployed_snapshot])
 
-        state.set_returning_home()
-        homing = build_drone_status_views([drone], [state.snapshot()])
+        state.evaluate_mission_state()
+        homing_snapshot = replace(state.snapshot(), battery=72)
+        homing = build_drone_status_views([drone], [homing_snapshot])
 
         state.mark_done()
-        completed = build_drone_status_views([drone], [state.snapshot()])
+        completed_snapshot = replace(state.snapshot(), battery=72)
+        completed = build_drone_status_views([drone], [completed_snapshot])
 
         self.assertEqual(initial[0].name, "Blinky")
         self.assertEqual(initial[0].battery, 100)

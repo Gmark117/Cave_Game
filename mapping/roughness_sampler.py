@@ -36,7 +36,17 @@ class RoughnessSampler:
             if ex < 0 or ey < 0 or ex >= self.map_w or ey >= self.map_h:
                 continue
 
-            points = self._line_points(int(origin[0]), int(origin[1]), ex, ey, step)
+            points = list(getattr(hit, "points", None) or ())
+            if points:
+                points = points[::max(1, step)]
+            else:
+                points = self._line_points(
+                    int(origin[0]),
+                    int(origin[1]),
+                    ex,
+                    ey,
+                    step,
+                )
             for x, y in points:
                 if y < 0 or y >= self.map_h or x < 0 or x >= self.map_w:
                     break

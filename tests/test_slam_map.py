@@ -1,5 +1,6 @@
 import unittest
 import threading
+from unittest.mock import patch
 
 import numpy as np
 
@@ -46,6 +47,28 @@ class SlamMapTests(unittest.TestCase):
         self.assertEqual(int(snapshot.occupancy[2, 4]), OCCUPIED)
         self.assertGreater(float(snapshot.confidence[2, 4]), 0.0)
         self.assertIn((4, 2), snapshot.point_cloud)
+
+    def test_ray_hit_reuses_supplied_points(self) -> None:
+        slam = SlamMap(5, 5)
+        ray = RayHit(
+            end=(4, 2),
+            hit=True,
+            distance=4.0,
+            angle_deg=90.0,
+            points=((0, 2), (1, 2), (2, 2), (3, 2), (4, 2)),
+        )
+
+        with patch.object(
+            SlamMap,
+            "_line_points",
+            side_effect=AssertionError("line points should be reused"),
+        ):
+            changed = slam.update_from_rays((0, 2), [ray])
+
+        self.assertTrue(changed)
+        snapshot = slam.snapshot()
+        self.assertTrue(np.all(snapshot.occupancy[2, :4] == FREE))
+        self.assertEqual(int(snapshot.occupancy[2, 4]), OCCUPIED)
 
     def test_snapshot_is_detached_and_arrays_are_not_public(self) -> None:
         slam = SlamMap(2, 2)
@@ -126,12 +149,6 @@ class SlamMapTests(unittest.TestCase):
         self.assertEqual(slam.version, version)
         self.assertFalse(slam.has_changed_since(version))
         self.assertTrue(slam.has_changed_since(version - 1))
-
-    def test_known_query_treats_out_of_bounds_as_unavailable(self) -> None:
-        slam = SlamMap(2, 2)
-        self.assertTrue(slam.is_known(-1, 0))
-        self.assertFalse(slam.is_known(0, 0))
-        self.assertEqual(int(slam.snapshot().occupancy[0, 0]), UNKNOWN)
 
     def test_snapshot_validates_array_shapes(self) -> None:
         with self.assertRaises(ValueError):

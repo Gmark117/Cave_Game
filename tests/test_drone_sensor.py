@@ -1,5 +1,6 @@
 import os
 import unittest
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -156,6 +157,12 @@ class DroneSensorTests(unittest.TestCase):
         self.assertFalse(hasattr(self.drone, "known_roughness"))
         self.assertFalse(hasattr(self.drone, "terrain_confidence"))
         self.assertFalse(hasattr(self.drone, "terrain_lock"))
+
+    def test_live_sensor_range_is_not_capped_by_drone_radius(self) -> None:
+        sensor = self.drone.sensor_controller.vision_sensor
+
+        self.assertEqual(sensor.max_range, int(math.hypot(64, 64)))
+        self.assertGreater(sensor.max_range, self.drone.radius)
 
 
 if __name__ == "__main__":

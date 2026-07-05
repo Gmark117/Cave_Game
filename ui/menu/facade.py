@@ -251,14 +251,6 @@ class Menu:
         """Return whether seed-entry keys are still held down."""
         return self.controller.number_key_pressed()
 
-    def _get_first_selectable(self) -> int:
-        """Compatibility wrapper for the controller helper."""
-        return self.controller.first_selectable()
-
-    def _get_next_selectable(self, direction: str) -> int:
-        """Compatibility wrapper for directional row selection."""
-        return self.controller.next_selectable(direction)
-
     def _handle_action(self, action: MenuAction) -> None:
         """Translate controller actions into menu/game side effects."""
         if action is MenuAction.OPEN_SIMULATION:

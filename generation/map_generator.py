@@ -15,10 +15,7 @@ from generation.cave_generator import (
     CaveGenerationProgress,
     CaveGenerator,
 )
-from generation.map_artifact_writer import (
-    MapArtifactWriter,
-    image_path_from_key as _image_path_from_key,
-)
+from generation.map_artifact_writer import MapArtifactWriter
 
 
 logger = logging.getLogger(__name__)

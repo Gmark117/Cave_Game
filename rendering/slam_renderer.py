@@ -5,7 +5,7 @@ from typing import Iterable, Tuple
 import numpy as np
 import pygame
 
-from mapping.slam_map import FREE, OCCUPIED
+from mapping.slam_map import OCCUPIED
 
 
 class SlamRenderer:

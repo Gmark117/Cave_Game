@@ -985,7 +985,6 @@ flowchart LR
 
 - Libraries: `logging`, `pygame`.
 - Internal imports: display/config constants and generation services.
-- Function: `_image_path_from_key(key: str) -> Path`.
 - Class: `MapGenerator`
   - `__init__(game, settings)`: delegates map generation and artifact output,
     then exposes the mission-facing generated data.
@@ -998,7 +997,8 @@ flowchart LR
   monitoring, copied result creation, and cleanup.
 - `cave_post_processor.py`: OpenCV cleanup and wall-transition noise.
 - `terrain_roughness_generator.py`: floor-only roughness synthesis.
-- `map_artifact_writer.py`: generated image, layer, and matrix persistence.
+- `map_artifact_writer.py`: generated image, layer, matrix persistence, and
+  `image_path_from_key(key)` resolution.
 
 ### `generation/mapgen_helpers.py`
 
@@ -1341,7 +1341,6 @@ flowchart LR
   - `has_changed_since(version)`
   - `update_from_rays(origin, ray_hits)`
   - `merge_from(snapshot)`
-  - `is_known(x, y, threshold=0.6)`
 - Owns synchronization, private arrays, bounded point storage,
   confidence-dominant merging, detached snapshots, and version advancement.
 

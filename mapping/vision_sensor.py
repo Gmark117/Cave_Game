@@ -5,22 +5,31 @@ from typing import List, Tuple
 import math
 
 from asset_config.helpers import wall_hit
+from mapping.ray_geometry import bresenham_line_points
 
 
 @dataclass(frozen=True)
 class RayHit:
-    """One raycast result: endpoint, hit flag, distance, and angle."""
+    """One raycast result plus the grid cells traversed to its endpoint."""
 
     end: Tuple[int, int]
     hit: bool
     distance: float
     angle_deg: float
+    points: Tuple[Tuple[int, int], ...] = ()
 
 
 class VisionSensor:
     """Cast rays within a narrow FOV to detect walls using the map matrix."""
 
-    def __init__(self, map_matrix: list, fov_deg: float = 60.0, num_rays: int = 60, step: int = 2) -> None:
+    def __init__(
+        self,
+        map_matrix: list,
+        fov_deg: float = 60.0,
+        num_rays: int = 60,
+        step: int = 2,
+        max_range: int | None = None,
+    ) -> None:
         """Configure a simple grid raycaster over the cave matrix."""
         self.map_matrix = map_matrix
         self.map_h = len(map_matrix)
@@ -28,7 +37,11 @@ class VisionSensor:
         self.fov_deg = float(fov_deg)
         self.num_rays = max(1, int(num_rays))
         self.step = max(1, int(step))
-        self.max_range = int(math.hypot(self.map_w, self.map_h))
+        map_range = int(math.hypot(self.map_w, self.map_h))
+        self.max_range = max(
+            1,
+            int(max_range) if max_range is not None else map_range,
+        )
 
     def cast_cone(self, origin: Tuple[float, float], heading_deg: float) -> List[RayHit]:
         """Cast rays in a cone centered at heading_deg; returns ray hits."""
@@ -52,7 +65,8 @@ class VisionSensor:
         dx = math.sin(rad)
         dy = -math.cos(rad)
 
-        last_valid = (int(round(origin[0])), int(round(origin[1])))
+        start = (int(round(origin[0])), int(round(origin[1])))
+        last_valid = start
         for length in range(0, self.max_range + 1, self.step):
             x = origin[0] + length * dx
             y = origin[1] + length * dy
@@ -65,7 +79,33 @@ class VisionSensor:
             last_valid = (xi, yi)
             if wall_hit(self.map_matrix, last_valid):
                 dist = math.dist(origin, last_valid)
-                return RayHit(last_valid, True, dist, angle_deg)
+                return RayHit(
+                    last_valid,
+                    True,
+                    dist,
+                    angle_deg,
+                    tuple(
+                        bresenham_line_points(
+                            start[0],
+                            start[1],
+                            last_valid[0],
+                            last_valid[1],
+                        )
+                    ),
+                )
 
         dist = math.dist(origin, last_valid)
-        return RayHit(last_valid, False, dist, angle_deg)
+        return RayHit(
+            last_valid,
+            False,
+            dist,
+            angle_deg,
+            tuple(
+                bresenham_line_points(
+                    start[0],
+                    start[1],
+                    last_valid[0],
+                    last_valid[1],
+                )
+            ),
+        )

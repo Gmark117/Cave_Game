@@ -7,22 +7,24 @@ layers from repeated refactors. The goal is to keep each item independently
 addressable, so we can improve clarity and performance without mixing unrelated
 changes.
 
-No code changes were made as part of the audit.
+The initial audit made no code changes. Items are updated as they are addressed.
 
 ## Recommended Order
 
-1. Optimize path rendering.
-2. Decide the rover runtime policy.
-3. Simplify drone direction selection.
-4. Consolidate ray line walking for sensing.
-5. Remove or mark compatibility/test-only API.
-6. Clean small unused imports and re-export leftovers.
+1. Optimize path rendering. Addressed.
+2. Decide the rover runtime policy. Deferred by design.
+3. Simplify drone direction selection. Partially addressed.
+4. Consolidate ray line walking for sensing. Addressed.
+5. Remove or mark compatibility/test-only API. Addressed.
+6. Clean small unused imports and re-export leftovers. Addressed.
 
 ## 1. Path Rendering Redraws Full History Every Frame
 
 Priority: High
 
 Type: Performance and clarity
+
+Status: Addressed
 
 Files:
 - `rendering/agent_renderer.py`
@@ -54,11 +56,22 @@ Validation:
 - Unit test that repeated `draw_path` calls do not redraw old segments.
 - Manual smoke test with path toggle on/off.
 
+Resolution:
+- `DroneRenderer` and `RoverRenderer` now track how many path points have
+  already been painted to their persistent path surfaces.
+- Repeated frame draws reuse the cached surface and draw only newly appended
+  path segments.
+- If a path history ever shrinks, the renderer clears the cached path surface
+  and rebuilds from the new history.
+- Added unit coverage for drone and rover incremental path drawing.
+
 ## 2. Rovers Are Disabled But Still Built, Rendered, and Shared With
 
 Priority: High
 
 Type: Architecture and some per-frame performance
+
+Status: Deferred by design
 
 Files:
 - `mission/control.py`
@@ -105,11 +118,21 @@ Validation:
   disabled.
 - If Option B: add rover-local policy tests before enabling motion.
 
+Decision:
+- Keep rovers built, rendered, and available for sharing during this cleanup
+  pass.
+- The next project phase will define the joint drone/rover exploration policy,
+  so removing rover runtime wiring now would likely create churn rather than
+  lasting clarity.
+- Rover motion remains disabled until that policy is defined.
+
 ## 3. Drone Direction Selection Samples All 360 Degrees
 
 Priority: Medium
 
 Type: Performance and algorithm clarity
+
+Status: Partially addressed
 
 Files:
 - `agents/drone_movement.py`
@@ -117,12 +140,11 @@ Files:
 Current state:
 - `DroneMovementController.find_new_node` builds 360 candidate headings.
 - It checks each heading against graph collision rules.
-- It builds a blacklist, then a valid direction list, then randomly removes
-  invalid selected directions until a final movement target works.
+- It builds valid direction and frontier-target lists directly.
+- If the randomly selected short movement step is invalid, it removes that
+  aligned direction/target pair and retries.
 
 Why this is roundabout:
-- The code does several passes and list mutations to choose one valid movement
-  direction.
 - Checking every integer degree is probably more precision than the movement
   behavior needs.
 
@@ -142,11 +164,25 @@ Validation:
 - Add a test that candidates are generated from the configured resolution.
 - Manual smoke test to verify drones still explore naturally.
 
+Resolution:
+- Removed the old blacklist and preallocated target matrix while preserving the
+  current 360-integer-heading exploration behavior.
+- Direction candidates and their frontier targets are now built directly in
+  matching lists.
+- Added tests that pin the current 360-heading behavior and the rejected-step
+  retry path.
+
+Deferred:
+- Reducing the angular resolution is a simulation-model decision and should be
+  handled during the exploration-policy phase.
+
 ## 4. Sensor Pipeline Walks Ray Lines Multiple Times
 
 Priority: Medium
 
 Type: Performance and duplication
+
+Status: Addressed
 
 Files:
 - `mapping/vision_sensor.py`
@@ -178,11 +214,33 @@ Validation:
 - Roughness sampler tests should still pass.
 - Add a test that `RayHit` or the shared helper preserves endpoint behavior.
 
+Resolution:
+- Profiling after item 1 showed that sensing, not path rendering, was the
+  largest frame-time slice.
+- `RayHit` now carries the grid cells traversed by the sensor ray.
+- `SlamMap` and `RoughnessSampler` reuse supplied ray points when present and
+  fall back to their previous line-generation behavior for compatibility.
+- A shared `mapping/ray_geometry.py` helper now owns Bresenham line generation.
+- Drone ray range remains unchanged: live sensors still scan until they hit a
+  wall or leave the map. `drone.radius` is not used as LiDAR range.
+- `VisionSensor.max_range` remains an optional direct sensor setting for future
+  experiments, but mission construction does not wire it to the legacy radius.
+- Added tests for optional max-range raycasting, downstream reuse of supplied
+  points, and live drone range staying uncapped by `drone.radius`.
+
+Follow-up profiling:
+- When ray range stayed unlimited, the ray-geometry reuse improved framerate by
+  at most about 1 FPS. This cleanup is still useful for code clarity, but it is
+  not a meaningful framerate fix unless paired with an explicit sensor-model
+  decision such as shorter range, fewer rays, or lower sensing cadence.
+
 ## 5. Compatibility and Test-Only Surfaces Look Removable
 
 Priority: Low to Medium
 
 Type: Code clarity
+
+Status: Addressed
 
 Files:
 - `config/sim_settings.py`
@@ -192,13 +250,11 @@ Files:
 - `ui/control_center/facade.py`
 
 Current state:
-- `config.SimSettings` is documented as a legacy flat adapter and appears to be
-  used by tests, not current runtime construction.
-- `DroneRuntimeState.set_returning_home` and `set_battery` appear test-only.
-- `SlamMap.is_known` appears test-only.
-- `Menu._get_first_selectable` and `_get_next_selectable` are compatibility
-  wrappers around controller methods.
-- `ControlCenter.percent_color` is a public helper retained as a facade wrapper.
+- `config.SimSettings` is documented as a legacy flat adapter and is kept as an
+  intentional compatibility API.
+- `ControlCenter.percent_color` is kept as an intentional public facade helper.
+- Test-only drone runtime setters, `SlamMap.is_known`, and private menu
+  controller wrappers have been removed.
 
 Why this is roundabout:
 - These APIs may have been kept to avoid breaking tests during refactors.
@@ -218,21 +274,32 @@ Expected benefit:
 Validation:
 - Unit suite after removing each wrapper independently.
 
+Resolution:
+- Removed `DroneRuntimeState.set_returning_home` and `set_battery`.
+- Removed `SlamMap.is_known`.
+- Removed `Menu._get_first_selectable` and `_get_next_selectable`.
+- Updated tests to build display snapshots from current runtime behavior rather
+  than relying on test-only runtime mutators.
+- Updated `docs/CODEFLOW.md` so it no longer lists the removed SLAM helper.
+- Left `SimSettings` and `ControlCenter.percent_color` in place because they are
+  explicit compatibility/facade surfaces rather than accidental leftovers.
+
 ## 6. Small Unused Imports and Re-Export Leftovers
 
 Priority: Low
 
 Type: Cleanup
 
+Status: Addressed
+
 Files and examples:
-- `agents/graph.py`: likely unused `List`.
-- `generation/map_generator.py`: `_image_path_from_key` appears to exist mainly
-  for tests/compatibility.
-- `mapping/terrain_fusion.py`: `fuse_terrain_samples` import appears to be a
-  re-export for tests.
-- `rendering/slam_renderer.py`: likely unused `FREE`.
-- `tools/generate_outlined_icons.py`: likely unused `ImageDraw`.
-- `ui/control_center/panels.py`: likely unused `pygame`.
+- `agents/graph.py`: removed unused `List`.
+- `generation/map_generator.py`: removed `_image_path_from_key` re-export.
+- `mapping/terrain_fusion.py`: removed `fuse_terrain_samples` re-export.
+- `rendering/slam_renderer.py`: removed unused `FREE`.
+- `tools/generate_outlined_icons.py`: removed unused `ImageDraw` and unused
+  image-size assignment.
+- `ui/control_center/panels.py`: removed unused `pygame`.
 
 Why this is roundabout:
 - These are small remnants from earlier module shapes.
@@ -250,9 +317,19 @@ Validation:
 - `python -m compileall -q .`
 - `python -m unittest discover -s tests -v`
 
+Resolution:
+- Updated tests to import image-path resolution from
+  `generation.map_artifact_writer` and terrain fusion from
+  `mapping.terrain_knowledge`, matching the owning modules.
+- Updated `docs/CODEFLOW.md` to describe `image_path_from_key` on
+  `map_artifact_writer.py` instead of `map_generator.py`.
+
 ## Notes
 
-- The path-rendering issue is the most promising direct framerate improvement.
-- The rover issue is the biggest architecture cleanup decision.
-- The ray-walking issue is a good second performance pass, but it touches more
-  behavior and should be done after the simpler rendering fix.
+- The cleanup pass removed several accumulated indirections and made the
+  remaining compatibility surfaces explicit.
+- Path-rendering and ray-geometry cleanup improved clarity, but profiling showed
+  little framerate impact when LiDAR range remains unlimited.
+- Further meaningful framerate gains probably require explicit model decisions:
+  sensor range, ray count, sensing cadence, angular movement resolution, or the
+  upcoming drone/rover exploration policy.

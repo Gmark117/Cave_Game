@@ -29,6 +29,33 @@ class RoughnessSamplerTests(unittest.TestCase):
         self.assertGreater(samples[0][3], samples[-1][3])
         self.assertGreaterEqual(samples[-1][3], 0.2)
 
+    def test_reuses_supplied_ray_points(self) -> None:
+        cave = np.zeros((1, 5), dtype=np.uint8)
+        terrain = np.array([[0.1, 0.2, 0.3, 0.4, 0.5]], dtype=np.float32)
+        sampler = RoughnessSampler(terrain, cave)
+        hit = SimpleNamespace(
+            end=(4, 0),
+            points=((0, 0), (1, 0), (2, 0), (3, 0), (4, 0)),
+        )
+
+        with (
+            patch.object(
+                RoughnessSampler,
+                "_line_points",
+                side_effect=AssertionError("ray points should be reused"),
+            ),
+            patch(
+                "mapping.roughness_sampler.np.random.uniform",
+                return_value=0.0,
+            ),
+        ):
+            samples = sampler.sample_from_rays((0, 0), [hit], step=1)
+
+        self.assertEqual(
+            [(x, y) for x, y, _, _ in samples],
+            [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
+        )
+
     def test_ignores_hits_without_valid_endpoints(self) -> None:
         sampler = RoughnessSampler(
             np.zeros((2, 2), dtype=np.float32),

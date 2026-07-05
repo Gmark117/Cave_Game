@@ -6,7 +6,7 @@ the control-center tab renderer when available.
 """
 
 from pathlib import Path
-from PIL import Image, ImageFilter, ImageChops, ImageDraw
+from PIL import Image, ImageFilter, ImageChops
 
 files = [
     "Assets/Images/drone_top.png",
@@ -29,7 +29,6 @@ for rel in files:
         continue
 
     img = Image.open(src).convert("RGBA")
-    width, height = img.size
 
     alpha = img.split()[3]
     # Increase dilation kernel to produce a thicker outline (was 3)

@@ -38,8 +38,9 @@ class Drone:
         self.settings = game.sim_settings
         self.cave = cave
 
-        # Identity and movement. Radius is the sensor/visibility reach; step is
-        # the smaller movement increment used for each exploration move.
+        # Identity and movement. Radius is a legacy proximity value used by
+        # movement and sharing rules; LiDAR-style sensing scans to obstruction
+        # or map edge unless configured directly on the sensor.
         self.id = id
         self.map_size = self.settings.mission_config.map_dim
         self.radius = self.calculate_radius()
@@ -100,7 +101,7 @@ class Drone:
 
     
     def calculate_radius(self) -> int:
-        """Return vision radius in pixels derived from map size setting."""
+        """Return the map-size-based proximity radius for this drone."""
         match self.map_size:
             case 'SMALL':
                 return 40

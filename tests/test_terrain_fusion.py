@@ -7,8 +7,8 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from mapping.terrain_fusion import TerrainFusionService, fuse_terrain_samples
-from mapping.terrain_knowledge import TerrainKnowledge
+from mapping.terrain_fusion import TerrainFusionService
+from mapping.terrain_knowledge import TerrainKnowledge, fuse_terrain_samples
 from contracts import TerrainFusionDependencies
 
 

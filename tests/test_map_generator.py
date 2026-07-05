@@ -7,7 +7,8 @@ import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-from generation.map_generator import MapGenerator, _image_path_from_key
+from generation.map_artifact_writer import image_path_from_key
+from generation.map_generator import MapGenerator
 from config.simulation_config import MissionConfig, SimulationConfig
 from asset_config.gameplay import Display
 from asset_config.media import Images
@@ -17,11 +18,11 @@ from generation import CaveGenerationResult
 class MapGeneratorTests(unittest.TestCase):
     def test_image_key_resolution_is_case_insensitive_and_validated(self) -> None:
         self.assertEqual(
-            _image_path_from_key("cave_floor"),
+            image_path_from_key("cave_floor"),
             Images.CAVE_FLOOR.value,
         )
         with self.assertRaisesRegex(KeyError, "Unknown image key"):
-            _image_path_from_key("missing")
+            image_path_from_key("missing")
 
     def test_facade_generates_writes_and_exposes_mission_inputs(self) -> None:
         bin_map = np.array([[1, 0], [0, 1]], dtype=np.uint8)

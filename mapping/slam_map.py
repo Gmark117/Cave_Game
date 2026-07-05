@@ -8,6 +8,7 @@ import threading
 from typing import Deque, Iterable, Optional, Tuple
 
 import numpy as np
+from mapping.ray_geometry import bresenham_line_points
 
 UNKNOWN = -1
 FREE = 0
@@ -106,7 +107,10 @@ class SlamMap:
                 ):
                     continue
 
-                points = self._line_points(ox, oy, ex, ey)
+                points = list(
+                    getattr(hit, "points", None)
+                    or self._line_points(ox, oy, ex, ey)
+                )
                 if not points:
                     continue
 
@@ -185,18 +189,6 @@ class SlamMap:
                 self._version += 1
             return updated
 
-    def is_known(self, x: int, y: int, threshold: float = 0.6) -> bool:
-        """Return whether a cell is known; out-of-bounds cells are unavailable."""
-        with self._lock:
-            if (
-                y < 0
-                or y >= self._confidence.shape[0]
-                or x < 0
-                or x >= self._confidence.shape[1]
-            ):
-                return True
-            return float(self._confidence[y, x]) >= threshold
-
     def _snapshot_points(self, point_limit: Optional[int]) -> Tuple[Point, ...]:
         """Return all points or only the newest ``point_limit`` points."""
         if point_limit is None:
@@ -256,24 +248,4 @@ class SlamMap:
     @staticmethod
     def _line_points(x0: int, y0: int, x1: int, y1: int) -> list[Point]:
         """Return integer points along a line using Bresenham's algorithm."""
-        points: list[Point] = []
-
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        error = dx - dy
-
-        x, y = x0, y0
-        while True:
-            points.append((x, y))
-            if x == x1 and y == y1:
-                break
-            doubled_error = 2 * error
-            if doubled_error > -dy:
-                error -= dy
-                x += sx
-            if doubled_error < dx:
-                error += dx
-                y += sy
-        return points
+        return bresenham_line_points(x0, y0, x1, y1)

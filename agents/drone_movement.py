@@ -92,35 +92,23 @@ class DroneMovementController:
         drone = self.drone
         snapshot = drone.snapshot()
         current_position = snapshot.position
-        # The original exploration behavior samples all 360 integer headings
-        # and then chooses randomly among those whose sight line is collision-free.
-        directions = 360
-        all_dirs = list(range(directions))
-        targets = [[0, 0] for _ in all_dirs]
-        dir_res = int(360 / len(all_dirs))
-
-        dir_blacklist = []
-        for direction in all_dirs:
-            targets[direction][0], targets[direction][1] = next_cell_coords(
+        # The exploration model still samples every integer heading. Build the
+        # usable headings directly so validity, direction, and frontier target
+        # stay aligned without a separate blacklist pass.
+        valid_dirs: List[int] = []
+        valid_targets: List[Position] = []
+        for direction in range(360):
+            frontier_target = next_cell_coords(
                 *current_position,
                 drone.radius + 1,
-                direction * dir_res,
+                direction,
             )
-            if not drone.runtime_state.graph_is_valid(
+            if drone.runtime_state.graph_is_valid(
                 current_position,
-                (*targets[direction],),
+                frontier_target,
             ):
-                dir_blacklist.append(direction)
-
-        valid_dirs = [
-            direction
-            for direction in all_dirs
-            if direction not in dir_blacklist
-        ]
-        valid_targets = [
-            (*targets[valid_direction],)
-            for valid_direction in valid_dirs
-        ]
+                valid_dirs.append(direction)
+                valid_targets.append(frontier_target)
         assert valid_dirs
 
         chosen_direction = rand.choice(valid_dirs)
@@ -133,8 +121,9 @@ class DroneMovementController:
             current_position,
             target,
         ):
-            valid_dirs.remove(chosen_direction)
-            valid_targets.remove((*targets[chosen_direction],))
+            rejected_index = valid_dirs.index(chosen_direction)
+            valid_dirs.pop(rejected_index)
+            valid_targets.pop(rejected_index)
             assert valid_dirs
             chosen_direction = rand.choice(valid_dirs)
             target = next_cell_coords(

@@ -21,6 +21,7 @@ class DroneRenderer:
             pygame.SRCALPHA,
         )
         self.path_surface.fill((*Colors.WHITE.value, 0))
+        self._rendered_path_points = 0
 
         self.vision_surface = pygame.Surface(
             game.window.get_size(),
@@ -38,14 +39,10 @@ class DroneRenderer:
     def draw_path(self, snapshot: DroneSnapshot) -> None:
         """Render route history and the shared starting-point marker."""
         drone = self.drone
-        for i in range(1, len(snapshot.path_history)):
-            pygame.draw.line(
-                self.path_surface,
-                (*drone.color, 255),
-                snapshot.path_history[i],
-                snapshot.path_history[i - 1],
-                2,
-            )
+        self._draw_new_path_segments(
+            snapshot.path_history,
+            (*drone.color, 255),
+        )
 
         if snapshot.show_path:
             drone.game.window.blit(self.path_surface, (0, 0))
@@ -54,6 +51,27 @@ class DroneRenderer:
             self.start_surface,
             (drone.start_pos[0] - 6, drone.start_pos[1] - 6),
         )
+
+    def _draw_new_path_segments(
+        self,
+        path_history: tuple[tuple[int, int], ...],
+        color: tuple[int, int, int, int],
+    ) -> None:
+        """Draw only path segments that have not already reached the cache."""
+        if len(path_history) < self._rendered_path_points:
+            self.path_surface.fill((*Colors.WHITE.value, 0))
+            self._rendered_path_points = 0
+
+        start_index = max(1, self._rendered_path_points)
+        for i in range(start_index, len(path_history)):
+            pygame.draw.line(
+                self.path_surface,
+                color,
+                path_history[i],
+                path_history[i - 1],
+                2,
+            )
+        self._rendered_path_points = len(path_history)
 
     def draw_vision_overlay(self, snapshot: DroneSnapshot) -> None:
         """Render the latest sensor-ray endpoints as a vision cone."""
@@ -107,21 +125,30 @@ class RoverRenderer:
             pygame.SRCALPHA,
         )
         self.path_surface.fill((*Colors.WHITE.value, 0))
+        self._rendered_path_points = 0
 
     def draw_path(self) -> None:
         """Render the rover route history."""
         rover = self.rover
-        if not rover.show_path:
-            return
+        path_history = tuple(rover.graph.pos)
+        if len(path_history) < self._rendered_path_points:
+            self.path_surface.fill((*Colors.WHITE.value, 0))
+            self._rendered_path_points = 0
 
-        for i in range(1, len(rover.graph.pos)):
+        start_index = max(1, self._rendered_path_points)
+        for i in range(start_index, len(path_history)):
             pygame.draw.line(
                 self.path_surface,
                 (*rover.color, 180),
-                rover.graph.pos[i],
-                rover.graph.pos[i - 1],
+                path_history[i],
+                path_history[i - 1],
                 2,
             )
+        self._rendered_path_points = len(path_history)
+
+        if not rover.show_path:
+            return
+
         rover.game.window.blit(self.path_surface, (0, 0))
 
     def draw_icon(self) -> None:
