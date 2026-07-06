@@ -38,9 +38,8 @@ class Drone:
         self.settings = game.sim_settings
         self.cave = cave
 
-        # Identity and movement. Radius is a legacy proximity value used by
-        # movement and sharing rules; LiDAR-style sensing scans to obstruction
-        # or map edge unless configured directly on the sensor.
+        # Identity and movement. Radius is a map-size proximity value used by
+        # movement, sharing, and as the base for the LiDAR sensor range.
         self.id = id
         self.map_size = self.settings.mission_config.map_dim
         self.radius = self.calculate_radius()

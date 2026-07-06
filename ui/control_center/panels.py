@@ -192,7 +192,7 @@ class ControlCenterPanelMixin:
         self.control_surf.blit(name_surf, name_rect)
 
         if isinstance(status_view, DroneStatusView):
-            # Drone rows own three small action buttons: path, vision, terrain.
+            # Drone rows own path, vision, and selected-drone buttons.
             self._draw_drone_toggles(
                 status_view,
                 y_center,
@@ -249,6 +249,7 @@ class ControlCenterPanelMixin:
         if status in (
             "Updating",
             "Advancing",
+            "Moving",
             "Sharing",
             "Charging",
         ):

@@ -25,6 +25,10 @@ class Images(Enum):
     DRONE = GAME_DIR / "Assets" / "Images" / "drone_top.png"
     DEBUG_ICON = GAME_DIR / "Assets" / "Images" / "debug_bug.png"
     SYSTEM_ICON = GAME_DIR / "Assets" / "Images" / "system_screen.png"
+    KEY_HINTS = GAME_DIR / "Assets" / "Images" / "Keys" / "keys.png"
+    NUMBERS_HINT = GAME_DIR / "Assets" / "Images" / "Keys" / "numbers.png"
+    ENTER_HINT = GAME_DIR / "Assets" / "Images" / "Keys" / "enter.png"
+    BACKSPACE_HINT = GAME_DIR / "Assets" / "Images" / "Keys" / "backspace.png"
 
     CAVE_MAP = GAME_DIR / "Assets" / "Map" / "map.png"
     CAVE_MATRIX = GAME_DIR / "Assets" / "Map" / "map_matrix.txt"

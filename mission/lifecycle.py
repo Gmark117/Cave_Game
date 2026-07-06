@@ -67,19 +67,35 @@ class MissionControlLifecycleMixin:
                     pygame.quit()
                     raise SystemExit()
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.stop_button_rect.collidepoint(event.pos):
+                    click_result = None
+                    if self.control_center is not None:
+                        click_result = self.control_center.handle_click(
+                            event.pos
+                        )
+                    if click_result is None:
+                        continue
+
+                    action, _ = click_result
+                    if action == "mission_stop":
                         self.completed = True
                         break
-                    if self.restart_button_rect.collidepoint(event.pos):
+                    if action == "mission_restart":
                         self.restart_requested = True
                         self.completed = True
                         break
-                    if self.pause_button_rect.collidepoint(event.pos):
+                    if action == "mission_pause":
                         self.toggle_pause()
                         continue
-                    self.presentation.handle_click(
-                        event.pos,
-                        self.control_center,
+                    if action == "mission_music":
+                        self.toggle_music()
+                        continue
+                    if action == "mission_exit":
+                        self.exit_requested = True
+                        self.game.running = False
+                        self.completed = True
+                        break
+                    self.presentation.handle_control_action(
+                        click_result,
                         self.drones,
                     )
             events_finished = time.perf_counter()
@@ -134,5 +150,9 @@ class MissionControlLifecycleMixin:
             self._shutdown_mission(threads)
             self._running = False
             self._has_run = True
-            if pygame.get_init() and not self.restart_requested:
+            if (
+                pygame.get_init()
+                and not self.restart_requested
+                and not self.exit_requested
+            ):
                 self.game.display = self.game.to_windowed()

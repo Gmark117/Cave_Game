@@ -65,6 +65,7 @@ class PresentationAdapterTests(unittest.TestCase):
         adapter = PresentationAdapter(10, 10)
         drones = make_drones()
         adapter.show_terrain_heatmap = True
+        adapter.show_full_map = False
         adapter.selected_drone_heatmap_id = 2
         adapter.terrain_heatmap_dirty = False
         for drone in drones:
@@ -74,7 +75,23 @@ class PresentationAdapterTests(unittest.TestCase):
         adapter.reset(drones)
 
         self.assertFalse(adapter.show_terrain_heatmap)
+        self.assertTrue(adapter.show_full_map)
         self.assertIsNone(adapter.selected_drone_heatmap_id)
+        self.assertTrue(adapter.terrain_heatmap_dirty)
+        self.assertTrue(all(drone.show_path for drone in drones))
+        self.assertTrue(all(drone.show_vision for drone in drones))
+
+    def test_full_map_action_toggles_underlay_without_overlay_changes(self) -> None:
+        adapter = PresentationAdapter(10, 10)
+        drones = make_drones()
+        adapter.terrain_heatmap_dirty = False
+        control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("full_map", None)),
+        )
+
+        adapter.handle_click((1, 1), control_center, drones)
+
+        self.assertFalse(adapter.show_full_map)
         self.assertTrue(adapter.terrain_heatmap_dirty)
         self.assertTrue(all(drone.show_path for drone in drones))
         self.assertTrue(all(drone.show_vision for drone in drones))

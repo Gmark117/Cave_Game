@@ -59,6 +59,7 @@ class SlamViewServiceTests(unittest.TestCase):
                 terrain_heatmap_dirty=True,
                 selected_drone_heatmap_id=None,
                 show_terrain_heatmap=False,
+                show_full_map=True,
             ),
             slam_renderer=SimpleNamespace(
                 surface=pygame.Surface((3, 3), pygame.SRCALPHA),
@@ -100,9 +101,27 @@ class SlamViewServiceTests(unittest.TestCase):
         service.refresh()
 
         args = control.slam_renderer.render.call_args.args
+        kwargs = control.slam_renderer.render.call_args.kwargs
         self.assertEqual(int(args[0][1, 1]), 1)
         self.assertAlmostEqual(float(args[1][1, 1]), 0.9)
+        np.testing.assert_array_equal(
+            kwargs["full_map_floor_mask"],
+            control.terrain_knowledge.floor_mask,
+        )
         self.assertEqual(service.dirty_map_count(), 0)
+
+    def test_full_map_underlay_can_be_disabled(self) -> None:
+        control = self.make_control()
+        control.presentation.show_full_map = False
+        control.drones = [make_drone()]
+
+        SlamViewService(control.dependencies).refresh()
+
+        self.assertIsNone(
+            control.slam_renderer.render.call_args.kwargs[
+                "full_map_floor_mask"
+            ]
+        )
 
     def test_selected_heatmap_uses_drone_local_terrain(self) -> None:
         control = self.make_control()

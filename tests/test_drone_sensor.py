@@ -11,6 +11,7 @@ import pygame
 
 from agents.drone import Drone
 from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
+from mapping.drone_sensor import LIDAR_RANGE_RADIUS_MULTIPLIER
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
 
@@ -41,7 +42,7 @@ class RecordingControl:
 class DroneSensorTests(unittest.TestCase):
     def setUp(self) -> None:
         settings = SimulationConfig(
-            mission_config=MissionConfig(map_dim="SMALL"),
+            mission_config=MissionConfig(map_dim="LARGE"),
             slam=SlamConfig(
                 scan_interval=0.0,
                 scan_rays=5,
@@ -158,11 +159,14 @@ class DroneSensorTests(unittest.TestCase):
         self.assertFalse(hasattr(self.drone, "terrain_confidence"))
         self.assertFalse(hasattr(self.drone, "terrain_lock"))
 
-    def test_live_sensor_range_is_not_capped_by_drone_radius(self) -> None:
+    def test_live_sensor_range_is_capped_by_drone_radius_multiplier(self) -> None:
         sensor = self.drone.sensor_controller.vision_sensor
 
-        self.assertEqual(sensor.max_range, int(math.hypot(64, 64)))
-        self.assertGreater(sensor.max_range, self.drone.radius)
+        self.assertEqual(
+            sensor.max_range,
+            self.drone.radius * LIDAR_RANGE_RADIUS_MULTIPLIER,
+        )
+        self.assertLess(sensor.max_range, int(math.hypot(64, 64)))
 
 
 if __name__ == "__main__":

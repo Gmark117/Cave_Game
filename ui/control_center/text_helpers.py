@@ -284,12 +284,7 @@ class ControlCenterTextMixin:
             True,
             battery_color,
         ).get_width()
-        separator = font_obj.render(
-            "|",
-            True,
-            Colors.WHITE.value,
-        ).convert_alpha()
-        separator.set_alpha(128)
+        separator = self._status_separator_surface(font_obj.get_height())
         status_surf = font_obj.render(
             status,
             True,
@@ -370,6 +365,20 @@ class ControlCenterTextMixin:
                 separator_x + separator.get_width() + gap,
                 (max_h - status_surf.get_height()) // 2,
             ),
+        )
+        return surface
+
+    @staticmethod
+    def _status_separator_surface(height: int) -> pygame.Surface:
+        """Return a centered dot separator for battery/status rows."""
+        radius = 3
+        width = radius * 2 + 2
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.circle(
+            surface,
+            (*Colors.WHITE.value, 128),
+            (width // 2, height // 2),
+            radius,
         )
         return surface
 

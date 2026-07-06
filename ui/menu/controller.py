@@ -8,6 +8,7 @@ import pygame
 
 from ui.menu.models import (
     ButtonItem,
+    KeyHint,
     MenuAction,
     MenuRow,
     MenuScreen,
@@ -82,6 +83,54 @@ class MenuController:
             len(self.current_items) - 1 if select_last else self.first_selectable()
         )
 
+    def key_hints(self) -> tuple[KeyHint, ...]:
+        """Return the key images that apply to the current menu state."""
+        item = self.current_items[self.current_index]
+        hints = []
+        if self._arrow_keys_available(item):
+            hints.append(KeyHint.MOVE)
+        if isinstance(item, TextInputItem):
+            hints.append(KeyHint.NUMBERS)
+        if isinstance(item, ButtonItem) and item.selectable:
+            hints.append(KeyHint.ENTER)
+        if self._backspace_available(item):
+            hints.append(KeyHint.BACKSPACE)
+        return tuple(hints)
+
+    def _arrow_keys_available(self, item: MenuRow) -> bool:
+        """Return whether any arrow key can change the current menu state."""
+        selectable_count = sum(1 for row in self.current_items if row.selectable)
+        if selectable_count > 1:
+            return True
+        return self._left_right_available(item)
+
+    @staticmethod
+    def _left_right_available(item: MenuRow) -> bool:
+        """Return whether left/right can mutate the selected row."""
+        if isinstance(item, SelectorItem):
+            return len(item.options) > 1 and (
+                item.value > 0 or item.value < len(item.options) - 1
+            )
+        if isinstance(item, SliderItem):
+            return item.value > item.minimum or item.value < item.maximum
+        return False
+
+    def _backspace_available(self, item: MenuRow) -> bool:
+        """Return whether backspace can delete text or use a screen back action."""
+        if isinstance(item, TextInputItem):
+            return bool(item.text)
+        return self._screen_back_action() is not None
+
+    def _screen_back_action(self) -> MenuAction | None:
+        """Return the Backspace action for the active screen, if any."""
+        if self.current_screen is MenuScreen.SIMULATION:
+            return MenuAction.BACK_TO_MAIN
+        if self.current_screen is MenuScreen.AUDIO:
+            return MenuAction.SAVE_AUDIO_AND_BACK
+        if self.current_screen is MenuScreen.CREDITS:
+            return MenuAction.BACK_TO_MAIN
+        return None
+
     def handle_input(self, game: object) -> None:
         """Apply one frame of keyboard flags to the current menu state."""
         if game.UP_KEY:
@@ -98,6 +147,14 @@ class MenuController:
             self._play_button()
             self._action_handler(item.action)
             return
+        if game.BACK_KEY:
+            back_action = (
+                None if isinstance(item, TextInputItem) else self._screen_back_action()
+            )
+            if back_action is not None:
+                self._play_button()
+                self._action_handler(back_action)
+                return
 
         if self._handle_item_input(item, game) and self.current_screen is MenuScreen.AUDIO:
             self._audio_changed()

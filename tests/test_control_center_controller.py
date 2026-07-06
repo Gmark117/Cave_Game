@@ -24,34 +24,44 @@ class ControlCenterControllerTests(unittest.TestCase):
     def test_hit_map_returns_existing_actions_and_selects_tabs(self) -> None:
         controller = ControlCenterController()
         hit_map = ControlHitMap(
-            heatmap_toggle=(0, 0, 10, 10),
-            tabs=(("rovers", (20, 0, 10, 10)),),
+            map_toggle=(0, 0, 10, 10),
+            heatmap_toggle=(20, 0, 10, 10),
+            mission_controls=(("stop", (100, 0, 10, 10)),),
+            tabs=(("rovers", (30, 0, 10, 10)),),
             drone_toggles=(
-                (0, "path", (40, 0, 10, 10)),
-                (0, "vision", (60, 0, 10, 10)),
-                (0, "terrain", (80, 0, 10, 10)),
+                (0, "path", (50, 0, 10, 10)),
+                (0, "vision", (70, 0, 10, 10)),
+                (0, "selected", (90, 0, 10, 10)),
             ),
         )
 
         self.assertEqual(
             controller.handle_click((5, 5), hit_map),
-            ("terrain_heatmap", None),
+            ("full_map", None),
         )
         self.assertEqual(
             controller.handle_click((25, 5), hit_map),
+            ("terrain_heatmap", None),
+        )
+        self.assertEqual(
+            controller.handle_click((105, 5), hit_map),
+            ("mission_stop", None),
+        )
+        self.assertEqual(
+            controller.handle_click((35, 5), hit_map),
             ("control_tab", None),
         )
         self.assertEqual(controller.active_tab, "rovers")
         self.assertEqual(
-            controller.handle_click((45, 5), hit_map),
+            controller.handle_click((55, 5), hit_map),
             ("drone_path", 0),
         )
         self.assertEqual(
-            controller.handle_click((65, 5), hit_map),
+            controller.handle_click((75, 5), hit_map),
             ("drone_vision", 0),
         )
         self.assertEqual(
-            controller.handle_click((85, 5), hit_map),
+            controller.handle_click((95, 5), hit_map),
             ("drone_heatmap", 0),
         )
 

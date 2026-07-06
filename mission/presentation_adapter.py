@@ -26,6 +26,7 @@ class PresentationAdapter:
         """
         # SLAM map visibility state
         self.show_terrain_heatmap = False
+        self.show_full_map = True
         self.selected_drone_heatmap_id: Optional[int] = None
 
         # SLAM map rendering state
@@ -34,6 +35,7 @@ class PresentationAdapter:
     def reset(self, drone_objects: List[Any]) -> None:
         """Restore the default combined occupancy and agent-overlay state."""
         self.show_terrain_heatmap = False
+        self.show_full_map = True
         self.selected_drone_heatmap_id = None
         self.terrain_heatmap_dirty = True
         for drone in drone_objects:
@@ -47,6 +49,11 @@ class PresentationAdapter:
         self.show_terrain_heatmap = not self.show_terrain_heatmap
         self.terrain_heatmap_dirty = True
         self._apply_heatmap_visibility(drone_objects)
+
+    def toggle_full_map(self) -> None:
+        """Toggle the generated cave-map underlay below discovered data."""
+        self.show_full_map = not self.show_full_map
+        self.terrain_heatmap_dirty = True
 
     def toggle_drone_heatmap(
         self,
@@ -123,9 +130,19 @@ class PresentationAdapter:
         if click_result is None:
             return
 
+        self.handle_control_action(click_result, drone_objects)
+
+    def handle_control_action(
+        self,
+        click_result: Tuple[str, Optional[int]],
+        drone_objects: List[Any],
+    ) -> None:
+        """Apply a semantic control-center action to presentation state."""
         action, drone_id = click_result
         if action == "terrain_heatmap":
             self.toggle_terrain_heatmap(drone_objects)
+        elif action == "full_map":
+            self.toggle_full_map()
         elif action == "drone_heatmap" and drone_id is not None:
             self.toggle_drone_heatmap(drone_id, drone_objects)
         elif action == "drone_path" and drone_id is not None:

@@ -221,15 +221,15 @@ Resolution:
 - `SlamMap` and `RoughnessSampler` reuse supplied ray points when present and
   fall back to their previous line-generation behavior for compatibility.
 - A shared `mapping/ray_geometry.py` helper now owns Bresenham line generation.
-- Drone ray range remains unchanged: live sensors still scan until they hit a
-  wall or leave the map. `drone.radius` is not used as LiDAR range.
-- `VisionSensor.max_range` remains an optional direct sensor setting for future
-  experiments, but mission construction does not wire it to the legacy radius.
+- Drone ray range is now finite: live sensors scan until they hit a wall, leave
+  the map, or reach `4 * drone.radius`.
+- `VisionSensor.max_range` remains an optional direct sensor setting, and
+  mission construction wires it through `DroneSensorController`.
 - Added tests for optional max-range raycasting, downstream reuse of supplied
-  points, and live drone range staying uncapped by `drone.radius`.
+  points, and live drone range staying capped by the radius multiplier.
 
 Follow-up profiling:
-- When ray range stayed unlimited, the ray-geometry reuse improved framerate by
+- Before the range cap, the ray-geometry reuse improved framerate by
   at most about 1 FPS. This cleanup is still useful for code clarity, but it is
   not a meaningful framerate fix unless paired with an explicit sensor-model
   decision such as shorter range, fewer rays, or lower sensing cadence.
@@ -329,7 +329,7 @@ Resolution:
 - The cleanup pass removed several accumulated indirections and made the
   remaining compatibility surfaces explicit.
 - Path-rendering and ray-geometry cleanup improved clarity, but profiling showed
-  little framerate impact when LiDAR range remains unlimited.
+  little framerate impact before the LiDAR range cap was introduced.
 - Further meaningful framerate gains probably require explicit model decisions:
   sensor range, ray count, sensing cadence, angular movement resolution, or the
   upcoming drone/rover exploration policy.

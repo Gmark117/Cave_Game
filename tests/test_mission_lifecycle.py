@@ -39,6 +39,7 @@ class FakeGame:
         self.height = 750
         self.display = None
         self.window = None
+        self.running = True
         self.maximise_calls = 0
         self.windowed_calls = 0
 
@@ -84,19 +85,9 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(hasattr(mission, "known_roughness"))
         self.assertIsInstance(mission.pathfinding, PathfindingService)
         self.assertIsInstance(mission.renderer, MissionRenderer)
-        self.assertIs(
-            mission.stop_button_rect,
-            mission.renderer.stop_button_rect,
-        )
-        self.assertIs(
-            mission.restart_button_rect,
-            mission.renderer.restart_button_rect,
-        )
-        self.assertIs(
-            mission.pause_button_rect,
-            mission.renderer.pause_button_rect,
-        )
+        self.assertFalse(hasattr(mission.renderer, "stop_button_rect"))
         self.assertFalse(mission.restart_requested)
+        self.assertFalse(mission.exit_requested)
         self.assertFalse(mission.is_paused)
         self.assertTrue(mission.pause_event.is_set())
         self.assertFalse(mission.rover_motion_enabled)
@@ -247,8 +238,9 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
         mission.terrain_sharing.share_with_rovers = Mock()
-        mission.stop_button_rect.x = 0
-        mission.stop_button_rect.y = 0
+        mission.control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("mission_stop", None)),
+        )
         event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
             button=1,
@@ -266,6 +258,51 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.update_sensors.assert_not_called()
         mission.renderer.draw.assert_not_called()
 
+    def test_mute_button_toggles_music_without_stopping_simulation(self) -> None:
+        game = FakeGame()
+        game.menu = SimpleNamespace(
+            music_enabled=Mock(return_value=True),
+            toggle_music=Mock(),
+        )
+        mission = MissionControl(game)
+        mission.clock = SimpleNamespace(tick=Mock())
+        mission.completed = False
+        mission.renderer.draw = Mock()
+        mission.update_sensors = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
+        mission.is_mission_over = Mock(return_value=False)
+        mission.control_center = SimpleNamespace(
+            handle_click=Mock(
+                side_effect=[
+                    ("mission_music", None),
+                    ("mission_stop", None),
+                ],
+            ),
+        )
+        mute_event = SimpleNamespace(
+            type=pygame.MOUSEBUTTONDOWN,
+            button=1,
+            pos=(1, 1),
+        )
+        stop_event = SimpleNamespace(
+            type=pygame.MOUSEBUTTONDOWN,
+            button=1,
+            pos=(1, 1),
+        )
+
+        with patch(
+            "mission.lifecycle.pygame.event.get",
+            side_effect=[[mute_event], [stop_event]],
+        ):
+            with patch("mission.lifecycle.pygame.display.update"):
+                mission._run_mission_loop()
+
+        game.menu.toggle_music.assert_called_once_with()
+        mission.terrain_sharing.share_with_rovers.assert_called_once_with()
+        mission.is_mission_over.assert_called_once_with()
+        mission.update_sensors.assert_called_once_with()
+        mission.renderer.draw.assert_called_once_with()
+
     def test_restart_button_requests_fresh_mission_before_updates(self) -> None:
         mission = MissionControl(FakeGame())
         mission.clock = SimpleNamespace(tick=Mock())
@@ -273,10 +310,13 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.renderer.draw = Mock()
         mission.update_sensors = Mock()
         mission.terrain_sharing.share_with_rovers = Mock()
+        mission.control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("mission_restart", None)),
+        )
         event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
             button=1,
-            pos=mission.restart_button_rect.center,
+            pos=(1, 1),
         )
 
         with patch(
@@ -291,11 +331,47 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.update_sensors.assert_not_called()
         mission.renderer.draw.assert_not_called()
 
+    def test_exit_button_closes_program_before_updates(self) -> None:
+        game = FakeGame()
+        mission = MissionControl(game)
+        mission.clock = SimpleNamespace(tick=Mock())
+        mission.completed = False
+        mission.renderer.draw = Mock()
+        mission.update_sensors = Mock()
+        mission.terrain_sharing.share_with_rovers = Mock()
+        mission.control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("mission_exit", None)),
+        )
+        event = SimpleNamespace(
+            type=pygame.MOUSEBUTTONDOWN,
+            button=1,
+            pos=(1, 1),
+        )
+
+        with patch(
+            "mission.lifecycle.pygame.event.get",
+            return_value=[event],
+        ):
+            mission._run_mission_loop()
+
+        self.assertTrue(mission.completed)
+        self.assertTrue(mission.exit_requested)
+        self.assertFalse(game.running)
+        mission.terrain_sharing.share_with_rovers.assert_not_called()
+        mission.update_sensors.assert_not_called()
+        mission.renderer.draw.assert_not_called()
+
     def test_pause_button_toggles_state_and_skips_simulation_updates(self) -> None:
         mission = MissionControl(FakeGame())
         mission.clock = SimpleNamespace(tick=Mock())
         mission.completed = False
         mission.control_center = SimpleNamespace(
+            handle_click=Mock(
+                side_effect=[
+                    ("mission_pause", None),
+                    ("mission_stop", None),
+                ],
+            ),
             pause_timer=Mock(),
             resume_timer=Mock(),
         )
@@ -306,12 +382,12 @@ class MissionLifecycleTests(unittest.TestCase):
         pause_event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
             button=1,
-            pos=mission.pause_button_rect.center,
+            pos=(1, 1),
         )
         stop_event = SimpleNamespace(
             type=pygame.MOUSEBUTTONDOWN,
             button=1,
-            pos=mission.stop_button_rect.center,
+            pos=(1, 1),
         )
 
         with patch(
@@ -402,6 +478,27 @@ class MissionLifecycleTests(unittest.TestCase):
         mission._initialize_runtime = Mock(side_effect=initialize_runtime)
         mission._start_agent_threads = Mock(return_value=[])
         mission._run_mission_loop = Mock(side_effect=request_restart)
+        mission._shutdown_mission = Mock()
+
+        with patch("mission.lifecycle.pygame.get_init", return_value=True):
+            mission.run()
+
+        self.assertEqual(mission.game.windowed_calls, 0)
+
+    def test_exit_run_does_not_return_to_windowed_mode(self) -> None:
+        mission = MissionControl(FakeGame())
+        control_center = SimpleNamespace(start_timer=Mock())
+
+        def initialize_runtime() -> None:
+            mission.control_center = control_center
+            mission._runtime_initialized = True
+
+        def request_exit() -> None:
+            mission.exit_requested = True
+
+        mission._initialize_runtime = Mock(side_effect=initialize_runtime)
+        mission._start_agent_threads = Mock(return_value=[])
+        mission._run_mission_loop = Mock(side_effect=request_exit)
         mission._shutdown_mission = Mock()
 
         with patch("mission.lifecycle.pygame.get_init", return_value=True):

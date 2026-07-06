@@ -119,6 +119,42 @@ class MenuFacadeTests(unittest.TestCase):
         menu.game.start_mission.assert_called_once_with()
         self.assertFalse(menu.show_menu)
 
+    def test_toggle_music_updates_selector_mixer_and_local_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            menu = self.make_menu(root)
+            menu.volume = 60
+            menu.sound_on_off = "on"
+            menu.button_on_off = "on"
+            menu.audio = SimpleNamespace(set_music=Mock())
+            menu.options = [
+                SimpleNamespace(selectable=False),
+                SimpleNamespace(value=menu.volume),
+                SelectorItem(
+                    "Music",
+                    (0, 0),
+                    options=("on", "off"),
+                    value=0,
+                ),
+                SelectorItem(
+                    "Button",
+                    (0, 0),
+                    options=("on", "off"),
+                    value=0,
+                ),
+            ]
+
+            enabled = menu.toggle_music()
+            loaded = menu.settings_repository.load_audio()
+
+        self.assertFalse(enabled)
+        self.assertEqual(menu.sound_on_off, "off")
+        self.assertEqual(menu.options[2].value, 1)
+        menu.audio.set_music.assert_called_once_with(False)
+        self.assertEqual(loaded.volume, 60)
+        self.assertEqual(loaded.music, "off")
+        self.assertEqual(loaded.button, "on")
+
 
 if __name__ == "__main__":
     unittest.main()

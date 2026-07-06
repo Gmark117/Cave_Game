@@ -15,6 +15,9 @@ from mapping.terrain_knowledge import TerrainSample
 from contracts import DroneSensorDependencies
 
 
+LIDAR_RANGE_RADIUS_MULTIPLIER = 4
+
+
 class DroneSensorController:
     """Update one drone's local SLAM and terrain knowledge."""
 
@@ -28,6 +31,7 @@ class DroneSensorController:
         self.dependencies = dependencies
         settings = drone.settings
         scan_rays = settings.slam.scan_rays
+        lidar_max_range = drone.radius * LIDAR_RANGE_RADIUS_MULTIPLIER
 
         self.scan_interval = settings.slam.scan_interval
         self.last_scan_time = 0.0
@@ -36,6 +40,7 @@ class DroneSensorController:
             fov_deg=60.0,
             num_rays=scan_rays,
             step=2,
+            max_range=lidar_max_range,
         )
         self.roughness_sampler = RoughnessSampler(
             dependencies.terrain_roughness,

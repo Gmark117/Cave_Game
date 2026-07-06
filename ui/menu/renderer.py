@@ -8,6 +8,7 @@ import pygame
 
 from ui.menu.models import (
     ButtonItem,
+    KeyHint,
     MenuRow,
     SelectorItem,
     SliderItem,
@@ -19,6 +20,13 @@ from asset_config.media import Images
 from asset_config.rendering import Colors, Fonts
 
 
+KEY_HINT_HEIGHT = 72
+KEY_HINT_GAP = 12
+KEY_HINT_MARGIN = 24
+KEY_HINT_ARTWORK_THRESHOLD = 80
+KEY_HINT_ARTWORK_ROW_MIN_PIXELS = 8
+
+
 class MenuRenderer:
     """Own backgrounds, fonts, layout, and menu drawing."""
 
@@ -27,12 +35,118 @@ class MenuRenderer:
         self.game = game
         self.background = pygame.image.load(Images.CAVE.value)
         self.dark_background = pygame.image.load(Images.DARK_CAVE.value)
+        self.key_hint_images = self._load_key_hint_images()
 
-    def draw(self, items: Sequence[MenuRow], selected_index: int) -> None:
+    def draw(
+        self,
+        items: Sequence[MenuRow],
+        selected_index: int,
+        key_hints: Sequence[KeyHint] = (),
+    ) -> None:
         """Draw all rows in one menu screen."""
         self.game.display.blit(self.background, (0, 0))
         for index, item in enumerate(items):
             self._draw_item(item, index == selected_index)
+        self._draw_key_hints(key_hints)
+
+    def _load_key_hint_images(self) -> dict[KeyHint, pygame.Surface]:
+        """Load key hint images and match their visible artwork scale."""
+        images = {
+            KeyHint.MOVE: Images.KEY_HINTS,
+            KeyHint.NUMBERS: Images.NUMBERS_HINT,
+            KeyHint.ENTER: Images.ENTER_HINT,
+            KeyHint.BACKSPACE: Images.BACKSPACE_HINT,
+        }
+        surfaces = {
+            hint: pygame.image.load(image.value)
+            for hint, image in images.items()
+        }
+        return self._scale_key_hint_images(surfaces)
+
+    def _scale_key_hint_images(
+        self,
+        surfaces: dict[KeyHint, pygame.Surface],
+    ) -> dict[KeyHint, pygame.Surface]:
+        """Scale non-arrow hints to the arrow icon's visible artwork height."""
+        move_surface = surfaces[KeyHint.MOVE]
+        move_artwork_height = self._visible_artwork_height(move_surface)
+        move_canvas_height = max(1, move_surface.get_height())
+        target_artwork_height = (
+            KEY_HINT_HEIGHT * move_artwork_height / move_canvas_height
+        )
+
+        scaled = {}
+        for hint, surface in surfaces.items():
+            if hint is KeyHint.MOVE:
+                target_height = KEY_HINT_HEIGHT
+            else:
+                artwork_height = max(1, self._visible_artwork_height(surface))
+                target_height = round(
+                    target_artwork_height * surface.get_height() / artwork_height
+                )
+            scaled[hint] = self._scale_to_height(
+                surface,
+                max(1, target_height),
+            )
+        return scaled
+
+    @staticmethod
+    def _visible_artwork_height(surface: pygame.Surface) -> int:
+        """Measure bright artwork rows while ignoring isolated noise pixels."""
+        width, height = surface.get_size()
+        active_rows = []
+        for y in range(height):
+            active_pixels = 0
+            for x in range(width):
+                red, green, blue, alpha = surface.get_at((x, y))
+                if (
+                    alpha > 0
+                    and max(red, green, blue) >= KEY_HINT_ARTWORK_THRESHOLD
+                ):
+                    active_pixels += 1
+            if active_pixels >= KEY_HINT_ARTWORK_ROW_MIN_PIXELS:
+                active_rows.append(y)
+
+        if not active_rows:
+            return height
+        return active_rows[-1] - active_rows[0] + 1
+
+    @staticmethod
+    def _scale_to_height(surface: pygame.Surface, height: int) -> pygame.Surface:
+        """Scale a surface proportionally to a fixed height."""
+        width, original_height = surface.get_size()
+        if original_height == height:
+            return surface
+        scale = height / original_height
+        scaled_size = (max(1, round(width * scale)), height)
+        return pygame.transform.smoothscale(surface, scaled_size)
+
+    def _draw_key_hints(self, key_hints: Sequence[KeyHint]) -> None:
+        """Draw the active keyboard hints as a bottom-right strip."""
+        if not key_hints:
+            return
+
+        surfaces = [
+            self.key_hint_images[hint]
+            for hint in key_hints
+            if hint in self.key_hint_images
+        ]
+        if not surfaces:
+            return
+
+        display_rect = self.game.display.get_rect()
+        total_width = sum(surface.get_width() for surface in surfaces)
+        total_width += KEY_HINT_GAP * (len(surfaces) - 1)
+        x = display_rect.right - total_width - KEY_HINT_MARGIN
+        row_height = max(surface.get_height() for surface in surfaces)
+        center_y = display_rect.bottom - KEY_HINT_MARGIN - row_height / 2
+
+        for surface in surfaces:
+            rect = surface.get_rect()
+            rect.left = x
+            rect.centery = round(center_y)
+            self.game.display.blit(surface, rect)
+            x += rect.width + KEY_HINT_GAP
 
     def draw_loading(self, text: Sequence[str]) -> None:
         """Draw centered loading text over the dark cave background."""

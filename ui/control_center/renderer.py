@@ -26,16 +26,17 @@ class ControlCenterRenderer(
 
     TAB_ORDER = ("drones", "rovers", "debug", "system")
     TITLE_Y = 70
-    MET_Y = 120
-    EXPLORED_Y = 150
-    TAB_Y = 178
-    SECTION_HEADER_Y = 240
-    DRONE_NAME_Y = 275
-    DRONE_DATA_Y = 305
+    MISSION_BUTTON_Y = 105
+    MET_Y = 170
+    EXPLORED_Y = 205
+    TAB_Y = 240
+    SECTION_HEADER_Y = 325
+    DRONE_NAME_Y = 370
+    DRONE_DATA_Y = 400
     CONTENT_BOTTOM_MARGIN = 40
-    TAB_BUTTON_W = 54
-    TAB_BUTTON_H = 34
-    TAB_BUTTON_GAP = 10
+    TAB_BUTTON_W = 40
+    TAB_BUTTON_H = 40
+    TAB_BUTTON_GAP = 12
 
     def __init__(self, game: Any) -> None:
         """Create surfaces, caches, and static text for one control panel."""
@@ -66,10 +67,15 @@ class ControlCenterRenderer(
             "midleft": "midleft",
         }
         self._tabs: list[tuple[str, tuple[int, int, int, int]]] = []
+        self._mission_controls: list[
+            tuple[str, tuple[int, int, int, int]]
+        ] = []
         self._drone_toggles: list[
             tuple[int, str, tuple[int, int, int, int]]
         ] = []
+        self._map_toggle: Optional[tuple[int, int, int, int]] = None
         self._heatmap_toggle: Optional[tuple[int, int, int, int]] = None
+        self._button_sprites: dict[str, pygame.Surface] = {}
 
         self._pre_render_statics()
         self._load_tab_sprites()
@@ -78,14 +84,21 @@ class ControlCenterRenderer(
         """Draw one immutable frame and return its detached hit geometry."""
         self.control_surf.fill((*Colors.BLACK.value, 255))
         self._tabs = []
+        self._mission_controls = []
         self._drone_toggles = []
+        self._map_toggle = None
         self._heatmap_toggle = None
 
-        # Draw order matters: header/tabs first, then the active tab content,
-        # then blit the entire panel into the mission window.
+        # Draw order matters: header/buttons first, then the active tab
+        # content, then blit the entire panel into the mission window.
         self.draw_title()
+        self.draw_mission_controls(view.is_paused, view.music_enabled)
         self.draw_statistics(view)
-        self.draw_tabs(view.active_tab)
+        self.draw_tabs(
+            view.active_tab,
+            view.show_terrain_heatmap,
+            view.show_full_map,
+        )
 
         if view.active_tab == "drones":
             self.draw_drone_section(
@@ -101,7 +114,9 @@ class ControlCenterRenderer(
 
         self.game.window.blit(self.control_surf, self.origin)
         return ControlHitMap(
+            map_toggle=self._map_toggle,
             heatmap_toggle=self._heatmap_toggle,
+            mission_controls=self._mission_controls,
             tabs=self._tabs,
             drone_toggles=self._drone_toggles,
         )
@@ -131,7 +146,7 @@ class ControlCenterRenderer(
         self.control_surf.blit(surf, rect)
 
     def draw_statistics(self, view: ControlCenterViewModel) -> None:
-        """Draw mission elapsed time, explored percentage, and heatmap toggle."""
+        """Draw mission elapsed time and explored percentage."""
         met_texts = [
             ("M.E.T.: ", Colors.GREY.value, 255),
             (view.elapsed_time, Colors.WHITE.value, 255),
@@ -170,7 +185,6 @@ class ControlCenterRenderer(
             self.EXPLORED_Y,
             RectHandle.MIDLEFT.value,
         )
-        self.draw_heatmap_toggle(view.show_terrain_heatmap)
 
     def _pre_render_statics(self) -> None:
         """Cache labels that do not change between frames."""

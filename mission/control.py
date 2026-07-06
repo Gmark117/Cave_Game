@@ -109,6 +109,7 @@ class MissionControl(MissionControlLifecycleMixin):
         self._running = False
         self._has_run = False
         self.restart_requested = False
+        self.exit_requested = False
         self.frame_profiler = FrameProfiler()
         
         self.delay = 1/15 # Set a delay for frame updates
@@ -187,6 +188,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 get_rovers=lambda: self.rovers,
                 presentation=self.presentation,
                 is_paused=lambda: self.is_paused,
+                is_music_enabled=self.music_enabled,
             )
         )
         
@@ -339,22 +341,20 @@ class MissionControl(MissionControlLifecycleMixin):
         self.pause_event.set()
         self.pause_coordinator.resume()
 
+    def music_enabled(self) -> bool:
+        """Return the menu-owned music state when available."""
+        menu = getattr(self.game, "menu", None)
+        if menu is None or not hasattr(menu, "music_enabled"):
+            return True
+        return bool(menu.music_enabled())
+
+    def toggle_music(self) -> None:
+        """Toggle persisted background music through the menu facade."""
+        menu = getattr(self.game, "menu", None)
+        if menu is not None and hasattr(menu, "toggle_music"):
+            menu.toggle_music()
+
     def update_sensors(self) -> None:
         """Update every drone's SLAM and terrain knowledge."""
         for drone in self.drones:
             drone.update_sensors()
-
-    @property
-    def stop_button_rect(self) -> pygame.Rect:
-        """Expose the renderer-owned stop-button hit area."""
-        return self.renderer.stop_button_rect
-
-    @property
-    def restart_button_rect(self) -> pygame.Rect:
-        """Expose the renderer-owned restart-button hit area."""
-        return self.renderer.restart_button_rect
-
-    @property
-    def pause_button_rect(self) -> pygame.Rect:
-        """Expose the renderer-owned pause/play-button hit area."""
-        return self.renderer.pause_button_rect

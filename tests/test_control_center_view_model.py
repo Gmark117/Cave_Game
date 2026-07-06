@@ -28,6 +28,7 @@ class ControlCenterViewModelTests(unittest.TestCase):
         debug_lines.append("later")
 
         self.assertEqual(view.debug_lines, ("line",))
+        self.assertTrue(view.show_full_map)
         with self.assertRaises(FrozenInstanceError):
             view.active_tab = "system"
 
@@ -90,6 +91,11 @@ class ControlCenterViewModelTests(unittest.TestCase):
         self.assertEqual(initial[0].status, "Ready")
         self.assertEqual(updated[0].battery, 1800)
         self.assertEqual(updated[0].status, "Updating")
+
+        rover.status = "Advancing"
+        moving = build_rover_status_views([rover])
+
+        self.assertEqual(moving[0].status, "Moving")
 
 
 if __name__ == "__main__":

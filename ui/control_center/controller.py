@@ -22,13 +22,17 @@ def _rect_value(rect: Optional[Sequence[int]]) -> Optional[RectValue]:
 class ControlHitMap:
     """Detached immutable hit rectangles produced by control-center layout."""
 
+    map_toggle: Optional[RectValue] = None
     heatmap_toggle: Optional[RectValue] = None
+    mission_controls: tuple[tuple[str, RectValue], ...] = ()
     tabs: tuple[tuple[str, RectValue], ...] = ()
     drone_toggles: tuple[tuple[int, str, RectValue], ...] = ()
 
     def __init__(
         self,
+        map_toggle: Optional[Sequence[int]] = None,
         heatmap_toggle: Optional[Sequence[int]] = None,
+        mission_controls: Iterable[tuple[str, Sequence[int]]] = (),
         tabs: Iterable[tuple[str, Sequence[int]]] = (),
         drone_toggles: Iterable[
             tuple[int, str, Sequence[int]]
@@ -37,8 +41,21 @@ class ControlHitMap:
         """Copy mutable renderer rectangles into immutable tuple values."""
         object.__setattr__(
             self,
+            "map_toggle",
+            _rect_value(map_toggle),
+        )
+        object.__setattr__(
+            self,
             "heatmap_toggle",
             _rect_value(heatmap_toggle),
+        )
+        object.__setattr__(
+            self,
+            "mission_controls",
+            tuple(
+                (str(action), _rect_value(rect))
+                for action, rect in mission_controls
+            ),
         )
         object.__setattr__(
             self,
@@ -113,6 +130,16 @@ class ControlCenterController:
         hit_map: ControlHitMap,
     ) -> Optional[ControlAction]:
         """Convert a mouse position and hit map into a semantic UI action."""
+        for action_name, rect in hit_map.mission_controls:
+            if pygame.Rect(rect).collidepoint(mouse_pos):
+                return (f"mission_{action_name}", None)
+
+        if (
+            hit_map.map_toggle is not None
+            and pygame.Rect(hit_map.map_toggle).collidepoint(mouse_pos)
+        ):
+            return ("full_map", None)
+
         if (
             hit_map.heatmap_toggle is not None
             and pygame.Rect(hit_map.heatmap_toggle).collidepoint(mouse_pos)
@@ -131,5 +158,6 @@ class ControlCenterController:
                 return ("drone_path", drone_id)
             if overlay_type == "vision":
                 return ("drone_vision", drone_id)
-            return ("drone_heatmap", drone_id)
+            if overlay_type == "selected":
+                return ("drone_heatmap", drone_id)
         return None

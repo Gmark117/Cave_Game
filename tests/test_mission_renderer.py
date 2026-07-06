@@ -3,14 +3,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
-
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-import pygame
-
 from agents.drone_runtime_state import DroneSnapshot
-from asset_config.rendering import Colors
 from contracts import MissionRendererDependencies
 from rendering.mission_renderer import MissionRenderer
 
@@ -64,9 +59,11 @@ class MissionRendererTests(unittest.TestCase):
                 SimpleNamespace(
                     show_terrain_heatmap=False,
                     selected_drone_heatmap_id=None,
+                    show_full_map=True,
                 ),
             ),
             is_paused=lambda: getattr(control, "is_paused", False),
+            is_music_enabled=lambda: getattr(control, "music_enabled", True),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -127,18 +124,12 @@ class MissionRendererTests(unittest.TestCase):
             presentation=SimpleNamespace(
                 show_terrain_heatmap=False,
                 selected_drone_heatmap_id=None,
+                show_full_map=False,
             ),
+            is_paused=True,
+            music_enabled=False,
         )
         renderer = MissionRenderer(self.make_dependencies(control))
-        renderer.draw_stop_button = Mock(
-            side_effect=lambda: events.append("stop"),
-        )
-        renderer.draw_restart_button = Mock(
-            side_effect=lambda: events.append("restart"),
-        )
-        renderer.draw_pause_button = Mock(
-            side_effect=lambda: events.append("pause"),
-        )
 
         renderer.draw()
 
@@ -154,9 +145,6 @@ class MissionRendererTests(unittest.TestCase):
                 "rover_icon",
                 "debug",
                 "control_center",
-                "stop",
-                "restart",
-                "pause",
             ],
         )
         control_center_args = draw_control_center.call_args.args
@@ -170,85 +158,9 @@ class MissionRendererTests(unittest.TestCase):
             build_debug_lines.call_args.args[0][0],
             drone_snapshot,
         )
-
-    def test_mission_button_rects_and_pixels_are_renderer_owned(self) -> None:
-        window = pygame.Surface((170, 70), pygame.SRCALPHA)
-        control = SimpleNamespace(
-            game=SimpleNamespace(window=window),
-            is_paused=False,
-        )
-        renderer = MissionRenderer(self.make_dependencies(control))
-
-        renderer.draw_stop_button()
-        renderer.draw_restart_button()
-        renderer.draw_pause_button()
-
-        self.assertEqual(renderer.stop_button_rect, pygame.Rect(10, 10, 40, 40))
-        self.assertEqual(
-            renderer.restart_button_rect,
-            pygame.Rect(58, 10, 40, 40),
-        )
-        self.assertEqual(
-            renderer.pause_button_rect,
-            pygame.Rect(106, 10, 40, 40),
-        )
-        self.assertFalse(
-            renderer.stop_button_rect.colliderect(
-                renderer.restart_button_rect,
-            )
-        )
-        self.assertFalse(
-            renderer.restart_button_rect.colliderect(
-                renderer.pause_button_rect,
-            )
-        )
-        self.assertEqual(window.get_at((15, 15))[:3], (255, 0, 0))
-        self.assertEqual(
-            window.get_at((63, 15))[:3],
-            Colors.BLUE.value,
-        )
-        self.assertEqual(
-            window.get_at((111, 15))[:3],
-            Colors.OCHRE.value,
-        )
-        self.assertEqual(
-            window.get_at(renderer.stop_button_rect.center)[:3],
-            (255, 255, 255),
-        )
-        self.assertEqual(window.get_at((20, 20))[:3], (255, 255, 255))
-        self.assertEqual(window.get_at((22, 22))[:3], (255, 0, 0))
-        restart_pixels = pygame.surfarray.array3d(
-            window.subsurface(renderer.restart_button_rect)
-        )
-        white_restart_pixels = np.all(
-            restart_pixels == np.array((255, 255, 255)),
-            axis=2,
-        )
-        self.assertGreater(int(np.count_nonzero(white_restart_pixels)), 40)
-        self.assertEqual(
-            window.get_at(renderer.pause_button_rect.center)[:3],
-            Colors.OCHRE.value,
-        )
-        self.assertGreater(
-            int(np.count_nonzero(pygame.surfarray.array_alpha(window))),
-            0,
-        )
-
-    def test_pause_button_switches_to_play_symbol_when_paused(self) -> None:
-        window = pygame.Surface((170, 70), pygame.SRCALPHA)
-        control = SimpleNamespace(
-            game=SimpleNamespace(window=window),
-            is_paused=True,
-        )
-        renderer = MissionRenderer(self.make_dependencies(control))
-
-        renderer.draw_pause_button()
-
-        self.assertEqual(window.get_at((111, 15))[:3], Colors.GREEN.value)
-        self.assertEqual(
-            window.get_at(renderer.pause_button_rect.center)[:3],
-            (255, 255, 255),
-        )
+        self.assertTrue(control_center_args[5])
+        self.assertFalse(control_center_args[6])
+        self.assertFalse(control_center_args[7])
 
 
 if __name__ == "__main__":

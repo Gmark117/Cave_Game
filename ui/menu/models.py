@@ -32,6 +32,15 @@ class MenuAction(Enum):
     START_MISSION = "start_mission"
 
 
+class KeyHint(Enum):
+    """Keyboard hint images shown for the active menu state."""
+
+    MOVE = "move"
+    NUMBERS = "numbers"
+    ENTER = "enter"
+    BACKSPACE = "backspace"
+
+
 @dataclass
 class MenuItem:
     """Shared presentation state for one menu row."""

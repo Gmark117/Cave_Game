@@ -216,7 +216,7 @@ In menus:
 - `Left` / `Right`: change selector or slider values
 - `Enter`: confirm, open a submenu, or start a mission
 - Number keys `0-9`: edit the seed field
-- `Backspace`: delete seed digits
+- `Backspace`: return from submenus, except on the seed field where it deletes digits
 
 Simulation settings available in-game:
 

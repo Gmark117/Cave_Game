@@ -50,15 +50,71 @@ class ControlCenterRendererTests(unittest.TestCase):
             debug_lines=(),
         )
 
-        hit_map = renderer.render(view)
+        with patch.object(
+            renderer,
+            "draw_image_button",
+            wraps=renderer.draw_image_button,
+        ) as draw_button:
+            hit_map = renderer.render(view)
 
         self.assertIsNotNone(hit_map.heatmap_toggle)
+        self.assertIsNotNone(hit_map.map_toggle)
+        self.assertEqual(len(hit_map.mission_controls), 5)
         self.assertEqual(len(hit_map.tabs), 4)
         self.assertEqual(
             {(drone_id, action) for drone_id, action, _ in hit_map.drone_toggles},
-            {(0, "path"), (0, "vision"), (0, "terrain")},
+            {(0, "path"), (0, "vision"), (0, "selected")},
         )
+        for _, rect in hit_map.mission_controls:
+            self.assertEqual(rect[2:], (40, 40))
+        for _, rect in hit_map.tabs:
+            self.assertEqual(rect[2:], (40, 40))
+        self.assertEqual(hit_map.map_toggle[2:], (40, 40))
+        for _, _, rect in hit_map.drone_toggles:
+            self.assertEqual(rect[2:], (26, 26))
+        asset_names = [call.args[1] for call in draw_button.call_args_list]
+        self.assertIn("pause_button.png", asset_names)
+        self.assertIn("music_ON_button.png", asset_names)
+        self.assertIn("exit_button.png", asset_names)
+        self.assertIn("map_ON_button.png", asset_names)
+        self.assertIn("path_ON_button.png", asset_names)
+        self.assertIn("vision_ON_button.png", asset_names)
+        self.assertIn("selected_OFF_button.png", asset_names)
+        self.assertIn("lidar_view_OFF_button.png", asset_names)
+        self.assertNotIn("map_OFF_button.png", asset_names)
         self.assertFalse(hasattr(renderer, "control_center"))
+
+    def test_full_map_toggle_uses_off_asset_when_disabled(self) -> None:
+        window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
+        game = SimpleNamespace(window=window)
+        with patch.object(
+            ControlCenterRenderer,
+            "_load_tab_sprites",
+        ):
+            renderer = ControlCenterRenderer(game)
+
+        with patch.object(
+            renderer,
+            "draw_image_button",
+            wraps=renderer.draw_image_button,
+        ) as draw_button:
+            renderer.render(
+                ControlCenterViewModel(
+                    elapsed_time="00:12",
+                    explored_percent=40,
+                    active_tab="drones",
+                    drone_statuses=(),
+                    rover_statuses=(),
+                    show_terrain_heatmap=False,
+                    selected_drone_heatmap_id=None,
+                    debug_lines=(),
+                    show_full_map=False,
+                )
+            )
+
+        asset_names = [call.args[1] for call in draw_button.call_args_list]
+        self.assertIn("map_OFF_button.png", asset_names)
+        self.assertNotIn("map_ON_button.png", asset_names)
 
     def test_all_tabs_render_from_frame_data_without_facade_callbacks(
         self,

@@ -51,6 +51,7 @@ class PresentationInvalidator(Protocol):
     terrain_heatmap_dirty: bool
     selected_drone_heatmap_id: int | None
     show_terrain_heatmap: bool
+    show_full_map: bool
 
 
 class SlamRendererLike(Protocol):
@@ -140,6 +141,7 @@ class MissionRendererDependencies:
     get_rovers: Callable[[], Sequence[Any]]
     presentation: PresentationInvalidator
     is_paused: Callable[[], bool]
+    is_music_enabled: Callable[[], bool]
 
 
 @dataclass(frozen=True)

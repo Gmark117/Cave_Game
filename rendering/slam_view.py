@@ -111,10 +111,15 @@ class SlamViewService:
                 draw_points=True,
                 roughness=terrain.roughness,
                 roughness_conf=terrain.confidence,
+                full_map_floor_mask=self._full_map_floor_mask(),
             )
         else:
             dependencies.slam_renderer.render(
-                padded_occ, padded_conf, points, draw_points=False
+                padded_occ,
+                padded_conf,
+                points,
+                draw_points=False,
+                full_map_floor_mask=self._full_map_floor_mask(),
             )
         self.rendered_versions[selected_id] = slam.version
 
@@ -156,10 +161,15 @@ class SlamViewService:
                 draw_points=True,
                 roughness=terrain.roughness,
                 roughness_conf=terrain.confidence,
+                full_map_floor_mask=self._full_map_floor_mask(),
             )
         else:
             dependencies.slam_renderer.render(
-                combined_occ, combined_conf, combined_points, draw_points=False
+                combined_occ,
+                combined_conf,
+                combined_points,
+                draw_points=False,
+                full_map_floor_mask=self._full_map_floor_mask(),
             )
 
         for drone_id, slam in enumerate(snapshots):
@@ -184,3 +194,13 @@ class SlamViewService:
         """Compare a drone SLAM version with the last rendered version."""
         rendered_version = self.rendered_versions.get(drone_id, -1)
         return slam_map.has_changed_since(rendered_version)
+
+    def _full_map_floor_mask(self) -> np.ndarray | None:
+        """Return the cave floor mask when the full-map underlay is enabled."""
+        if not getattr(
+            self.dependencies.presentation,
+            "show_full_map",
+            True,
+        ):
+            return None
+        return self.dependencies.terrain_knowledge.floor_mask

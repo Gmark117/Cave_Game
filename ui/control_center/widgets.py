@@ -7,7 +7,23 @@ import pygame
 
 from asset_config.gameplay import Display
 from asset_config.media import Images
-from asset_config.rendering import Colors, Fonts
+
+
+BUTTON_ASSET_DIR = (
+    Path(__file__).resolve().parents[2] / "Assets" / "Images" / "Buttons"
+)
+BUTTON_SIZE = 40
+BUTTON_ICON_SIZE = 28
+BUTTON_RADIUS = 8
+DRONE_BUTTON_SIZE = 26
+DRONE_BUTTON_ICON_SIZE = 18
+DRONE_BUTTON_RADIUS = 5
+BUTTON_BG = (86, 86, 86)
+BUTTON_BG_ACTIVE = (104, 104, 104)
+BUTTON_BORDER = (64, 64, 64)
+BUTTON_ACTIVE_BORDER = (86, 120, 106)
+BUTTON_SEPARATOR = (112, 112, 112, 190)
+BUTTON_SEPARATOR_RADIUS = 3
 
 
 class ControlCenterWidgetMixin:
@@ -15,36 +31,82 @@ class ControlCenterWidgetMixin:
 
     def draw_heatmap_toggle(self, enabled: bool) -> None:
         """Draw the global terrain heatmap toggle and save its hit rect."""
-        rect = pygame.Rect(Display.LEGEND_WIDTH - 46, 138, 34, 24)
-        self.draw_toggle_button(
+        rect = self._button_row_rects(1, self.TAB_Y)[0]
+        self.draw_image_button(
             rect,
-            "H",
-            enabled,
-            Colors.EUCALYPTUS.value,
+            self._state_asset_name("lidar_view", enabled),
+            active=enabled,
         )
         self._heatmap_toggle = self._absolute_rect(rect)
 
-    def draw_tabs(self, active_tab: str) -> None:
-        """Draw tab buttons and collect their absolute hit rectangles."""
-        total_w = (
-            self.TAB_BUTTON_W * len(self.TAB_ORDER)
-            + self.TAB_BUTTON_GAP * (len(self.TAB_ORDER) - 1)
+    def draw_mission_controls(
+        self,
+        is_paused: bool,
+        music_enabled: bool,
+    ) -> None:
+        """Draw mission-level controls in the first button row."""
+        buttons = (
+            ("stop", "stop_button.png"),
+            ("restart", "restart_button.png"),
+            (
+                "pause",
+                "play_button.png" if is_paused else "pause_button.png",
+            ),
+            (
+                "music",
+                (
+                    "music_ON_button.png"
+                    if music_enabled
+                    else "music_OFF_button.png"
+                ),
+            ),
+            ("exit", "exit_button.png"),
         )
-        start_x = (Display.LEGEND_WIDTH - total_w) // 2
-        for index, tab_name in enumerate(self.TAB_ORDER):
-            rect = pygame.Rect(
-                start_x
-                + index * (self.TAB_BUTTON_W + self.TAB_BUTTON_GAP),
-                self.TAB_Y,
-                self.TAB_BUTTON_W,
-                self.TAB_BUTTON_H,
+        for (action, asset_name), rect in zip(
+            buttons,
+            self._button_row_rects(len(buttons), self.MISSION_BUTTON_Y),
+        ):
+            self.draw_image_button(rect, asset_name)
+            self._mission_controls.append(
+                (action, self._absolute_rect(rect))
             )
+        self._draw_separator_between_buttons(
+            self._mission_controls[2][1],
+            self._mission_controls[3][1],
+        )
+
+    def draw_tabs(
+        self,
+        active_tab: str,
+        heatmap_enabled: bool,
+        full_map_enabled: bool,
+    ) -> None:
+        """Draw tab buttons plus the map/LIDAR view-control group."""
+        tab_rects, map_rect, heatmap_rect = self._view_control_rects()
+        for tab_name, rect in zip(self.TAB_ORDER, tab_rects):
             self.draw_tab_button(
                 rect,
                 tab_name,
                 active_tab == tab_name,
             )
             self._tabs.append((tab_name, self._absolute_rect(rect)))
+
+        self._draw_separator_dot(
+            (tab_rects[-1].right + map_rect.left) // 2,
+            self.TAB_Y + self.TAB_BUTTON_H // 2,
+        )
+        self.draw_image_button(
+            map_rect,
+            self._state_asset_name("map", full_map_enabled),
+            active=full_map_enabled,
+        )
+        self._map_toggle = self._absolute_rect(map_rect)
+        self.draw_image_button(
+            heatmap_rect,
+            self._state_asset_name("lidar_view", heatmap_enabled),
+            active=heatmap_enabled,
+        )
+        self._heatmap_toggle = self._absolute_rect(heatmap_rect)
 
     def draw_tab_button(
         self,
@@ -53,34 +115,15 @@ class ControlCenterWidgetMixin:
         active: bool,
     ) -> None:
         """Draw one tab button with an icon and active/inactive styling."""
-        bg_color = Colors.WHITE.value if active else Colors.GREY.value
-        alpha_bg = 230 if active else 128
-        button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(
-            button_surf,
-            (*bg_color, alpha_bg),
-            button_surf.get_rect(),
-            border_radius=8,
-        )
-        border_color = (
-            Colors.EUCALYPTUS.value
-            if active
-            else Colors.GREY.value
-        )
-        pygame.draw.rect(
-            button_surf,
-            (*border_color, 220),
-            button_surf.get_rect(),
-            width=2 if active else 1,
-            border_radius=8,
-        )
-        icon_color = Colors.BLACK.value if active else Colors.GREY.value
-        self.draw_tab_icon(
-            button_surf,
-            tab_name,
-            icon_color,
-        )
-        self.control_surf.blit(button_surf, rect.topleft)
+        asset_name = {
+            "drones": "drone_button.png",
+            "rovers": "rover_button.png",
+            "debug": "debug_button.png",
+            "system": "system_button.png",
+        }.get(tab_name)
+        if asset_name is None:
+            return
+        self.draw_image_button(rect, asset_name, active=active)
 
     def draw_tab_icon(
         self,
@@ -197,10 +240,10 @@ class ControlCenterWidgetMixin:
         y_center: int,
         selected_drone_heatmap_id: Optional[int],
     ) -> None:
-        """Draw path/vision/terrain buttons for one drone row."""
-        button_width = 34
-        button_height = 24
-        gap = 8
+        """Draw path, vision, and selected-drone buttons for one row."""
+        button_width = DRONE_BUTTON_SIZE
+        button_height = DRONE_BUTTON_SIZE
+        gap = 5
         start_x = Display.LEGEND_WIDTH - (
             button_width * 3 + gap * 2 + 12
         )
@@ -217,7 +260,7 @@ class ControlCenterWidgetMixin:
             button_width,
             button_height,
         )
-        terrain_rect = pygame.Rect(
+        selected_rect = pygame.Rect(
             start_x + (button_width + gap) * 2,
             top,
             button_width,
@@ -236,7 +279,7 @@ class ControlCenterWidgetMixin:
             status.color,
         )
         self.draw_toggle_button(
-            terrain_rect,
+            selected_rect,
             "T",
             selected_drone_heatmap_id == status.id,
             status.color,
@@ -255,8 +298,8 @@ class ControlCenterWidgetMixin:
                 ),
                 (
                     status.id,
-                    "terrain",
-                    self._absolute_rect(terrain_rect),
+                    "selected",
+                    self._absolute_rect(selected_rect),
                 ),
             )
         )
@@ -269,71 +312,175 @@ class ControlCenterWidgetMixin:
         accent_color: tuple[int, int, int],
     ) -> None:
         """Draw a small labeled or square toggle button."""
-        bg_color = accent_color if enabled else Colors.GREY.value
-        button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
-        if label.upper() != "T":
-            pygame.draw.rect(
-                button_surf,
-                (*bg_color, 128),
-                button_surf.get_rect(),
-                border_radius=6,
-            )
-            pygame.draw.rect(
-                button_surf,
-                (*Colors.WHITE.value, 128),
-                button_surf.get_rect(),
-                width=1,
-                border_radius=6,
-            )
+        self.draw_image_button(
+            rect,
+            self._toggle_asset_name(label, enabled),
+            active=enabled,
+            icon_size=DRONE_BUTTON_ICON_SIZE,
+            border_radius=DRONE_BUTTON_RADIUS,
+            border_width=1,
+        )
 
-        if label.upper() == "T":
-            width, height = button_surf.get_size()
-            pad = max(2, min(width, height) // 8)
-            side = min(width, height) - pad * 2
-            square_rect = pygame.Rect(0, 0, side, side)
-            square_rect.center = (width // 2, height // 2)
-            pygame.draw.rect(
-                button_surf,
-                (*Colors.WHITE.value, 128),
-                square_rect,
-                width=1,
-            )
-            if enabled:
-                inner_inset = max(3, side // 6)
-                inner_rect = pygame.Rect(
-                    0,
-                    0,
-                    side - inner_inset * 2,
-                    side - inner_inset * 2,
-                )
-                inner_rect.center = square_rect.center
-                pygame.draw.rect(
-                    button_surf,
-                    (*accent_color, 128),
-                    inner_rect,
-                )
-        else:
-            text_color = (
-                Colors.BLACK.value
-                if enabled
-                else Colors.WHITE.value
-            )
-            text_surf = self._get_font(
-                Fonts.BIG.value,
-                18,
-            ).render(
-                label,
-                True,
-                text_color,
-            ).convert_alpha()
-            text_surf.set_alpha(128)
+    def draw_image_button(
+        self,
+        rect: pygame.Rect,
+        asset_name: str,
+        active: bool = False,
+        icon_size: int = BUTTON_ICON_SIZE,
+        border_radius: int = BUTTON_RADIUS,
+        border_width: int = 2,
+    ) -> None:
+        """Draw a rounded image button with a centered bitmap icon."""
+        button_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+        bg_color = BUTTON_BG_ACTIVE if active else BUTTON_BG
+        border_color = BUTTON_ACTIVE_BORDER if active else BUTTON_BORDER
+        pygame.draw.rect(
+            button_surf,
+            bg_color,
+            button_surf.get_rect(),
+            border_radius=border_radius,
+        )
+        pygame.draw.rect(
+            button_surf,
+            border_color,
+            button_surf.get_rect(),
+            width=max(1, border_width),
+            border_radius=border_radius,
+        )
+
+        icon = self._get_button_sprite(asset_name, icon_size)
+        if icon is not None:
             button_surf.blit(
-                text_surf,
-                text_surf.get_rect(
-                    center=button_surf.get_rect().center
-                ),
+                icon,
+                icon.get_rect(center=button_surf.get_rect().center),
             )
         self.control_surf.blit(button_surf, rect.topleft)
+
+    def _get_button_sprite(
+        self,
+        asset_name: str,
+        icon_size: int = BUTTON_ICON_SIZE,
+    ) -> Optional[pygame.Surface]:
+        """Load and cache one button icon scaled to the shared icon size."""
+        if not hasattr(self, "_button_sprites"):
+            self._button_sprites = {}
+        cache_key = f"{asset_name}:{icon_size}"
+        if cache_key in self._button_sprites:
+            return self._button_sprites[cache_key]
+
+        try:
+            image = pygame.image.load(
+                str(BUTTON_ASSET_DIR / asset_name)
+            )
+            try:
+                image = image.convert_alpha()
+            except pygame.error:
+                image = image.copy()
+        except Exception:
+            return None
+
+        self._button_sprites[cache_key] = pygame.transform.smoothscale(
+            image,
+            (icon_size, icon_size),
+        )
+        return self._button_sprites[cache_key]
+
+    def _button_row_rects(
+        self,
+        count: int,
+        top: int,
+    ) -> tuple[pygame.Rect, ...]:
+        """Return centered same-size button rectangles for one row."""
+        total_w = (
+            self.TAB_BUTTON_W * count
+            + self.TAB_BUTTON_GAP * (count - 1)
+        )
+        start_x = (Display.LEGEND_WIDTH - total_w) // 2
+        return tuple(
+            pygame.Rect(
+                start_x + index * (self.TAB_BUTTON_W + self.TAB_BUTTON_GAP),
+                top,
+                self.TAB_BUTTON_W,
+                self.TAB_BUTTON_H,
+            )
+            for index in range(count)
+        )
+
+    def _view_control_rects(
+        self,
+    ) -> tuple[tuple[pygame.Rect, ...], pygame.Rect, pygame.Rect]:
+        """Return compact tab/map/LIDAR rectangles for the grouped row."""
+        tab_start_x = 7
+        tab_gap = 7
+        map_left = 204
+        view_gap = 8
+        tab_rects = tuple(
+            pygame.Rect(
+                tab_start_x
+                + index * (self.TAB_BUTTON_W + tab_gap),
+                self.TAB_Y,
+                self.TAB_BUTTON_W,
+                self.TAB_BUTTON_H,
+            )
+            for index in range(len(self.TAB_ORDER))
+        )
+        map_rect = pygame.Rect(
+            map_left,
+            self.TAB_Y,
+            self.TAB_BUTTON_W,
+            self.TAB_BUTTON_H,
+        )
+        heatmap_rect = pygame.Rect(
+            map_rect.right + view_gap,
+            self.TAB_Y,
+            self.TAB_BUTTON_W,
+            self.TAB_BUTTON_H,
+        )
+        return tab_rects, map_rect, heatmap_rect
+
+    def _draw_separator_between_buttons(
+        self,
+        left_abs_rect: tuple[int, int, int, int],
+        right_abs_rect: tuple[int, int, int, int],
+    ) -> None:
+        """Draw a small separator dot in the gap between two buttons."""
+        left = pygame.Rect(left_abs_rect).move(-self.origin_x, -self.origin_y)
+        right = pygame.Rect(right_abs_rect).move(
+            -self.origin_x,
+            -self.origin_y,
+        )
+        self._draw_separator_dot(
+            (left.right + right.left) // 2,
+            (left.centery + right.centery) // 2,
+        )
+
+    def _draw_separator_dot(self, x: int, y: int) -> None:
+        """Draw a muted dot separator between compact button groups."""
+        pygame.draw.circle(
+            self.control_surf,
+            BUTTON_SEPARATOR,
+            (int(x), int(y)),
+            BUTTON_SEPARATOR_RADIUS,
+        )
+
+    @staticmethod
+    def _toggle_asset_name(label: str, enabled: bool) -> str:
+        """Resolve a row-toggle label to its approved ON/OFF asset."""
+        mapping = {
+            "P": "path",
+            "V": "vision",
+            "T": "selected",
+        }
+        return ControlCenterWidgetMixin._state_asset_name(
+            mapping.get(label.upper(), "selected"),
+            enabled,
+        )
+
+    @staticmethod
+    def _state_asset_name(prefix: str, enabled: bool) -> str:
+        """Resolve an ON/OFF button asset name from a prefix."""
+        state = "ON" if enabled else "OFF"
+        return f"{prefix}_{state}_button.png"
 
     def _load_tab_sprites(self) -> None:
         """Load optional bitmap icons for tab buttons."""

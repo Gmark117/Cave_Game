@@ -72,7 +72,10 @@ class ControlCenterViewModel:
     rover_statuses: tuple[RoverStatusView, ...]
     show_terrain_heatmap: bool
     selected_drone_heatmap_id: int | None
+    show_full_map: bool
     debug_lines: tuple[str, ...]
+    is_paused: bool
+    music_enabled: bool
 
     def __init__(
         self,
@@ -84,6 +87,9 @@ class ControlCenterViewModel:
         show_terrain_heatmap: bool,
         selected_drone_heatmap_id: int | None,
         debug_lines: Iterable[str],
+        is_paused: bool = False,
+        music_enabled: bool = True,
+        show_full_map: bool = True,
     ) -> None:
         """Copy mutable mission values into immutable display values."""
         object.__setattr__(self, "elapsed_time", str(elapsed_time))
@@ -113,11 +119,14 @@ class ControlCenterViewModel:
             "selected_drone_heatmap_id",
             selected_drone_heatmap_id,
         )
+        object.__setattr__(self, "show_full_map", bool(show_full_map))
         object.__setattr__(
             self,
             "debug_lines",
             tuple(str(line) for line in debug_lines),
         )
+        object.__setattr__(self, "is_paused", bool(is_paused))
+        object.__setattr__(self, "music_enabled", bool(music_enabled))
 
 
 def _roster_name(roster: tuple[AgentRosterEntry, ...], agent_id: int) -> str:
@@ -171,7 +180,14 @@ def build_rover_status_views(
             name=_roster_name(ROVER_ROSTER, int(rover.id)),
             color=tuple(rover.color),
             battery=int(rover.battery),
-            status=str(rover.status),
+            status=_rover_status(str(rover.status)),
         )
         for rover in rovers
     )
+
+
+def _rover_status(status: str) -> str:
+    """Translate rover runtime status labels into compact UI text."""
+    if status == "Advancing":
+        return "Moving"
+    return status

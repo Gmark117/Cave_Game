@@ -149,11 +149,6 @@ class Menu:
                 options=DRONE_OPTIONS,
             ),
             ButtonItem(
-                "Back",
-                (Display.ALIGN_L, Display.CENTER_H + 120),
-                action=MenuAction.BACK_TO_MAIN,
-            ),
-            ButtonItem(
                 "Start Mission",
                 (Display.ALIGN_L, Display.CENTER_H + 220),
                 size=100,
@@ -192,11 +187,6 @@ class Menu:
                 value=0 if self.button_on_off == "on" else 1,
                 options=("on", "off"),
             ),
-            ButtonItem(
-                "Back",
-                (Display.ALIGN_L, Display.CENTER_H + 120),
-                action=MenuAction.SAVE_AUDIO_AND_BACK,
-            ),
         ]
 
     def create_credits_menu(self) -> None:
@@ -218,11 +208,6 @@ class Menu:
                 (Display.ALIGN_L, Display.CENTER_H - 10),
                 selectable=False,
             ),
-            ButtonItem(
-                "Back",
-                (Display.ALIGN_L, Display.CENTER_H + 90),
-                action=MenuAction.BACK_TO_MAIN,
-            ),
         ]
 
     def display(self) -> None:
@@ -241,7 +226,11 @@ class Menu:
 
     def _draw(self) -> None:
         """Draw the current menu screen."""
-        self.renderer.draw(self.current_menu, self.current_index)
+        self.renderer.draw(
+            self.current_menu,
+            self.current_index,
+            self.controller.key_hints(),
+        )
 
     def _handle_global_input(self) -> None:
         """Pass one frame of game key flags to the menu controller."""
@@ -308,6 +297,29 @@ class Menu:
                 button=self.button_on_off,
             )
         )
+
+    def music_enabled(self) -> bool:
+        """Return whether background music is currently enabled."""
+        return self.sound_on_off == "on"
+
+    def set_music_enabled(self, enabled: bool) -> None:
+        """Apply and persist a background music state."""
+        current_enabled = self.music_enabled()
+        self.sound_on_off = "on" if enabled else "off"
+        if enabled != current_enabled:
+            self.audio.set_music(enabled)
+
+        if hasattr(self, "options"):
+            music_item = cast(SelectorItem[str], self.options[2])
+            music_item.value = 0 if enabled else 1
+
+        self.save_options()
+
+    def toggle_music(self) -> bool:
+        """Toggle background music and return the new enabled state."""
+        enabled = not self.music_enabled()
+        self.set_music_enabled(enabled)
+        return enabled
 
     def set_default_seed(self) -> None:
         """Set the seed associated with the currently selected map size."""
