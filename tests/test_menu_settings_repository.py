@@ -87,38 +87,6 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             {"MISSION", "SLAM", "SHARING", "FRONTIER", "RENDERING"},
         )
 
-    def test_legacy_file_loads_when_new_file_is_absent(self) -> None:
-        temporary_directory, repository = self.make_repository()
-        self.addCleanup(temporary_directory.cleanup)
-        repository.legacy_simulation_path.write_text(
-            "[symSettings]\n"
-            "mode = Search and Rescue\n"
-            "map_dimension = Large\n"
-            "seed = 444\n"
-            "drones = 6\n"
-            "\n"
-            "[SLAM]\n"
-            "scan_interval = 0.5\n"
-            "scan_rays = 24\n"
-            "point_cloud_max_points = 2000\n"
-            "render_point_tail = 300\n"
-            "render_interval = 0.2\n"
-            "rover_share_interval = 0.75\n"
-            "frontier_stride = 2\n"
-            "frontier_confidence_threshold = 0.7\n"
-            "frontier_rebuild_cooldown = 0.4\n"
-        )
-
-        loaded = repository.load_simulation(SimulationConfig())
-
-        self.assertEqual(loaded.mission_config.objective, 1)
-        self.assertEqual(loaded.mission_config.map_dim, "LARGE")
-        self.assertEqual(loaded.slam.scan_rays, 24)
-        self.assertEqual(loaded.sharing.rover_interval, 0.75)
-        self.assertEqual(loaded.frontier.stride, 2)
-        self.assertEqual(loaded.rendering.refresh_interval, 0.2)
-        self.assertFalse(repository.simulation_path.exists())
-
     def test_simulation_default_loads_before_local_override(self) -> None:
         temporary_directory, repository = self.make_repository()
         self.addCleanup(temporary_directory.cleanup)
@@ -147,24 +115,11 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded_local.mission_config.seed, 99)
         self.assertTrue(repository.simulation_path.exists())
 
-    def test_new_file_takes_precedence_over_legacy_file(self) -> None:
+    def test_missing_simulation_files_return_no_loaded_settings(self) -> None:
         temporary_directory, repository = self.make_repository()
         self.addCleanup(temporary_directory.cleanup)
-        repository.legacy_simulation_path.write_text(
-            "[symSettings]\nseed = 1\n"
-        )
-        current = replace(
-            SimulationConfig(),
-            mission_config=replace(
-                SimulationConfig().mission_config,
-                seed=99,
-            ),
-        )
-        repository.save_simulation(current)
 
-        loaded = repository.load_simulation(SimulationConfig())
-
-        self.assertEqual(loaded.mission_config.seed, 99)
+        self.assertIsNone(repository.load_simulation(SimulationConfig()))
 
     def test_invalid_section_restores_only_that_section_defaults(self) -> None:
         temporary_directory, repository = self.make_repository()

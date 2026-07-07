@@ -1,8 +1,8 @@
 """Runtime facade for procedural cave map generation.
 
-`MapGenerator` keeps the legacy game-facing API while focused collaborators
-own cave generation, worker-process management, post-processing, roughness
-synthesis, and artifact output.
+`MapGenerator` keeps the game-facing map-generation API while focused
+collaborators own cave generation, worker-process management, post-processing,
+roughness synthesis, and artifact output.
 """
 
 import logging
@@ -27,7 +27,7 @@ class MapGenerator:
     NUM_PROCESSES = getattr(MapGen, "DEFAULT_NUM_PROCESSES", 8)
 
     def __init__(self, game, settings) -> None:
-        """Generate a cave map and expose legacy attributes for MissionControl."""
+        """Generate a cave map and expose mission inputs for MissionControl."""
         self.game = game
         self.settings = settings
         self.width = Display.FULL_W - Display.LEGEND_WIDTH
@@ -54,9 +54,6 @@ class MapGenerator:
         self.terrain_roughness = result.terrain_roughness
         self.worm_x = result.worm_x
         self.worm_y = result.worm_y
-        self.worm_inputs = result.worm_inputs
-        self.proc_counter = result.completed_workers
-        self.worker_crashed = result.worker_crashed
 
         MapArtifactWriter().write(self.bin_map)
 

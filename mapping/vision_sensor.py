@@ -16,7 +16,7 @@ class RayHit:
     hit: bool
     distance: float
     angle_deg: float
-    points: Tuple[Tuple[int, int], ...] = ()
+    points: Tuple[Tuple[int, int], ...]
 
 
 class VisionSensor:

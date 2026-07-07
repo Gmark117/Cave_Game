@@ -74,9 +74,6 @@ class MapGeneratorTests(unittest.TestCase):
         self.assertIs(cartographer.terrain_roughness, roughness)
         self.assertEqual(cartographer.worm_x, [1, 2])
         self.assertEqual(cartographer.worm_y, [3, 4])
-        self.assertEqual(cartographer.worm_inputs, (5, 6, 7))
-        self.assertEqual(cartographer.proc_counter, 2)
-        self.assertFalse(cartographer.worker_crashed)
 
     def test_digging_progress_ignores_missing_loading_overlay(self) -> None:
         cartographer = object.__new__(MapGenerator)

@@ -115,11 +115,3 @@ class ControlCenter:
             mouse_pos,
             self._hit_map,
         )
-
-    def percent_color(
-        self,
-        value: int,
-        max_value: int = 100,
-    ) -> tuple[int, int, int]:
-        """Retain the public percentage-color helper."""
-        return self._renderer.percent_color(value, max_value)

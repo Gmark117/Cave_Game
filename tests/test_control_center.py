@@ -4,7 +4,6 @@ from unittest.mock import Mock
 
 from ui.control_center.controller import ControlHitMap
 from ui.control_center.facade import ControlCenter
-from asset_config.rendering import Colors
 
 
 class ControlCenterTests(unittest.TestCase):
@@ -19,17 +18,6 @@ class ControlCenterTests(unittest.TestCase):
         self.center._renderer = Mock()
         self.center._renderer.render.return_value = ControlHitMap(
             heatmap_toggle=(1, 2, 3, 4),
-        )
-        self.center._renderer.percent_color.side_effect = (
-            lambda value, maximum=100: (
-                Colors.RED.value
-                if value < maximum * 0.2
-                else (
-                    Colors.YELLOW.value
-                    if value < maximum * 0.8
-                    else Colors.GREEN.value
-                )
-            )
         )
         self.center._hit_map = ControlHitMap()
         self.center._num_drones = 0
@@ -97,21 +85,6 @@ class ControlCenterTests(unittest.TestCase):
             self.center._hit_map,
         )
         self.assertEqual(action, ("drone_path", 0))
-
-    def test_percentage_color_public_helper_is_preserved(self) -> None:
-        self.assertEqual(
-            self.center.percent_color(10),
-            Colors.RED.value,
-        )
-        self.assertEqual(
-            self.center.percent_color(50),
-            Colors.YELLOW.value,
-        )
-        self.assertEqual(
-            self.center.percent_color(90),
-            Colors.GREEN.value,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,7 @@ they protect.
 | Menu facade and settings conversion | `test_menu.py` | Unit/file integration | The `Game`-facing API, mission start, default seed ownership, settings conversion, and simulation INI round trips remain stable. |
 | Menu controller | `test_menu_controller.py` | Unit/state-machine | Navigation, named actions, selector/slider bounds, and top-row/numpad seed entry are independent from rendering. |
 | Menu rendering | `test_menu_renderer.py` | Surface/interaction | Background and row composition are renderer-owned and consume typed menu rows. |
-| Menu settings repository | `test_menu_settings_repository.py` | File integration | Current-format round trips, legacy import, new-file precedence, untouched legacy files, and section-level malformed-value fallback are protected. |
+| Menu settings repository | `test_menu_settings_repository.py` | File integration | Current-format round trips, default/local precedence, missing-file behavior, and section-level malformed-value fallback are protected. |
 | Menu audio | `test_menu_audio_service.py` | Unit/service | Mixer initialization, volume, music, and button-sound behavior are isolated behind mocks. |
 | Game event flags | `test_game.py` | Unit | Keyboard-to-flag mapping is independent from window creation. |
 | Map-generation helpers | `test_mapgen_helpers.py` | Unit/resource | Brush application, cleanup primitives, seeded noise, process monitoring, and shared-memory helpers are isolated. |

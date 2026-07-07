@@ -165,7 +165,7 @@ flowchart TD
 Important types and arguments:
 
 - `TitleItem`, `ButtonItem`, `SelectorItem`, `TextInputItem`, `SliderItem`
-  - typed definitions replace the former optional-field `MenuItem`.
+  - typed definitions for menu rows.
 - `MenuController`
   - owns active screen, selected row, navigation, named actions, and value
     changes. Both top-row and numpad digits enter seed values.
@@ -173,23 +173,18 @@ Important types and arguments:
   - owns menu backgrounds, fonts, layout, arrows, sliders, and loading-screen
     drawing.
 - `MenuSettingsRepository`
-  - writes ignored local settings, reads committed defaults, and imports the
-    legacy `symSettings.ini` only when no current-format file is present.
+  - writes ignored local settings and reads committed defaults.
 - `MenuAudioService`
   - owns mixer initialization, music transitions, volume, and button sounds.
 - `SimulationConfig`
   - immutable root containing `MissionConfig`, `SlamConfig`, `SharingConfig`,
     `FrontierConfig`, and `RenderingConfig`.
-- `SimSettings`
-  - compatibility constructor for older flat callers; runtime code consumes
-    nested configuration sections directly.
 
 Libraries used here:
 
 - `pygame` and `pygame.mixer`: rendering, input, fonts, audio.
-- `configparser`: reads committed `GameConfig/*.default.ini` files, writes
-  ignored `GameConfig/*.local.ini` files, and can import the legacy
-  `GameConfig/symSettings.ini`.
+- `configparser`: reads committed `GameConfig/*.default.ini` files and writes
+  ignored `GameConfig/*.local.ini` files.
 - `pathlib.Path` and `os`: asset and config paths.
 
 ## 4. Cave Generation Flow
@@ -555,7 +550,7 @@ Important sensing types:
   - casts `num_rays` across the field of view.
 
 - `RayHit`
-  - dataclass fields: `end`, `hit`, `distance`, `angle_deg`.
+  - dataclass fields: `end`, `hit`, `distance`, `angle_deg`, `points`.
 
 - `SlamMap.__init__(map_h, map_w, max_points=6000) -> None`
   - privately allocates occupancy, confidence, point-cloud, lock, and version
@@ -969,17 +964,15 @@ flowchart LR
 - `ui/menu/controller.py`: navigation, input transitions, selection, and named
   action dispatch.
 - `ui/menu/renderer.py`: Pygame resources and all menu/loading-screen drawing.
-- `ui/menu/settings_repository.py`: audio persistence, current simulation-format
-  serialization, and legacy simulation-format import.
+- `ui/menu/settings_repository.py`: audio persistence and current
+  simulation-format serialization.
 - `ui/menu/audio_service.py`: mixer resources and audio preference application.
 
-### `config/simulation_config.py` and `config/sim_settings.py`
+### `config/simulation_config.py`
 
 - `SimulationConfig` is the immutable validated runtime model passed from
   `Menu` to `MapGenerator` and `MissionControl`.
 - Nested sections own mission, SLAM, sharing, frontier, and rendering values.
-- `SimSettings` adapts the former flat constructor for compatibility tests and
-  external callers; production consumers use nested sections.
 
 ### `generation/map_generator.py`
 
@@ -1273,8 +1266,7 @@ flowchart LR
     `set_overlay_visibility(...)`.
   - Detailed movement, sensing, terrain, SLAM, and rendering work is accessed
     through its owned collaborators rather than mirrored wrappers.
-  - Keeps the legacy constructor signature for factory compatibility, but only
-    extracts the narrow mission callbacks needed by movement and sensing.
+  - Receives the mission collaborators needed by movement and sensing.
 
 ### `agents/rover.py`
 
@@ -1323,7 +1315,7 @@ flowchart LR
 - Libraries: `dataclasses.dataclass`, `typing`, `math`.
 - Internal import: `wall_hit`.
 - Classes:
-  - `RayHit(end, hit, distance, angle_deg)`
+  - `RayHit(end, hit, distance, angle_deg, points)`
   - `VisionSensor(map_matrix, fov_deg=60.0, num_rays=60, step=2)`
 - Methods:
   - `cast_cone(origin, heading_deg)`

@@ -74,21 +74,6 @@ class Menu:
         )
         self.show_menu = False
 
-    @property
-    def current_menu(self) -> List[MenuRow]:
-        """Current screen rows; kept for tests and legacy callers."""
-        return self.controller.current_items
-
-    @property
-    def current_index(self) -> int:
-        """Current selected row index."""
-        return self.controller.current_index
-
-    @current_index.setter
-    def current_index(self, value: int) -> None:
-        """Set the selected row index."""
-        self.controller.current_index = value
-
     def create_main_menu(self) -> None:
         """Create typed definitions for the main menu."""
         self.main: List[MenuRow] = [
@@ -227,8 +212,8 @@ class Menu:
     def _draw(self) -> None:
         """Draw the current menu screen."""
         self.renderer.draw(
-            self.current_menu,
-            self.current_index,
+            self.controller.current_items,
+            self.controller.current_index,
             self.controller.key_hints(),
         )
 
@@ -333,7 +318,7 @@ class Menu:
         self.settings_repository.save_simulation(self.config)
 
     def load_simulation_settings(self) -> None:
-        """Load typed configuration from the current or legacy file."""
+        """Load typed configuration from the current settings files."""
         mission_item = cast(SelectorItem[str], self.simulation[1])
         map_item = cast(SelectorItem[str], self.simulation[2])
         seed_item = cast(TextInputItem, self.simulation[3])

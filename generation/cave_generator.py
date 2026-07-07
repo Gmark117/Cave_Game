@@ -38,7 +38,7 @@ def build_worm_starts(
     rng: np.random.Generator,
     count: int = MapGen.DEFAULT_NUM_PROCESSES,
 ) -> tuple[list[int], list[int]]:
-    """Build deterministic worm starts, preserving the legacy anchor layout."""
+    """Build deterministic worm starts around stable cave anchors."""
 
     anchor_x = [
         width / 4,

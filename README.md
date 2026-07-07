@@ -200,8 +200,6 @@ The project keeps its runtime settings and visual assets in predictable location
   store committed defaults.
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
   user changes and are ignored by Git.
-- `GameConfig/symSettings.ini` is the untouched legacy fallback used only when
-  no current-format default or local simulation file is present.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
 - `Assets/Map/` contains cave images generated at runtime and ignored by Git.
 - `asset_config/` provides typed constants and enums so gameplay values, colors, asset paths, and map-generation parameters stay consistent across modules.
@@ -224,7 +222,6 @@ Simulation settings available in-game:
 - Cave size: `Small`, `Medium`, `Large`
 - Seed: custom numeric seed or the default for the selected cave size
 - Drones: from 3 to 8
-- Demo Cave: `Yes` or `No`
 
 ## Project Status
 
@@ -254,4 +251,3 @@ python -m pip install --force-reinstall opencv-python
 
 - This repository is under active development.
 - Some modules contain extension points for future mission logic.
-- Historical planning docs live in `docs/archive/`; current architecture notes live in this README, `CODEFLOW.md`, and `TESTING.md`.

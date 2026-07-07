@@ -1,4 +1,4 @@
-"""INI persistence and legacy migration for menu configuration."""
+"""INI persistence for menu configuration."""
 
 from __future__ import annotations
 
@@ -48,11 +48,6 @@ class MenuSettingsRepository:
         return self.game_dir / "GameConfig" / "options.default.ini"
 
     @property
-    def legacy_options_path(self) -> Path:
-        """Former committed audio settings path kept for migration."""
-        return self.game_dir / "GameConfig" / "options.ini"
-
-    @property
     def simulation_path(self) -> Path:
         """Ignored per-user simulation settings written at runtime."""
         return self.game_dir / "GameConfig" / "simulation.local.ini"
@@ -62,23 +57,12 @@ class MenuSettingsRepository:
         """Committed default simulation settings used on first run."""
         return self.game_dir / "GameConfig" / "simulation.default.ini"
 
-    @property
-    def legacy_current_simulation_path(self) -> Path:
-        """Former current simulation path kept for migration."""
-        return self.game_dir / "GameConfig" / "simulation.ini"
-
-    @property
-    def legacy_simulation_path(self) -> Path:
-        """Original legacy simulation settings path."""
-        return self.game_dir / "GameConfig" / "symSettings.ini"
-
     def load_audio(self) -> AudioSettings:
-        """Load audio settings with defaults, legacy, then local precedence."""
+        """Load audio settings with default, then local precedence."""
         config = configparser.ConfigParser()
         config.read(
             [
                 self.options_default_path,
-                self.legacy_options_path,
                 self.options_path,
             ]
         )
@@ -104,24 +88,16 @@ class MenuSettingsRepository:
         self,
         defaults: SimulationConfig,
     ) -> Optional[SimulationConfig]:
-        """Load the new format, falling back to the legacy file if absent."""
+        """Load sectioned simulation settings with local precedence."""
         for current_path in (
             self.simulation_path,
-            self.legacy_current_simulation_path,
             self.simulation_default_path,
         ):
-            # Read local settings first, then legacy migration paths, then the
-            # committed defaults. Invalid sections fall back per section below.
             if not current_path.exists():
                 continue
             config = configparser.ConfigParser()
             config.read(current_path)
             return self._load_current(config, defaults)
-
-        if self.legacy_simulation_path.exists():
-            config = configparser.ConfigParser()
-            config.read(self.legacy_simulation_path)
-            return self._load_legacy(config, defaults)
 
         return None
 
@@ -177,7 +153,7 @@ class MenuSettingsRepository:
         config: configparser.ConfigParser,
         defaults: SimulationConfig,
     ) -> SimulationConfig:
-        """Read the sectioned INI format introduced by the cleanup."""
+        """Read the sectioned INI format."""
         return SimulationConfig(
             mission_config=self._section_or_default(
                 lambda: self._read_mission(
@@ -220,143 +196,6 @@ class MenuSettingsRepository:
                 ),
                 defaults.rendering,
             ),
-        )
-
-    def _load_legacy(
-        self,
-        config: configparser.ConfigParser,
-        defaults: SimulationConfig,
-    ) -> SimulationConfig:
-        """Read the older ``symSettings``/``SLAM`` format if present."""
-        mission_section = (
-            config["symSettings"] if config.has_section("symSettings") else {}
-        )
-        slam_section = config["SLAM"] if config.has_section("SLAM") else {}
-        mission = self._section_or_default(
-            lambda: MissionConfig(
-                objective=self._objective_index(
-                    str(
-                        mission_section.get(
-                            "Mode",
-                            self._objective_name(
-                                defaults.mission_config.objective
-                            ),
-                        )
-                    ),
-                    defaults.mission_config.objective,
-                ),
-                map_dim=self._map_dimension(
-                    str(
-                        mission_section.get(
-                            "Map_dimension",
-                            defaults.mission_config.map_dim,
-                        )
-                    ),
-                    defaults.mission_config.map_dim,
-                ),
-                seed=int(
-                    mission_section.get(
-                        "Seed",
-                        defaults.mission_config.seed,
-                    )
-                ),
-                num_drones=int(
-                    mission_section.get(
-                        "Drones",
-                        defaults.mission_config.num_drones,
-                    )
-                ),
-            ),
-            defaults.mission_config,
-        )
-        slam = self._section_or_default(
-            lambda: SlamConfig(
-                scan_interval=float(
-                    slam_section.get(
-                        "scan_interval",
-                        defaults.slam.scan_interval,
-                    )
-                ),
-                scan_rays=int(
-                    slam_section.get(
-                        "scan_rays",
-                        defaults.slam.scan_rays,
-                    )
-                ),
-                point_cloud_max_points=int(
-                    slam_section.get(
-                        "point_cloud_max_points",
-                        defaults.slam.point_cloud_max_points,
-                    )
-                ),
-            ),
-            defaults.slam,
-        )
-        sharing = self._section_or_default(
-            lambda: SharingConfig(
-                drone_interval=defaults.sharing.drone_interval,
-                pair_cooldown=defaults.sharing.pair_cooldown,
-                rover_interval=float(
-                    slam_section.get(
-                        "rover_share_interval",
-                        defaults.sharing.rover_interval,
-                    )
-                ),
-                compare_stride=defaults.sharing.compare_stride,
-                min_new_info_ratio=defaults.sharing.min_new_info_ratio,
-                min_overlap_diff_ratio=(
-                    defaults.sharing.min_overlap_diff_ratio
-                ),
-                min_roughness_delta=defaults.sharing.min_roughness_delta,
-            ),
-            defaults.sharing,
-        )
-        frontier = self._section_or_default(
-            lambda: FrontierConfig(
-                stride=int(
-                    slam_section.get(
-                        "frontier_stride",
-                        defaults.frontier.stride,
-                    )
-                ),
-                confidence_threshold=float(
-                    slam_section.get(
-                        "frontier_confidence_threshold",
-                        defaults.frontier.confidence_threshold,
-                    )
-                ),
-                rebuild_cooldown=float(
-                    slam_section.get(
-                        "frontier_rebuild_cooldown",
-                        defaults.frontier.rebuild_cooldown,
-                    )
-                ),
-            ),
-            defaults.frontier,
-        )
-        rendering = self._section_or_default(
-            lambda: RenderingConfig(
-                point_tail=int(
-                    slam_section.get(
-                        "render_point_tail",
-                        defaults.rendering.point_tail,
-                    )
-                ),
-                refresh_interval=float(
-                    slam_section.get(
-                        "render_interval",
-                        defaults.rendering.refresh_interval,
-                    )
-                ),
-            ),
-            defaults.rendering,
-        )
-        return SimulationConfig(
-            mission_config=mission,
-            slam=slam,
-            sharing=sharing,
-            frontier=frontier,
-            rendering=rendering,
         )
 
     def _read_mission(

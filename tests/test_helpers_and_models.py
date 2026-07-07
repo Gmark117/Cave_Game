@@ -2,7 +2,6 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from config.sim_settings import SimSettings
 from config.simulation_config import SimulationConfig, SlamConfig
 from mapping.poi import POI
 from asset_config.gameplay import GameOptions
@@ -29,23 +28,6 @@ class HelperAndModelTests(unittest.TestCase):
 
         self.assertTrue(wall_hit(cave, (1, 0)))
         self.assertFalse(wall_hit(cave, (0, 1)))
-
-    def test_sim_settings_preserve_explicit_runtime_values(self) -> None:
-        settings = SimSettings(
-            mission=1,
-            map_dim="LARGE",
-            seed=42,
-            num_drones=6,
-            slam_scan_rays=24,
-            frontier_stride=2,
-        )
-
-        self.assertEqual(settings.mission, 1)
-        self.assertEqual(settings.map_dim, "LARGE")
-        self.assertEqual(settings.seed, 42)
-        self.assertEqual(settings.num_drones, 6)
-        self.assertEqual(settings.slam_scan_rays, 24)
-        self.assertEqual(settings.frontier_stride, 2)
 
     def test_nested_simulation_config_is_immutable_and_validated(self) -> None:
         settings = SimulationConfig(slam=SlamConfig(scan_rays=24))

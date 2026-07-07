@@ -1,6 +1,5 @@
 import unittest
 import threading
-from unittest.mock import patch
 
 import numpy as np
 
@@ -37,7 +36,15 @@ class SlamMapTests(unittest.TestCase):
 
         changed = slam.update_from_rays(
             (0, 2),
-            [RayHit(end=(4, 2), hit=True, distance=4.0, angle_deg=90.0)],
+            [
+                RayHit(
+                    end=(4, 2),
+                    hit=True,
+                    distance=4.0,
+                    angle_deg=90.0,
+                    points=((0, 2), (1, 2), (2, 2), (3, 2), (4, 2)),
+                )
+            ],
         )
         snapshot = slam.snapshot()
 
@@ -48,7 +55,7 @@ class SlamMapTests(unittest.TestCase):
         self.assertGreater(float(snapshot.confidence[2, 4]), 0.0)
         self.assertIn((4, 2), snapshot.point_cloud)
 
-    def test_ray_hit_reuses_supplied_points(self) -> None:
+    def test_ray_hit_uses_supplied_points(self) -> None:
         slam = SlamMap(5, 5)
         ray = RayHit(
             end=(4, 2),
@@ -58,12 +65,7 @@ class SlamMapTests(unittest.TestCase):
             points=((0, 2), (1, 2), (2, 2), (3, 2), (4, 2)),
         )
 
-        with patch.object(
-            SlamMap,
-            "_line_points",
-            side_effect=AssertionError("line points should be reused"),
-        ):
-            changed = slam.update_from_rays((0, 2), [ray])
+        changed = slam.update_from_rays((0, 2), [ray])
 
         self.assertTrue(changed)
         snapshot = slam.snapshot()
@@ -166,6 +168,16 @@ class SlamMapTests(unittest.TestCase):
             hit=True,
             distance=7.0,
             angle_deg=90.0,
+            points=(
+                (0, 4),
+                (1, 4),
+                (2, 4),
+                (3, 4),
+                (4, 4),
+                (5, 4),
+                (6, 4),
+                (7, 4),
+            ),
         )
 
         def update() -> None:

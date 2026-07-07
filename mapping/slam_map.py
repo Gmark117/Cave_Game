@@ -8,7 +8,7 @@ import threading
 from typing import Deque, Iterable, Optional, Tuple
 
 import numpy as np
-from mapping.ray_geometry import bresenham_line_points
+from mapping.vision_sensor import RayHit
 
 UNKNOWN = -1
 FREE = 0
@@ -86,19 +86,15 @@ class SlamMap:
     def update_from_rays(
         self,
         origin: Tuple[float, float],
-        ray_hits: Iterable[object],
+        ray_hits: Iterable[RayHit],
     ) -> bool:
         """Update occupancy and point state from rays, returning whether it changed."""
-        ox = int(round(origin[0]))
-        oy = int(round(origin[1]))
+        _ = origin
 
         with self._lock:
             updated = False
             for hit in ray_hits:
-                end = getattr(hit, "end", None)
-                if end is None:
-                    continue
-                ex, ey = int(end[0]), int(end[1])
+                ex, ey = int(hit.end[0]), int(hit.end[1])
                 if (
                     ex < 0
                     or ey < 0
@@ -107,26 +103,17 @@ class SlamMap:
                 ):
                     continue
 
-                points = list(
-                    getattr(hit, "points", None)
-                    or self._line_points(ox, oy, ex, ey)
-                )
+                points = list(hit.points)
                 if not points:
                     continue
 
-                distance = float(
-                    getattr(
-                        hit,
-                        "distance",
-                        math.dist((ox, oy), (ex, ey)),
-                    )
-                )
+                distance = float(hit.distance)
                 base_confidence = max(
                     0.15,
                     1.0 - (distance / self.max_range),
                 )
 
-                if getattr(hit, "hit", False):
+                if hit.hit:
                     updated |= self._mark_points(
                         points[:-1],
                         FREE,
@@ -244,8 +231,3 @@ class SlamMap:
             old = self._point_cloud.popleft()
             self._point_set.discard(old)
         return True
-
-    @staticmethod
-    def _line_points(x0: int, y0: int, x1: int, y1: int) -> list[Point]:
-        """Return integer points along a line using Bresenham's algorithm."""
-        return bresenham_line_points(x0, y0, x1, y1)

@@ -1,6 +1,5 @@
-"""Simulation configuration models and compatibility adapters."""
+"""Simulation configuration models."""
 
-from config.sim_settings import SimSettings
 from config.simulation_config import (
     FrontierConfig,
     MissionConfig,
@@ -15,7 +14,6 @@ __all__ = [
     "MissionConfig",
     "RenderingConfig",
     "SharingConfig",
-    "SimSettings",
     "SimulationConfig",
     "SlamConfig",
 ]
