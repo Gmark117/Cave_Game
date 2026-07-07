@@ -86,7 +86,7 @@ class ControlCenter:
         debug_lines: Optional[Iterable[str]] = None,
         is_paused: bool = False,
         music_enabled: bool = True,
-        show_full_map: bool = True,
+        show_full_map: bool = False,
     ) -> None:
         """Build one detached frame model, render it, and retain its hit map."""
         self._num_drones = len(drone_statuses)

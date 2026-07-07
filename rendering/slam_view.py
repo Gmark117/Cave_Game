@@ -80,6 +80,21 @@ class SlamViewService:
 
         dependencies.get_window().blit(dependencies.slam_renderer.surface, (0, 0))
 
+    def draw_static_background(self) -> bool:
+        """Draw the full cave map as an opaque pre-dimmed background."""
+        dependencies = self.dependencies
+        if not getattr(dependencies.presentation, "show_full_map", False):
+            return False
+
+        underlay = dependencies.slam_renderer.full_map_underlay(
+            dependencies.terrain_knowledge.floor_mask,
+        )
+        if underlay is None:
+            return False
+
+        dependencies.get_window().blit(underlay, (0, 0))
+        return True
+
     def _render_selected_drone(
         self, selected_id: int, h: int, w: int, render_tail: int
     ) -> None:
@@ -111,7 +126,6 @@ class SlamViewService:
                 draw_points=True,
                 roughness=terrain.roughness,
                 roughness_conf=terrain.confidence,
-                full_map_floor_mask=self._full_map_floor_mask(),
             )
         else:
             dependencies.slam_renderer.render(
@@ -119,7 +133,6 @@ class SlamViewService:
                 padded_conf,
                 points,
                 draw_points=False,
-                full_map_floor_mask=self._full_map_floor_mask(),
             )
         self.rendered_versions[selected_id] = slam.version
 
@@ -161,7 +174,6 @@ class SlamViewService:
                 draw_points=True,
                 roughness=terrain.roughness,
                 roughness_conf=terrain.confidence,
-                full_map_floor_mask=self._full_map_floor_mask(),
             )
         else:
             dependencies.slam_renderer.render(
@@ -169,7 +181,6 @@ class SlamViewService:
                 combined_conf,
                 combined_points,
                 draw_points=False,
-                full_map_floor_mask=self._full_map_floor_mask(),
             )
 
         for drone_id, slam in enumerate(snapshots):
@@ -194,13 +205,3 @@ class SlamViewService:
         """Compare a drone SLAM version with the last rendered version."""
         rendered_version = self.rendered_versions.get(drone_id, -1)
         return slam_map.has_changed_since(rendered_version)
-
-    def _full_map_floor_mask(self) -> np.ndarray | None:
-        """Return the cave floor mask when the full-map underlay is enabled."""
-        if not getattr(
-            self.dependencies.presentation,
-            "show_full_map",
-            True,
-        ):
-            return None
-        return self.dependencies.terrain_knowledge.floor_mask

@@ -38,24 +38,35 @@ class SlamRendererTests(unittest.TestCase):
         self.assertEqual(surface.get_at((1, 0)).a, 255)
         self.assertGreater(surface.get_at((1, 0)).r, surface.get_at((1, 0)).g)
 
-    def test_full_map_underlay_renders_below_discovered_cells(self) -> None:
+    def test_full_map_underlay_is_pre_dimmed_and_cached(self) -> None:
         renderer = SlamRenderer(3, 1)
-        occupancy = np.array([[UNKNOWN, UNKNOWN, FREE]], dtype=np.int8)
-        confidence = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
         floor_mask = np.array([[True, False, True]])
 
-        surface = renderer.render(
-            occupancy,
-            confidence,
-            draw_points=False,
-            full_map_floor_mask=floor_mask,
+        surface = renderer.full_map_underlay(floor_mask)
+        cached = renderer.full_map_underlay(floor_mask)
+
+        self.assertIs(surface, cached)
+        self.assertEqual(
+            surface.get_at((0, 0))[:3],
+            (FULL_MAP_UNDERLAY_ALPHA,) * 3,
+        )
+        self.assertEqual(surface.get_at((1, 0))[:3], (0, 0, 0))
+        self.assertEqual(
+            surface.get_at((2, 0))[:3],
+            (FULL_MAP_UNDERLAY_ALPHA,) * 3,
         )
 
-        self.assertEqual(surface.get_at((0, 0))[:3], (255, 255, 255))
-        self.assertEqual(surface.get_at((0, 0)).a, FULL_MAP_UNDERLAY_ALPHA)
-        self.assertEqual(surface.get_at((1, 0))[:3], (0, 0, 0))
-        self.assertEqual(surface.get_at((1, 0)).a, FULL_MAP_UNDERLAY_ALPHA)
-        self.assertEqual(surface.get_at((2, 0))[:3], (255, 255, 255))
+    def test_full_map_underlay_does_not_make_slam_surface_opaque(self) -> None:
+        renderer = SlamRenderer(3, 1)
+        floor_mask = np.array([[True, False, True]])
+        occupancy = np.array([[UNKNOWN, UNKNOWN, FREE]], dtype=np.int8)
+        confidence = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
+
+        renderer.full_map_underlay(floor_mask)
+        surface = renderer.render(occupancy, confidence, draw_points=False)
+
+        self.assertEqual(surface.get_at((0, 0)).a, 0)
+        self.assertEqual(surface.get_at((1, 0)).a, 0)
         self.assertEqual(surface.get_at((2, 0)).a, 255)
 
 

@@ -63,6 +63,10 @@ class SlamRendererLike(Protocol):
         """Render into ``surface`` using occupancy or terrain arrays."""
         ...
 
+    def full_map_underlay(self, floor_mask: np.ndarray) -> Any:
+        """Return the cached full-cave underlay surface."""
+        ...
+
 
 @dataclass
 class TerrainFusionDependencies:

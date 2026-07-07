@@ -59,11 +59,14 @@ class SlamViewServiceTests(unittest.TestCase):
                 terrain_heatmap_dirty=True,
                 selected_drone_heatmap_id=None,
                 show_terrain_heatmap=False,
-                show_full_map=True,
+                show_full_map=False,
             ),
             slam_renderer=SimpleNamespace(
                 surface=pygame.Surface((3, 3), pygame.SRCALPHA),
                 render=Mock(),
+                full_map_underlay=Mock(
+                    return_value=pygame.Surface((3, 3)),
+                ),
             ),
             game=SimpleNamespace(
                 window=pygame.Surface((3, 3), pygame.SRCALPHA),
@@ -101,27 +104,48 @@ class SlamViewServiceTests(unittest.TestCase):
         service.refresh()
 
         args = control.slam_renderer.render.call_args.args
-        kwargs = control.slam_renderer.render.call_args.kwargs
         self.assertEqual(int(args[0][1, 1]), 1)
         self.assertAlmostEqual(float(args[1][1, 1]), 0.9)
-        np.testing.assert_array_equal(
-            kwargs["full_map_floor_mask"],
+        self.assertEqual(service.dirty_map_count(), 0)
+
+    def test_draw_blits_full_map_underlay_before_slam_surface(self) -> None:
+        control = self.make_control()
+        control.presentation.show_full_map = True
+        drone = make_drone()
+        control.drones = [drone]
+        control.game.window = SimpleNamespace(blit=Mock())
+        service = SlamViewService(control.dependencies)
+        service.refresh = Mock()
+
+        service.draw_static_background()
+        service.draw()
+
+        control.slam_renderer.full_map_underlay.assert_called_once_with(
             control.terrain_knowledge.floor_mask,
         )
-        self.assertEqual(service.dirty_map_count(), 0)
+        self.assertEqual(control.game.window.blit.call_count, 2)
+        self.assertIs(
+            control.game.window.blit.call_args_list[0].args[0],
+            control.slam_renderer.full_map_underlay.return_value,
+        )
+        self.assertIs(
+            control.game.window.blit.call_args_list[1].args[0],
+            control.slam_renderer.surface,
+        )
 
     def test_full_map_underlay_can_be_disabled(self) -> None:
         control = self.make_control()
         control.presentation.show_full_map = False
         control.drones = [make_drone()]
+        control.game.window = SimpleNamespace(blit=Mock())
 
-        SlamViewService(control.dependencies).refresh()
+        drew_background = SlamViewService(
+            control.dependencies,
+        ).draw_static_background()
 
-        self.assertIsNone(
-            control.slam_renderer.render.call_args.kwargs[
-                "full_map_floor_mask"
-            ]
-        )
+        self.assertFalse(drew_background)
+        control.slam_renderer.full_map_underlay.assert_not_called()
+        control.game.window.blit.assert_not_called()
 
     def test_selected_heatmap_uses_drone_local_terrain(self) -> None:
         control = self.make_control()
@@ -148,6 +172,7 @@ class SlamViewServiceTests(unittest.TestCase):
         control = self.make_control()
         drone = make_drone()
         control.drones = [drone]
+        control.presentation.show_full_map = False
         control.game.window = SimpleNamespace(blit=Mock())
         service = SlamViewService(control.dependencies)
         service.refresh = Mock()
@@ -162,6 +187,7 @@ class SlamViewServiceTests(unittest.TestCase):
 
     def test_draw_throttles_dirty_surface_rebuilds_but_keeps_blitting(self) -> None:
         control = self.make_control()
+        control.presentation.show_full_map = False
         control.settings = replace(
             control.settings,
             rendering=replace(

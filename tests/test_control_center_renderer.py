@@ -76,15 +76,15 @@ class ControlCenterRendererTests(unittest.TestCase):
         self.assertIn("pause_button.png", asset_names)
         self.assertIn("music_ON_button.png", asset_names)
         self.assertIn("exit_button.png", asset_names)
-        self.assertIn("map_ON_button.png", asset_names)
+        self.assertIn("map_OFF_button.png", asset_names)
         self.assertIn("path_ON_button.png", asset_names)
         self.assertIn("vision_ON_button.png", asset_names)
         self.assertIn("selected_OFF_button.png", asset_names)
         self.assertIn("lidar_view_OFF_button.png", asset_names)
-        self.assertNotIn("map_OFF_button.png", asset_names)
+        self.assertNotIn("map_ON_button.png", asset_names)
         self.assertFalse(hasattr(renderer, "control_center"))
 
-    def test_full_map_toggle_uses_off_asset_when_disabled(self) -> None:
+    def test_full_map_toggle_uses_on_asset_when_enabled(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
         with patch.object(
@@ -108,13 +108,13 @@ class ControlCenterRendererTests(unittest.TestCase):
                     show_terrain_heatmap=False,
                     selected_drone_heatmap_id=None,
                     debug_lines=(),
-                    show_full_map=False,
+                    show_full_map=True,
                 )
             )
 
         asset_names = [call.args[1] for call in draw_button.call_args_list]
-        self.assertIn("map_OFF_button.png", asset_names)
-        self.assertNotIn("map_ON_button.png", asset_names)
+        self.assertIn("map_ON_button.png", asset_names)
+        self.assertNotIn("map_OFF_button.png", asset_names)
 
     def test_all_tabs_render_from_frame_data_without_facade_callbacks(
         self,

@@ -89,7 +89,7 @@ class ControlCenterViewModel:
         debug_lines: Iterable[str],
         is_paused: bool = False,
         music_enabled: bool = True,
-        show_full_map: bool = True,
+        show_full_map: bool = False,
     ) -> None:
         """Copy mutable mission values into immutable display values."""
         object.__setattr__(self, "elapsed_time", str(elapsed_time))

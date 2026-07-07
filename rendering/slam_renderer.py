@@ -8,7 +8,7 @@ import pygame
 from mapping.slam_map import OCCUPIED
 
 
-FULL_MAP_UNDERLAY_ALPHA = 102
+FULL_MAP_UNDERLAY_ALPHA = 64
 
 
 class SlamRenderer:
@@ -17,6 +17,8 @@ class SlamRenderer:
     def __init__(self, map_w: int, map_h: int) -> None:
         """Create the transparent surface used for the map overlay."""
         self.surface = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
+        self._full_map_cache_key = None
+        self._full_map_cache = None
 
     def render(
         self,
@@ -26,22 +28,18 @@ class SlamRenderer:
         draw_points: bool = True,
         roughness: np.ndarray | None = None,
         roughness_conf: np.ndarray | None = None,
-        full_map_floor_mask: np.ndarray | None = None,
     ) -> pygame.Surface:
-        """Render SLAM or terrain data, optionally over the full cave map.
+        """Render SLAM occupancy/confidence data or a terrain heatmap.
 
         If `roughness` is provided, the renderer draws a colored heatmap driven by
         the roughness values (0.0..1.0) with alpha modulated by `roughness_conf`.
         Otherwise it falls back to occupancy/confidence-based rendering.
         """
-        # Prefer shape from provided arrays; try occupancy, roughness, then the
-        # full-map underlay when it is the only available layer.
+        # Prefer shape from provided arrays; try occupancy then roughness.
         if occupancy is not None:
             h, w = occupancy.shape
         elif roughness is not None:
             h, w = roughness.shape
-        elif full_map_floor_mask is not None:
-            h, w = np.asarray(full_map_floor_mask).shape
         else:
             # Nothing to render
             self.surface.fill((0, 0, 0, 0))
@@ -49,12 +47,6 @@ class SlamRenderer:
         if w <= 0 or h <= 0:
             self.surface.fill((0, 0, 0, 0))
             return self.surface
-
-        base_layer = self._full_map_underlay(
-            h,
-            w,
-            full_map_floor_mask,
-        )
 
         # If roughness data is provided, render a color heatmap based on roughness
         if roughness is not None and roughness_conf is not None:
@@ -76,11 +68,7 @@ class SlamRenderer:
         else:
             # Occupancy-based rendering (fallback)
             if confidence is None or occupancy is None:
-                if base_layer is None:
-                    self.surface.fill((0, 0, 0, 0))
-                    return self.surface
-                red, green, blue, alpha = base_layer
-                self._write_surface(red, green, blue, alpha)
+                self.surface.fill((0, 0, 0, 0))
                 return self.surface
 
             known_mask = confidence > 0.0
@@ -107,19 +95,10 @@ class SlamRenderer:
             blue[occ_mask] = 40.0
             alpha[occ_mask] = 255.0
 
-        if base_layer is not None:
-            red, green, blue, alpha = self._composite_over_base(
-                base_layer,
-                red,
-                green,
-                blue,
-                alpha,
-            )
-
-        red = np.clip(red, 0.0, 255.0).astype(np.uint8)
-        green = np.clip(green, 0.0, 255.0).astype(np.uint8)
-        blue = np.clip(blue, 0.0, 255.0).astype(np.uint8)
-        alpha = np.clip(alpha, 0.0, 255.0).astype(np.uint8)
+        red = np.clip(np.rint(red), 0.0, 255.0).astype(np.uint8)
+        green = np.clip(np.rint(green), 0.0, 255.0).astype(np.uint8)
+        blue = np.clip(np.rint(blue), 0.0, 255.0).astype(np.uint8)
+        alpha = np.clip(np.rint(alpha), 0.0, 255.0).astype(np.uint8)
 
         self._write_surface(red, green, blue, alpha)
 
@@ -149,70 +128,48 @@ class SlamRenderer:
         del rgb_view
         del alpha_view
 
-    @staticmethod
-    def _full_map_underlay(
-        h: int,
-        w: int,
+    def full_map_underlay(
+        self,
         full_map_floor_mask: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-        """Build a 40% opacity black/white cave-map layer."""
+    ) -> pygame.Surface | None:
+        """Return an opaque pre-dimmed full-cave underlay surface."""
         if full_map_floor_mask is None:
             return None
 
+        w, h = self.surface.get_size()
         floor_source = np.asarray(full_map_floor_mask, dtype=bool)
+        cache_key = (
+            h,
+            w,
+            floor_source.shape,
+            id(full_map_floor_mask),
+            FULL_MAP_UNDERLAY_ALPHA,
+        )
+        if (
+            self._full_map_cache_key == cache_key
+            and self._full_map_cache is not None
+        ):
+            return self._full_map_cache
+
+        surface = pygame.Surface((w, h))
         floor_mask = np.zeros((h, w), dtype=bool)
         copy_h = min(h, floor_source.shape[0])
         copy_w = min(w, floor_source.shape[1])
         if copy_h > 0 and copy_w > 0:
             floor_mask[:copy_h, :copy_w] = floor_source[:copy_h, :copy_w]
 
-        red = np.zeros((h, w), dtype=np.float32)
-        green = np.zeros((h, w), dtype=np.float32)
-        blue = np.zeros((h, w), dtype=np.float32)
-        alpha = np.full(
-            (h, w),
-            float(FULL_MAP_UNDERLAY_ALPHA),
-            dtype=np.float32,
-        )
-        red[floor_mask] = 255.0
-        green[floor_mask] = 255.0
-        blue[floor_mask] = 255.0
-        return red, green, blue, alpha
+        rgb_view = pygame.surfarray.pixels3d(surface)
+        dim_floor = (floor_mask.T * FULL_MAP_UNDERLAY_ALPHA).astype(np.uint8)
+        rgb_view[:, :, 0] = dim_floor
+        rgb_view[:, :, 1] = dim_floor
+        rgb_view[:, :, 2] = dim_floor
+        del rgb_view
 
-    @staticmethod
-    def _composite_over_base(
-        base_layer: tuple[
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-        ],
-        red: np.ndarray,
-        green: np.ndarray,
-        blue: np.ndarray,
-        alpha: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Alpha-composite a discovered layer over the full cave underlay."""
-        base_red, base_green, base_blue, base_alpha = base_layer
-        top_alpha = np.clip(alpha, 0.0, 255.0) / 255.0
-        bottom_alpha = np.clip(base_alpha, 0.0, 255.0) / 255.0
-        out_alpha = top_alpha + bottom_alpha * (1.0 - top_alpha)
+        try:
+            surface = surface.convert()
+        except pygame.error:
+            pass
 
-        red_out = np.zeros_like(red, dtype=np.float32)
-        green_out = np.zeros_like(green, dtype=np.float32)
-        blue_out = np.zeros_like(blue, dtype=np.float32)
-        visible = out_alpha > 0.0
-        bottom_weight = bottom_alpha * (1.0 - top_alpha)
-        red_out[visible] = (
-            red[visible] * top_alpha[visible]
-            + base_red[visible] * bottom_weight[visible]
-        ) / out_alpha[visible]
-        green_out[visible] = (
-            green[visible] * top_alpha[visible]
-            + base_green[visible] * bottom_weight[visible]
-        ) / out_alpha[visible]
-        blue_out[visible] = (
-            blue[visible] * top_alpha[visible]
-            + base_blue[visible] * bottom_weight[visible]
-        ) / out_alpha[visible]
-        return red_out, green_out, blue_out, out_alpha * 255.0
+        self._full_map_cache_key = cache_key
+        self._full_map_cache = surface
+        return self._full_map_cache

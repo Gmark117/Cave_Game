@@ -26,7 +26,13 @@ class MissionRenderer:
         rovers = tuple(dependencies.get_rovers())
         drone_snapshots = tuple(drone.snapshot() for drone in drones)
         window = dependencies.get_window()
-        window.fill(Colors.BLACK.value)
+        draw_static_background = getattr(
+            dependencies.slam_view,
+            "draw_static_background",
+            None,
+        )
+        if draw_static_background is None or not draw_static_background():
+            window.fill(Colors.BLACK.value)
         dependencies.slam_view.draw()
 
         # Layer order: historical paths, translucent vision cones, icons,
@@ -60,5 +66,5 @@ class MissionRenderer:
             debug_lines,
             dependencies.is_paused(),
             dependencies.is_music_enabled(),
-            getattr(dependencies.presentation, "show_full_map", True),
+            getattr(dependencies.presentation, "show_full_map", False),
         )

@@ -28,7 +28,7 @@ class ControlCenterViewModelTests(unittest.TestCase):
         debug_lines.append("later")
 
         self.assertEqual(view.debug_lines, ("line",))
-        self.assertTrue(view.show_full_map)
+        self.assertFalse(view.show_full_map)
         with self.assertRaises(FrozenInstanceError):
             view.active_tab = "system"
 

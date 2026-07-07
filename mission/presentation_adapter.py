@@ -26,7 +26,7 @@ class PresentationAdapter:
         """
         # SLAM map visibility state
         self.show_terrain_heatmap = False
-        self.show_full_map = True
+        self.show_full_map = False
         self.selected_drone_heatmap_id: Optional[int] = None
 
         # SLAM map rendering state
@@ -35,7 +35,7 @@ class PresentationAdapter:
     def reset(self, drone_objects: List[Any]) -> None:
         """Restore the default combined occupancy and agent-overlay state."""
         self.show_terrain_heatmap = False
-        self.show_full_map = True
+        self.show_full_map = False
         self.selected_drone_heatmap_id = None
         self.terrain_heatmap_dirty = True
         for drone in drone_objects:

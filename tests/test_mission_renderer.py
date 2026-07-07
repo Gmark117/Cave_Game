@@ -59,7 +59,7 @@ class MissionRendererTests(unittest.TestCase):
                 SimpleNamespace(
                     show_terrain_heatmap=False,
                     selected_drone_heatmap_id=None,
-                    show_full_map=True,
+                    show_full_map=False,
                 ),
             ),
             is_paused=lambda: getattr(control, "is_paused", False),
@@ -161,6 +161,37 @@ class MissionRendererTests(unittest.TestCase):
         self.assertTrue(control_center_args[5])
         self.assertFalse(control_center_args[6])
         self.assertFalse(control_center_args[7])
+
+    def test_draw_skips_black_clear_when_static_background_draws(self) -> None:
+        events = []
+        slam_view = SimpleNamespace(
+            draw_static_background=lambda: events.append("background") or True,
+            draw=lambda: events.append("slam"),
+        )
+        draw_control_center = Mock(
+            side_effect=lambda *args: events.append("control_center"),
+        )
+        control = SimpleNamespace(
+            game=SimpleNamespace(window=RecordingWindow(events)),
+            slam_view=slam_view,
+            control_center=SimpleNamespace(
+                draw_control_center=draw_control_center,
+            ),
+            drones=[],
+            rovers=[],
+            presentation=SimpleNamespace(
+                show_terrain_heatmap=False,
+                selected_drone_heatmap_id=None,
+                show_full_map=True,
+            ),
+        )
+
+        MissionRenderer(self.make_dependencies(control)).draw()
+
+        self.assertEqual(
+            events,
+            ["background", "slam", "control_center"],
+        )
 
 
 if __name__ == "__main__":
