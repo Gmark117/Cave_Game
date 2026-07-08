@@ -12,6 +12,7 @@ import pygame
 from agents.drone import Drone
 from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
 from mapping.drone_sensor import LIDAR_RANGE_RADIUS_MULTIPLIER
+from mapping.localization import PoseEstimate
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
 
@@ -167,6 +168,48 @@ class DroneSensorTests(unittest.TestCase):
             self.drone.radius * LIDAR_RANGE_RADIUS_MULTIPLIER,
         )
         self.assertLess(sensor.max_range, int(math.hypot(64, 64)))
+
+    def test_sensor_update_uses_localizer_pose_as_slam_origin(self) -> None:
+        class FakeLocalizer:
+            def estimate(self, runtime_snapshot, timestamp):
+                self.runtime_snapshot = runtime_snapshot
+                self.timestamp = timestamp
+                return PoseEstimate(
+                    position=(40, 32),
+                    heading_deg=90.0,
+                    confidence=0.5,
+                    source="fake",
+                    timestamp=timestamp,
+                )
+
+        fake_localizer = FakeLocalizer()
+        self.drone.localizer = fake_localizer
+        recorded = {}
+        original_update = self.drone.slam_map.update_from_rays
+
+        def record_slam_origin(origin, ray_hits):
+            recorded["slam_origin"] = origin
+            return original_update(origin, ray_hits)
+
+        def record_terrain_origin(origin, ray_hits):
+            recorded["terrain_origin"] = origin
+            return []
+
+        self.drone.slam_map.update_from_rays = record_slam_origin
+        self.drone.sensor_controller.roughness_sampler.sample_from_rays = (
+            record_terrain_origin
+        )
+
+        self.drone.update_sensors()
+
+        self.assertEqual(recorded["slam_origin"], (40, 32))
+        self.assertEqual(recorded["terrain_origin"], (40, 32))
+        self.assertEqual(self.drone.snapshot().position, (32, 32))
+        self.assertEqual(
+            self.drone.sensor_controller.latest_pose_estimate.source,
+            "fake",
+        )
+        self.assertEqual(fake_localizer.runtime_snapshot.position, (32, 32))
 
 
 if __name__ == "__main__":

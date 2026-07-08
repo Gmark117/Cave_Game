@@ -46,15 +46,22 @@ class DroneSensorController:
             dependencies.terrain_roughness,
             drone.cave,
         )
+        self.latest_pose_estimate = None
 
     def update(self) -> None:
         """Cast rays and update the drone's SLAM and terrain knowledge."""
         drone = self.drone
         snapshot = drone.snapshot()
-        origin = snapshot.position
+        now = self.dependencies.simulation_time()
+        pose_estimate = drone.localizer.estimate(
+            snapshot,
+            timestamp=now,
+        )
+        self.latest_pose_estimate = pose_estimate
+        origin = pose_estimate.position
         ray_hits = self.vision_sensor.cast_cone(
             origin,
-            snapshot.heading_deg,
+            pose_estimate.heading_deg,
         )
         # The renderer consumes endpoints only; the SLAM map consumes full hit
         # records so it knows whether each ray ended at a wall.
@@ -62,12 +69,13 @@ class DroneSensorController:
 
         drone.slam_map.update_from_rays(origin, ray_hits)
 
-        self.scan_terrain(ray_hits, origin=origin)
+        self.scan_terrain(ray_hits, origin=origin, now=now)
 
     def scan_terrain(
         self,
         ray_hits: Iterable[RayHit],
         origin: tuple[int, int] | None = None,
+        now: float | None = None,
     ) -> None:
         """Sample visible roughness and update local and mission terrain maps."""
         drone = self.drone
@@ -75,7 +83,8 @@ class DroneSensorController:
         if terrain.shape != np.asarray(drone.cave).shape:
             return
 
-        now = self.dependencies.simulation_time()
+        if now is None:
+            now = self.dependencies.simulation_time()
         if (now - self.last_scan_time) < self.scan_interval:
             return
         self.last_scan_time = now

@@ -13,6 +13,10 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from agents.drone import Drone
+from agents.exploration_policy import (
+    ExplorationDecision,
+    ExplorationDecisionKind,
+)
 from asset_config.helpers import next_cell_coords
 from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
 from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
@@ -50,6 +54,16 @@ class MovementControl:
     def wait_simulation_delay(self, duration: float) -> bool:
         self.mission_event.wait(duration)
         return True
+
+
+class FixedDecisionPolicy:
+    def __init__(self, decision: ExplorationDecision) -> None:
+        self.decision = decision
+        self.contexts = []
+
+    def decide(self, context, is_segment_valid):
+        self.contexts.append(context)
+        return self.decision
 
 
 class DroneMovementTests(unittest.TestCase):
@@ -153,6 +167,66 @@ class DroneMovementTests(unittest.TestCase):
         self.assertEqual(controller.frontier_stride, 2)
         self.assertEqual(controller.border_retry_cooldown, 3.0)
 
+    def test_move_executes_policy_step_decision(self) -> None:
+        target = (18, 16)
+        self.control.paths[((16, 16), target)] = [target]
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.STEP,
+                target=target,
+                direction=90,
+                valid_directions=(90,),
+                frontier_targets=((24, 16),),
+            )
+        )
+
+        self.drone.movement_controller.move()
+        snapshot = self.drone.snapshot()
+
+        self.assertEqual(snapshot.position, target)
+        self.assertEqual(snapshot.direction, 90)
+        self.assertEqual(snapshot.frontiers, ((24, 16),))
+        self.assertEqual(
+            self.drone.exploration_policy.contexts[0].pose_estimate.position,
+            (16, 16),
+        )
+
+    def test_move_executes_policy_frontier_decision(self) -> None:
+        target = (24, 16)
+        self.control.paths[((16, 16), target)] = [(16, 16), target]
+        self.drone.runtime_state.merge_frontiers([target])
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.FRONTIER,
+                target=target,
+                frontier_targets=(target,),
+            )
+        )
+
+        self.drone.movement_controller.move()
+
+        self.assertEqual(self.drone.snapshot().position, target)
+        self.assertEqual(self.drone.snapshot().frontiers, ())
+
+    def test_move_executes_policy_homing_decision_and_marks_done(self) -> None:
+        self.drone.runtime_state.move_to((20, 20))
+        self.control.paths[((20, 20), (16, 16))] = [
+            (20, 20),
+            (16, 16),
+        ]
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.HOMING,
+                target=(16, 16),
+            )
+        )
+
+        self.drone.movement_controller.move()
+        snapshot = self.drone.snapshot()
+
+        self.assertEqual(snapshot.position, (16, 16))
+        self.assertTrue(snapshot.done)
+
     def test_find_new_node_keeps_integer_degree_candidates(self) -> None:
         current_position = self.drone.snapshot().position
         calls = []
@@ -163,7 +237,7 @@ class DroneMovementTests(unittest.TestCase):
 
         self.drone.runtime_state.graph_is_valid = graph_is_valid
 
-        with patch("agents.drone_movement.rand.choice", return_value=90):
+        with patch("agents.exploration_policy.rand.choice", return_value=90):
             valid_dirs, valid_targets, target = (
                 self.drone.movement_controller.find_new_node()
             )
@@ -219,7 +293,7 @@ class DroneMovementTests(unittest.TestCase):
         self.drone.runtime_state.graph_is_valid = graph_is_valid
 
         with patch(
-            "agents.drone_movement.rand.choice",
+            "agents.exploration_policy.rand.choice",
             side_effect=[90, 180],
         ):
             valid_dirs, valid_targets, target = (

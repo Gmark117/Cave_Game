@@ -3,10 +3,12 @@
 import random as rand
 from typing import List, Tuple, TYPE_CHECKING
 
+from agents.exploration_policy import FrontierExplorationPolicy
 from mapping.slam_map import SlamMap
 from agents.drone_movement import DroneMovementController
 from agents.drone_runtime_state import DroneRuntimeState, DroneSnapshot
 from mapping.drone_sensor import DroneSensorController
+from mapping.localization import PerfectPoseLocalizer
 from mapping.terrain_knowledge import TerrainKnowledge
 from contracts import (
     DroneMovementDependencies,
@@ -72,6 +74,8 @@ class Drone:
             direction=initial_direction,
             frontier_rebuild_cooldown=frontier_rebuild_cooldown,
         )
+        self.localizer = PerfectPoseLocalizer()
+        self.exploration_policy = FrontierExplorationPolicy()
 
         # SLAM state
         map_h = len(self.cave)

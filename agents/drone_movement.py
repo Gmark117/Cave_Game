@@ -2,13 +2,15 @@
 
 import logging
 import math
-import random as rand
 from typing import Any, List, Tuple
 
 import numpy as np
 
-from mapping.slam_map import FREE
-from asset_config.helpers import next_cell_coords
+from agents.exploration_policy import (
+    ExplorationContext,
+    ExplorationDecision,
+    ExplorationDecisionKind,
+)
 from contracts import DroneMovementDependencies
 
 
@@ -41,32 +43,52 @@ class DroneMovementController:
     def move(self) -> None:
         """Advance the drone's exploration or homing state."""
         drone = self.drone
-        done, returning_home = (
-            drone.runtime_state.evaluate_mission_state()
-        )
+        done, _ = drone.runtime_state.evaluate_mission_state()
         if done:
-            return
-
-        if returning_home:
-            if self.reach_start_point():
-                drone.runtime_state.mark_done()
             return
 
         node_found = False
         while not node_found:
-            try:
-                valid_dirs, valid_targets, chosen_target = self.find_new_node()
-            except AssertionError:
+            decision = self.choose_exploration_action()
+            if decision.kind == ExplorationDecisionKind.EXHAUSTED:
                 self.update_borders()
-                node_found = self.reach_border()
-                if not node_found:
-                    return
-            else:
-                node_found = self.explore(
-                    valid_dirs,
-                    valid_targets,
-                    chosen_target,
+                decision = self.choose_exploration_action()
+
+            node_found = self.execute_exploration_action(decision)
+            if decision.kind != ExplorationDecisionKind.STEP:
+                return
+
+    def choose_exploration_action(self) -> ExplorationDecision:
+        """Ask the exploration policy for the next high-level action."""
+        drone = self.drone
+        snapshot = drone.snapshot()
+        context = self._build_exploration_context(snapshot=snapshot)
+        return drone.exploration_policy.decide(
+            context,
+            drone.runtime_state.graph_is_valid,
+        )
+
+    def execute_exploration_action(
+        self,
+        decision: ExplorationDecision,
+    ) -> bool:
+        """Execute one policy decision by moving or updating runtime state."""
+        if decision.kind == ExplorationDecisionKind.HOMING:
+            if self.reach_start_point():
+                self.drone.runtime_state.mark_done()
+            return True
+
+        if decision.kind == ExplorationDecisionKind.FRONTIER:
+            return self._reach_frontier_targets(
+                decision.frontier_targets or (
+                    (decision.target,) if decision.target is not None else ()
                 )
+            )
+
+        if decision.kind == ExplorationDecisionKind.STEP:
+            return self._execute_step_decision(decision)
+
+        return False
 
     def reach_start_point(self) -> bool:
         """Follow an A* path back to the drone's starting position."""
@@ -91,49 +113,41 @@ class DroneMovementController:
         """
         drone = self.drone
         snapshot = drone.snapshot()
-        current_position = snapshot.position
-        # The exploration model still samples every integer heading. Build the
-        # usable headings directly so validity, direction, and frontier target
-        # stay aligned without a separate blacklist pass.
-        valid_dirs: List[int] = []
-        valid_targets: List[Position] = []
-        for direction in range(360):
-            frontier_target = next_cell_coords(
-                *current_position,
-                drone.radius + 1,
-                direction,
-            )
-            if drone.runtime_state.graph_is_valid(
-                current_position,
-                frontier_target,
-            ):
-                valid_dirs.append(direction)
-                valid_targets.append(frontier_target)
-        assert valid_dirs
-
-        chosen_direction = rand.choice(valid_dirs)
-        target = next_cell_coords(
-            *current_position,
-            drone.step,
-            chosen_direction,
+        context = self._build_exploration_context(
+            snapshot=snapshot,
         )
-        while not drone.runtime_state.graph_is_valid(
-            current_position,
-            target,
+        decision = drone.exploration_policy.choose_next_step(
+            context,
+            drone.runtime_state.graph_is_valid,
+        )
+        if (
+            decision.kind != ExplorationDecisionKind.STEP
+            or decision.target is None
+            or decision.direction is None
         ):
-            rejected_index = valid_dirs.index(chosen_direction)
-            valid_dirs.pop(rejected_index)
-            valid_targets.pop(rejected_index)
-            assert valid_dirs
-            chosen_direction = rand.choice(valid_dirs)
-            target = next_cell_coords(
-                *current_position,
-                drone.step,
-                chosen_direction,
-            )
+            raise AssertionError
 
-        drone.runtime_state.set_direction(chosen_direction)
-        return valid_dirs, valid_targets, target
+        drone.runtime_state.set_direction(decision.direction)
+        return (
+            list(decision.valid_directions),
+            list(decision.frontier_targets),
+            decision.target,
+        )
+
+    def _execute_step_decision(
+        self,
+        decision: ExplorationDecision,
+    ) -> bool:
+        """Execute a policy-selected exploration step."""
+        if decision.target is None or decision.direction is None:
+            return False
+
+        self.drone.runtime_state.set_direction(decision.direction)
+        return self.explore(
+            list(decision.valid_directions),
+            list(decision.frontier_targets),
+            decision.target,
+        )
 
     def explore(
         self,
@@ -162,27 +176,23 @@ class DroneMovementController:
         """Follow an A* path to the nearest viable frontier."""
         drone = self.drone
         snapshot = drone.snapshot()
-        frontiers = sorted(
-            snapshot.frontiers,
-            key=lambda target: self._distance_from(
-                snapshot.position,
-                target,
-            ),
-        )
+        frontiers = list(self._prioritized_frontiers(snapshot))
 
         if not frontiers:
             self.maybe_rebuild_frontiers()
             snapshot = drone.snapshot()
-            frontiers = sorted(
-                snapshot.frontiers,
-                key=lambda target: self._distance_from(
-                    snapshot.position,
-                    target,
-                ),
-            )
+            frontiers = list(self._prioritized_frontiers(snapshot))
             if not frontiers:
                 return False
 
+        return self._reach_frontier_targets(frontiers)
+
+    def _reach_frontier_targets(
+        self,
+        frontiers: tuple[Position, ...] | list[Position],
+    ) -> bool:
+        """Follow an A* path to the first reachable frontier target."""
+        drone = self.drone
         now = self._simulation_time()
         for target in frontiers:
             current_position = drone.snapshot().position
@@ -230,49 +240,17 @@ class DroneMovementController:
         """Extract frontier cells from local SLAM and terrain confidence."""
         drone = self.drone
         slam = drone.slam_map.snapshot(point_limit=0)
-        occupancy = slam.occupancy
-        slam_confidence = slam.confidence
-
-        height, width = occupancy.shape
-        cave = np.asarray(drone.cave)
-        terrain_confidence = drone.terrain_knowledge.snapshot().confidence
-        floor_mask = cave == 0
-
-        # A frontier is a known free floor cell touching at least one still
-        # unknown floor cell. That gives the drone a useful target at the edge
-        # of its current knowledge.
-        known_mask = (
-            (slam_confidence >= confidence_threshold)
-            | (terrain_confidence > 0.0)
+        terrain = drone.terrain_knowledge.snapshot()
+        context = self._build_exploration_context(
+            snapshot=drone.snapshot(),
+            slam_snapshot=slam,
+            terrain_snapshot=terrain,
         )
-        free_known = floor_mask & known_mask & (occupancy == FREE)
-        unknown = floor_mask & (~known_mask)
-
-        neighbor_unknown = np.zeros_like(unknown, dtype=bool)
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                ys_src = slice(max(0, -dy), height - max(0, dy))
-                ys_dst = slice(max(0, dy), height - max(0, -dy))
-                xs_src = slice(max(0, -dx), width - max(0, dx))
-                xs_dst = slice(max(0, dx), width - max(0, -dx))
-                neighbor_unknown[ys_dst, xs_dst] |= unknown[ys_src, xs_src]
-
-        frontier_mask = free_known & neighbor_unknown
-        stride = max(1, int(stride))
-        if stride > 1:
-            sampled = frontier_mask[::stride, ::stride]
-            ys, xs = np.where(sampled)
-            ys = ys * stride
-            xs = xs * stride
-        else:
-            ys, xs = np.where(frontier_mask)
-
-        frontiers = [
-            (int(x), int(y))
-            for y, x in zip(ys, xs)
-        ]
+        frontiers = drone.exploration_policy.extract_frontiers(
+            context,
+            stride=stride,
+            confidence_threshold=confidence_threshold,
+        )
 
         drone.runtime_state.replace_frontiers(frontiers)
         self.border_retry_until = {}
@@ -293,8 +271,11 @@ class DroneMovementController:
 
     def get_distance(self, target: Position) -> float:
         """Return distance to a frontier, deprioritizing already-visible cells."""
-        return self._distance_from(
-            self.drone.snapshot().position,
+        context = self._build_exploration_context(
+            snapshot=self.drone.snapshot(),
+        )
+        return self.drone.exploration_policy.frontier_distance(
+            context,
             target,
         )
 
@@ -308,6 +289,44 @@ class DroneMovementController:
         if distance <= self.drone.radius:
             return float(self.drone.game.width)
         return distance
+
+    def _prioritized_frontiers(
+        self,
+        snapshot: Any,
+    ) -> tuple[Position, ...]:
+        """Return frontiers ordered by the drone's exploration policy."""
+        context = self._build_exploration_context(snapshot=snapshot)
+        return self.drone.exploration_policy.prioritize_frontiers(context)
+
+    def _build_exploration_context(
+        self,
+        *,
+        snapshot: Any,
+        slam_snapshot: Any | None = None,
+        terrain_snapshot: Any | None = None,
+    ) -> ExplorationContext:
+        """Build detached policy inputs around the current pose estimate."""
+        drone = self.drone
+        pose_estimate = drone.localizer.estimate(
+            snapshot,
+            timestamp=self._simulation_time(),
+        )
+        cave = np.asarray(drone.cave)
+        width = int(cave.shape[1]) if cave.ndim == 2 else int(drone.game.width)
+        return ExplorationContext(
+            pose_estimate=pose_estimate,
+            runtime_snapshot=snapshot,
+            cave_map=cave,
+            start_position=drone.start_pos,
+            step=drone.step,
+            radius=drone.radius,
+            map_width=width,
+            frontier_stride=self.frontier_stride,
+            frontier_confidence_threshold=self.frontier_confidence_threshold,
+            battery=snapshot.battery,
+            slam_snapshot=slam_snapshot,
+            terrain_snapshot=terrain_snapshot,
+        )
 
     def _compute_path(
         self,
