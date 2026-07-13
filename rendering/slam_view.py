@@ -64,10 +64,11 @@ class SlamViewService:
         if not dependencies.get_drones():
             return
 
-        view_dirty = (
+        terrain_view_dirty = (
             dependencies.presentation.terrain_heatmap_dirty
-            or self._current_view_is_dirty()
+            and dependencies.presentation.show_terrain_heatmap
         )
+        view_dirty = terrain_view_dirty or self._current_view_is_dirty()
 
         now = time.perf_counter()
         refresh_due = (

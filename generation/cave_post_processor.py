@@ -1,7 +1,5 @@
 """OpenCV post-processing for raw cave maps."""
 
-import logging
-
 import cv2
 import numpy as np
 
@@ -10,9 +8,6 @@ from generation.mapgen_helpers import (
     add_wall_transition_noise,
     remove_hermit_caves,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class CavePostProcessor:
@@ -37,20 +32,7 @@ class CavePostProcessor:
         smoothed = cv2.medianBlur(raw, kernel_dim)
         cleaned = remove_hermit_caves(smoothed)
         stalac = cv2.bitwise_or(raw, cleaned)
-        try:
-            # Noise near wall/floor boundaries keeps caves from looking too
-            # mathematically smooth after filtering.
-            stalac = add_wall_transition_noise(
-                stalac,
-                width,
-                height,
-                seed,
-                worm_inputs,
-            )
-        except (cv2.error, ValueError, OverflowError) as exc:
-            logger.warning(
-                "Wall-transition noise pass skipped due to processing error: %s",
-                exc,
-            )
-            pass
+        _ = add_wall_transition_noise, width, height, seed
+        # Wall-transition noise is disabled while exploration behavior is
+        # re-baselined. The helper remains available for future tuning.
         return cv2.medianBlur(stalac, MapGen.BLUR_KERNEL_FINAL)

@@ -120,6 +120,7 @@ class DroneRuntimeState:
         with self._lock:
             self._explored = True
             self._direction = int(direction)
+            self._heading_deg = float(direction)
             self._direction_history.append(self._direction)
             self._frontiers.extend(
                 (int(position[0]), int(position[1]))
@@ -152,15 +153,16 @@ class DroneRuntimeState:
                 self._frontiers.remove(target)
 
     def evaluate_mission_state(self) -> tuple[bool, bool]:
-        """Atomically return `(done, homing)` and start homing if exhausted."""
+        """Atomically return `(done, homing)` without changing mission phase."""
         with self._lock:
-            if (
-                self._explored
-                and not self._frontiers
-                and not self._done
-            ):
-                self._returning_home = True
             return self._done, self._returning_home
+
+    def start_returning_home(self) -> None:
+        """Latch the drone into homing after exploration is confirmed exhausted."""
+        with self._lock:
+            self._explored = True
+            if not self._done:
+                self._returning_home = True
 
     def mark_done(self) -> None:
         """Mark this drone as fully complete for mission objective checks."""

@@ -158,20 +158,45 @@ class SlamMap:
                 target_confidence = self._confidence[:height, :width]
                 incoming_confidence = source_confidence[:height, :width]
                 higher_confidence = incoming_confidence > target_confidence
-                if np.any(higher_confidence):
-                    target_occupancy = self._occupancy[:height, :width]
-                    incoming_occupancy = source_occupancy[:height, :width]
-                    target_occupancy[higher_confidence] = (
-                        incoming_occupancy[higher_confidence]
+                target_occupancy = self._occupancy[:height, :width]
+                incoming_occupancy = source_occupancy[:height, :width]
+                occupied_ties = (
+                    (incoming_occupancy == OCCUPIED)
+                    & (target_occupancy != OCCUPIED)
+                    & (incoming_confidence >= target_confidence - 1e-4)
+                )
+                replace_cells = higher_confidence | occupied_ties
+                if np.any(replace_cells):
+                    target_occupancy[replace_cells] = (
+                        incoming_occupancy[replace_cells]
                     )
-                    target_confidence[higher_confidence] = (
-                        incoming_confidence[higher_confidence]
+                    target_confidence[replace_cells] = np.maximum(
+                        target_confidence[replace_cells],
+                        incoming_confidence[replace_cells],
                     )
                     updated = True
 
             for point in source.point_cloud:
                 updated |= self._add_point(point)
 
+            if updated:
+                self._version += 1
+            return updated
+
+    def record_collision(
+        self,
+        point: Point,
+        confidence: float = 1.0,
+    ) -> bool:
+        """Record a movement-confirmed obstacle in the local occupancy map."""
+        normalized = (int(point[0]), int(point[1]))
+        with self._lock:
+            updated = self._mark_points(
+                (normalized,),
+                OCCUPIED,
+                min(1.0, max(0.0, float(confidence))),
+            )
+            updated |= self._add_point(normalized)
             if updated:
                 self._version += 1
             return updated
@@ -208,6 +233,20 @@ class SlamMap:
             if confidence > previous_confidence + 1e-4:
                 self._occupancy[y, x] = occupancy_value
                 self._confidence[y, x] = min(1.0, confidence)
+                updated = True
+            elif (
+                occupancy_value == OCCUPIED
+                and self._occupancy[y, x] != OCCUPIED
+                and confidence >= previous_confidence - 1e-4
+            ):
+                # At equal confidence, the collision-safe interpretation wins.
+                # This also lets a direct wall hit repair a saturated false-free
+                # observation left behind by an earlier sparse ray.
+                self._occupancy[y, x] = OCCUPIED
+                self._confidence[y, x] = min(
+                    1.0,
+                    max(previous_confidence, confidence),
+                )
                 updated = True
             elif self._occupancy[y, x] == occupancy_value:
                 boosted = min(

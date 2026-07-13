@@ -78,6 +78,20 @@ class DroneRuntimeStateTests(unittest.TestCase):
         self.assertFalse(self.state.reserve_frontier_rebuild(1.1))
         self.assertTrue(self.state.reserve_frontier_rebuild(1.25))
 
+    def test_empty_frontiers_do_not_implicitly_start_homing(self) -> None:
+        self.state.begin_exploration(direction=45, frontiers=[])
+
+        done, homing = self.state.evaluate_mission_state()
+
+        self.assertFalse(done)
+        self.assertFalse(homing)
+
+        self.state.start_returning_home()
+        done, homing = self.state.evaluate_mission_state()
+
+        self.assertFalse(done)
+        self.assertTrue(homing)
+
 
 if __name__ == "__main__":
     unittest.main()

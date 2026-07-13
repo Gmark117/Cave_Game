@@ -156,6 +156,57 @@ class ExplorationPolicyTests(unittest.TestCase):
 
         self.assertEqual(frontiers, ((20, 10), (12, 10)))
 
+    def test_prioritize_frontiers_prefers_large_unexplored_cluster(
+        self,
+    ) -> None:
+        occupancy = np.full((32, 32), FREE, dtype=np.int8)
+        confidence = np.ones((32, 32), dtype=np.float32)
+        occupancy[10, 11] = UNKNOWN
+        confidence[10, 11] = 0.0
+        occupancy[8:12, 24:28] = UNKNOWN
+        confidence[8:12, 24:28] = 0.0
+        runtime = make_runtime_snapshot(
+            position=(0, 10),
+            frontiers=((10, 10), (23, 10)),
+        )
+        context = make_context(
+            runtime_snapshot=runtime,
+            slam_snapshot=SlamSnapshot(occupancy, confidence),
+            terrain_snapshot=TerrainSnapshot(
+                np.full((32, 32), -1.0, dtype=np.float32),
+                np.zeros((32, 32), dtype=np.float32),
+            ),
+        )
+
+        frontiers = FrontierExplorationPolicy().prioritize_frontiers(context)
+
+        self.assertEqual(frontiers[0], (23, 10))
+
+    def test_prioritize_frontiers_prefers_low_confidence_over_small_pocket(
+        self,
+    ) -> None:
+        occupancy = np.full((32, 32), FREE, dtype=np.int8)
+        confidence = np.ones((32, 32), dtype=np.float32)
+        occupancy[10, 11] = UNKNOWN
+        confidence[10, 11] = 0.0
+        confidence[9:12, 23:26] = 0.2
+        runtime = make_runtime_snapshot(
+            position=(0, 10),
+            frontiers=((10, 10), (24, 10)),
+        )
+        context = make_context(
+            runtime_snapshot=runtime,
+            slam_snapshot=SlamSnapshot(occupancy, confidence),
+            terrain_snapshot=TerrainSnapshot(
+                np.full((32, 32), -1.0, dtype=np.float32),
+                np.zeros((32, 32), dtype=np.float32),
+            ),
+        )
+
+        frontiers = FrontierExplorationPolicy().prioritize_frontiers(context)
+
+        self.assertEqual(frontiers[0], (24, 10))
+
     def test_extract_frontiers_uses_local_slam_and_terrain_snapshots(self) -> None:
         occupancy = np.full((32, 32), UNKNOWN, dtype=np.int8)
         confidence = np.zeros((32, 32), dtype=np.float32)

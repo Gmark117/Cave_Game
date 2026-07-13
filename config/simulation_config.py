@@ -91,6 +91,50 @@ class FrontierConfig:
 
 
 @dataclass(frozen=True)
+class ExplorationConfig:
+    """Exploration policy selection and MCTS search controls."""
+
+    policy: str = "mcts"
+    iterations: int = 256
+    horizon: int = 4
+    branching_factor: int = 6
+    frontier_cluster_limit: int = 3
+    planning_rays: int = 4
+    uct_exploration: float = 1.414
+    discount: float = 0.95
+    rollout_temperature: float = 0.35
+    decision_time_budget_ms: float = 40.0
+
+    def __post_init__(self) -> None:
+        """Validate exploration policy and numeric search settings."""
+        policy = self.policy.casefold()
+        if policy not in {"mcts", "frontier"}:
+            raise ValueError("policy must be 'mcts' or 'frontier'")
+        object.__setattr__(self, "policy", policy)
+
+        if self.iterations <= 0:
+            raise ValueError("iterations must be positive")
+        if self.horizon <= 0:
+            raise ValueError("horizon must be positive")
+        if self.branching_factor <= 0:
+            raise ValueError("branching_factor must be positive")
+        if self.frontier_cluster_limit < 0:
+            raise ValueError("frontier_cluster_limit must be non-negative")
+        if self.planning_rays <= 0:
+            raise ValueError("planning_rays must be positive")
+        if self.uct_exploration < 0.0:
+            raise ValueError("uct_exploration must be non-negative")
+        if not 0.0 <= self.discount <= 1.0:
+            raise ValueError("discount must be between zero and one")
+        if self.rollout_temperature < 0.0:
+            raise ValueError("rollout_temperature must be non-negative")
+        if self.decision_time_budget_ms < 0.0:
+            raise ValueError(
+                "decision_time_budget_ms must be non-negative"
+            )
+
+
+@dataclass(frozen=True)
 class RenderingConfig:
     """SLAM rendering cache limits and refresh timing."""
 
@@ -106,6 +150,25 @@ class RenderingConfig:
 
 
 @dataclass(frozen=True)
+class TraceConfig:
+    """Structured runtime trace controls for diagnosing live missions."""
+
+    enabled: bool = False
+    directory: str = "logs"
+    mcts_root_visits: int = 6
+    frame_interval: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Validate trace output settings."""
+        if not self.directory:
+            raise ValueError("trace directory must not be empty")
+        if self.mcts_root_visits < 0:
+            raise ValueError("mcts_root_visits must be non-negative")
+        if self.frame_interval < 0.0:
+            raise ValueError("frame_interval must be non-negative")
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """Complete validated configuration passed into a mission."""
 
@@ -113,4 +176,6 @@ class SimulationConfig:
     slam: SlamConfig = field(default_factory=SlamConfig)
     sharing: SharingConfig = field(default_factory=SharingConfig)
     frontier: FrontierConfig = field(default_factory=FrontierConfig)
+    exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     rendering: RenderingConfig = field(default_factory=RenderingConfig)
+    trace: TraceConfig = field(default_factory=TraceConfig)

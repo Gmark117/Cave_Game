@@ -67,32 +67,46 @@ class VisionSensor:
 
         start = (int(round(origin[0])), int(round(origin[1])))
         last_valid = start
-        for length in range(0, self.max_range + 1, self.step):
+        traversed: List[Tuple[int, int]] = []
+        previous_sample = start
+        sample_lengths = list(range(0, self.max_range + 1, self.step))
+        if sample_lengths[-1] != self.max_range:
+            sample_lengths.append(self.max_range)
+
+        for length in sample_lengths:
             x = origin[0] + length * dx
             y = origin[1] + length * dy
-            xi = int(round(x))
-            yi = int(round(y))
+            sample = (int(round(x)), int(round(y)))
+            segment = bresenham_line_points(
+                previous_sample[0],
+                previous_sample[1],
+                sample[0],
+                sample[1],
+            )
+            for point in segment:
+                if traversed and point == traversed[-1]:
+                    continue
+                xi, yi = point
+                if xi < 0 or yi < 0 or xi >= self.map_w or yi >= self.map_h:
+                    return RayHit(
+                        last_valid,
+                        False,
+                        math.dist(origin, last_valid),
+                        angle_deg,
+                        tuple(traversed),
+                    )
 
-            if xi < 0 or yi < 0 or xi >= self.map_w or yi >= self.map_h:
-                break
-
-            last_valid = (xi, yi)
-            if wall_hit(self.map_matrix, last_valid):
-                dist = math.dist(origin, last_valid)
-                return RayHit(
-                    last_valid,
-                    True,
-                    dist,
-                    angle_deg,
-                    tuple(
-                        bresenham_line_points(
-                            start[0],
-                            start[1],
-                            last_valid[0],
-                            last_valid[1],
-                        )
-                    ),
-                )
+                traversed.append(point)
+                last_valid = point
+                if wall_hit(self.map_matrix, point):
+                    return RayHit(
+                        point,
+                        True,
+                        math.dist(origin, point),
+                        angle_deg,
+                        tuple(traversed),
+                    )
+            previous_sample = sample
 
         dist = math.dist(origin, last_valid)
         return RayHit(
@@ -100,12 +114,5 @@ class VisionSensor:
             False,
             dist,
             angle_deg,
-            tuple(
-                bresenham_line_points(
-                    start[0],
-                    start[1],
-                    last_valid[0],
-                    last_valid[1],
-                )
-            ),
+            tuple(traversed),
         )

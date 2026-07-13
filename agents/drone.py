@@ -4,6 +4,7 @@ import random as rand
 from typing import List, Tuple, TYPE_CHECKING
 
 from agents.exploration_policy import FrontierExplorationPolicy
+from agents.mcts_exploration_policy import MctsExplorationPolicy
 from mapping.slam_map import SlamMap
 from agents.drone_movement import DroneMovementController
 from agents.drone_runtime_state import DroneRuntimeState, DroneSnapshot
@@ -75,7 +76,7 @@ class Drone:
             frontier_rebuild_cooldown=frontier_rebuild_cooldown,
         )
         self.localizer = PerfectPoseLocalizer()
-        self.exploration_policy = FrontierExplorationPolicy()
+        self.exploration_policy = self._build_exploration_policy()
 
         # SLAM state
         map_h = len(self.cave)
@@ -90,6 +91,7 @@ class Drone:
                 simulation_time=control.simulation_time,
                 pause_checkpoint=control.pause_checkpoint,
                 wait_simulation_delay=control.wait_simulation_delay,
+                runtime_trace=getattr(control, "runtime_trace", None),
             ),
         )
         self.sensor_controller = DroneSensorController(
@@ -98,9 +100,20 @@ class Drone:
                 terrain_roughness=control.terrain_roughness,
                 simulation_time=control.simulation_time,
                 record_terrain_scan=control.terrain_fusion.record_scan,
+                runtime_trace=getattr(control, "runtime_trace", None),
             ),
         )
         self.renderer = DroneRenderer(self)
+
+    def _build_exploration_policy(self):
+        """Create the configured exploration policy for this drone."""
+        exploration = self.settings.exploration
+        if exploration.policy == "frontier":
+            return FrontierExplorationPolicy()
+
+        mission_seed = self.settings.mission_config.seed
+        policy_seed = int(mission_seed) + (self.id * 9_973)
+        return MctsExplorationPolicy(exploration, seed=policy_seed)
 
     
     def calculate_radius(self) -> int:

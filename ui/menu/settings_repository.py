@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
 from config.simulation_config import (
+    ExplorationConfig,
     FrontierConfig,
     MissionConfig,
     RenderingConfig,
     SharingConfig,
     SimulationConfig,
     SlamConfig,
+    TraceConfig,
 )
 from asset_config.gameplay import GameOptions
 
@@ -138,11 +140,37 @@ class MenuSettingsRepository:
             ),
             "rebuild_cooldown": str(settings.frontier.rebuild_cooldown),
         }
+        config["EXPLORATION"] = {
+            "policy": settings.exploration.policy,
+            "iterations": str(settings.exploration.iterations),
+            "horizon": str(settings.exploration.horizon),
+            "branching_factor": str(
+                settings.exploration.branching_factor
+            ),
+            "frontier_cluster_limit": str(
+                settings.exploration.frontier_cluster_limit
+            ),
+            "planning_rays": str(settings.exploration.planning_rays),
+            "uct_exploration": str(settings.exploration.uct_exploration),
+            "discount": str(settings.exploration.discount),
+            "rollout_temperature": str(
+                settings.exploration.rollout_temperature
+            ),
+            "decision_time_budget_ms": str(
+                settings.exploration.decision_time_budget_ms
+            ),
+        }
         config["RENDERING"] = {
             "slam_point_tail": str(settings.rendering.point_tail),
             "slam_refresh_interval": str(
                 settings.rendering.refresh_interval
             ),
+        }
+        config["TRACE"] = {
+            "enabled": str(settings.trace.enabled),
+            "directory": settings.trace.directory,
+            "mcts_root_visits": str(settings.trace.mcts_root_visits),
+            "frame_interval": str(settings.trace.frame_interval),
         }
         self.simulation_path.parent.mkdir(parents=True, exist_ok=True)
         with self.simulation_path.open("w") as config_file:
@@ -187,6 +215,15 @@ class MenuSettingsRepository:
                 ),
                 defaults.frontier,
             ),
+            exploration=self._section_or_default(
+                lambda: self._read_exploration(
+                    config["EXPLORATION"]
+                    if config.has_section("EXPLORATION")
+                    else {},
+                    defaults.exploration,
+                ),
+                defaults.exploration,
+            ),
             rendering=self._section_or_default(
                 lambda: self._read_rendering(
                     config["RENDERING"]
@@ -195,6 +232,13 @@ class MenuSettingsRepository:
                     defaults.rendering,
                 ),
                 defaults.rendering,
+            ),
+            trace=self._section_or_default(
+                lambda: self._read_trace(
+                    config["TRACE"] if config.has_section("TRACE") else {},
+                    defaults.trace,
+                ),
+                defaults.trace,
             ),
         )
 
@@ -300,6 +344,52 @@ class MenuSettingsRepository:
         )
 
     @staticmethod
+    def _read_exploration(
+        section: object,
+        defaults: ExplorationConfig,
+    ) -> ExplorationConfig:
+        """Parse exploration policy and MCTS search settings."""
+        return ExplorationConfig(
+            policy=str(section.get("policy", defaults.policy)),
+            iterations=int(section.get("iterations", defaults.iterations)),
+            horizon=int(section.get("horizon", defaults.horizon)),
+            branching_factor=int(
+                section.get(
+                    "branching_factor",
+                    defaults.branching_factor,
+                )
+            ),
+            frontier_cluster_limit=int(
+                section.get(
+                    "frontier_cluster_limit",
+                    defaults.frontier_cluster_limit,
+                )
+            ),
+            planning_rays=int(
+                section.get("planning_rays", defaults.planning_rays)
+            ),
+            uct_exploration=float(
+                section.get(
+                    "uct_exploration",
+                    defaults.uct_exploration,
+                )
+            ),
+            discount=float(section.get("discount", defaults.discount)),
+            rollout_temperature=float(
+                section.get(
+                    "rollout_temperature",
+                    defaults.rollout_temperature,
+                )
+            ),
+            decision_time_budget_ms=float(
+                section.get(
+                    "decision_time_budget_ms",
+                    defaults.decision_time_budget_ms,
+                )
+            ),
+        )
+
+    @staticmethod
     def _read_rendering(
         section: object,
         defaults: RenderingConfig,
@@ -314,6 +404,28 @@ class MenuSettingsRepository:
                     "slam_refresh_interval",
                     defaults.refresh_interval,
                 )
+            ),
+        )
+
+    @staticmethod
+    def _read_trace(
+        section: object,
+        defaults: TraceConfig,
+    ) -> TraceConfig:
+        """Parse structured runtime trace settings."""
+        enabled_value = str(section.get("enabled", defaults.enabled))
+        enabled = enabled_value.casefold() in {"1", "true", "yes", "on"}
+        return TraceConfig(
+            enabled=enabled,
+            directory=str(section.get("directory", defaults.directory)),
+            mcts_root_visits=int(
+                section.get(
+                    "mcts_root_visits",
+                    defaults.mcts_root_visits,
+                )
+            ),
+            frame_interval=float(
+                section.get("frame_interval", defaults.frame_interval)
             ),
         )
 

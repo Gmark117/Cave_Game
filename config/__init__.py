@@ -7,6 +7,7 @@ from config.simulation_config import (
     SharingConfig,
     SimulationConfig,
     SlamConfig,
+    TraceConfig,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "SharingConfig",
     "SimulationConfig",
     "SlamConfig",
+    "TraceConfig",
 ]

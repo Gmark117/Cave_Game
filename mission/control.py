@@ -7,6 +7,7 @@ threads before entering the main loop.
 
 import random as rand
 import threading
+from pathlib import Path
 from typing import List, Tuple, Any, Optional
 
 import numpy as np
@@ -23,6 +24,7 @@ from mission.debug_info import MissionDebugInfo
 from mission.frame_timing import FrameProfiler
 from mission.objectives import build_mission_objective
 from mission.pause_control import PauseCoordinator, SimulationClock
+from mission.runtime_trace import RuntimeTraceLogger
 from contracts import (
     MissionDebugDependencies,
     MissionRendererDependencies,
@@ -111,6 +113,19 @@ class MissionControl(MissionControlLifecycleMixin):
         self.restart_requested = False
         self.exit_requested = False
         self.frame_profiler = FrameProfiler()
+        self.runtime_trace = RuntimeTraceLogger(
+            Path(__file__).resolve().parents[1],
+            self.settings.trace,
+        )
+        self.runtime_trace.record(
+            "mission_constructed",
+            seed=self.settings.mission_config.seed,
+            map_dim=self.settings.mission_config.map_dim,
+            drones=self.settings.mission_config.num_drones,
+            map_width=self.map_w,
+            map_height=self.map_h,
+            exploration_policy=self.settings.exploration.policy,
+        )
         
         self.delay = 1/15 # Set a delay for frame updates
 
@@ -176,6 +191,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 dirty_map_count=self.slam_view.dirty_map_count,
                 simulation_time=self.simulation_time,
                 frame_profiler=self.frame_profiler,
+                runtime_trace=self.runtime_trace,
             )
         )
         self.renderer = MissionRenderer(

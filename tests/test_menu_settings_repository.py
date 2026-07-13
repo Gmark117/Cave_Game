@@ -73,7 +73,9 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             slam=replace(defaults.slam, scan_interval=0.5),
             sharing=replace(defaults.sharing, pair_cooldown=2.5),
             frontier=replace(defaults.frontier, stride=2),
+            exploration=replace(defaults.exploration, iterations=32),
             rendering=replace(defaults.rendering, refresh_interval=0.2),
+            trace=replace(defaults.trace, enabled=True),
         )
 
         repository.save_simulation(source)
@@ -84,7 +86,15 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         config.read(repository.simulation_path)
         self.assertEqual(
             set(config.sections()),
-            {"MISSION", "SLAM", "SHARING", "FRONTIER", "RENDERING"},
+            {
+                "MISSION",
+                "SLAM",
+                "SHARING",
+                "FRONTIER",
+                "EXPLORATION",
+                "RENDERING",
+                "TRACE",
+            },
         )
 
     def test_simulation_default_loads_before_local_override(self) -> None:

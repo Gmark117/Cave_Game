@@ -13,17 +13,28 @@ import numpy as np
 from agents.drone_runtime_state import DroneSnapshot
 from asset_config.helpers import next_cell_coords
 from mapping.localization import PoseEstimate
-from mapping.slam_map import FREE, SlamSnapshot
+from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
 
 
 Position = Tuple[int, int]
+
+LARGE_UNEXPLORED_MIN_CELLS = 8
+
+
+@dataclass(frozen=True)
+class FrontierPriorityMasks:
+    """Precomputed masks used to rank frontier targets."""
+
+    unexplored: np.ndarray
+    low_confidence: np.ndarray
 
 
 class ExplorationDecisionKind(Enum):
     """Kinds of exploration decisions understood by movement controllers."""
 
     STEP = "step"
+    ROTATE = "rotate"
     FRONTIER = "frontier"
     HOMING = "homing"
     EXHAUSTED = "exhausted"
@@ -38,6 +49,7 @@ class ExplorationDecision:
     direction: int | None = None
     valid_directions: tuple[int, ...] = ()
     frontier_targets: tuple[Position, ...] = ()
+    planned_path: tuple[Position, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,12 +154,37 @@ class FrontierExplorationPolicy:
         context: ExplorationContext,
     ) -> tuple[Position, ...]:
         """Return frontier targets ordered by current exploration priority."""
+        masks = self._build_frontier_priority_masks(context)
         return tuple(
             sorted(
                 context.runtime_snapshot.frontiers,
-                key=lambda target: self.frontier_distance(context, target),
+                key=lambda target: self._frontier_priority_key(
+                    context,
+                    target,
+                    masks=masks,
+                ),
             )
         )
+
+    def frontier_priority(
+        self,
+        context: ExplorationContext,
+        target: Position,
+    ) -> tuple[int, float, int, int]:
+        """Return a hierarchical priority key for one frontier target."""
+        return self._frontier_priority_key(
+            context,
+            target,
+            masks=self._build_frontier_priority_masks(context),
+        )
+
+    def update_priority_frontier_registry(
+        self,
+        context: ExplorationContext,
+        frontiers: tuple[Position, ...],
+    ) -> None:
+        """Remember high-value frontiers across capped fallback decisions."""
+        _ = context, frontiers
 
     def frontier_distance(
         self,
@@ -159,6 +196,119 @@ class FrontierExplorationPolicy:
         if distance <= context.radius:
             return float(context.map_width)
         return distance
+
+    def _frontier_priority_key(
+        self,
+        context: ExplorationContext,
+        target: Position,
+        *,
+        masks: FrontierPriorityMasks | None,
+    ) -> tuple[int, float, int, int]:
+        """Rank targets by information class, then travel cost."""
+        distance = self.frontier_distance(context, target)
+        tiebreak = self._coordinate_tiebreak(target)
+        if masks is None:
+            return (2, distance, 0, tiebreak)
+
+        large_threshold = self._large_unexplored_threshold(context.radius)
+        unexplored_size = self._nearby_mask_count(
+            masks.unexplored,
+            target,
+            radius=self._unexplored_score_radius(context.radius),
+        )
+        low_confidence_count = self._nearby_mask_count(
+            masks.low_confidence,
+            target,
+            radius=self._unexplored_score_radius(context.radius),
+        )
+        if unexplored_size >= large_threshold:
+            return (0, distance, -unexplored_size, tiebreak)
+        if low_confidence_count > 0:
+            return (1, distance, -low_confidence_count, tiebreak)
+        return (2, distance, -unexplored_size, tiebreak)
+
+    def _build_frontier_priority_masks(
+        self,
+        context: ExplorationContext,
+    ) -> FrontierPriorityMasks | None:
+        """Build masks for unexplored space and low-confidence known cells."""
+        if context.slam_snapshot is None:
+            return None
+
+        occupancy = context.slam_snapshot.occupancy
+        confidence = context.slam_snapshot.confidence
+        floor_mask = self._floor_mask(context, occupancy.shape)
+        terrain_known = self._terrain_known_mask(context, occupancy.shape)
+        unexplored = floor_mask & (occupancy == UNKNOWN) & (~terrain_known)
+        low_confidence = (
+            floor_mask
+            & (occupancy != UNKNOWN)
+            & (confidence < context.frontier_confidence_threshold)
+        )
+        return FrontierPriorityMasks(
+            unexplored=unexplored,
+            low_confidence=low_confidence,
+        )
+
+    def _floor_mask(
+        self,
+        context: ExplorationContext,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """Return floor cells when the cave map matches the SLAM shape."""
+        cave = np.asarray(context.cave_map)
+        if cave.shape == shape:
+            return cave == 0
+        return np.ones(shape, dtype=bool)
+
+    @staticmethod
+    def _terrain_known_mask(
+        context: ExplorationContext,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """Return cells whose terrain has already been sampled."""
+        if (
+            context.terrain_snapshot is None
+            or context.terrain_snapshot.confidence.shape != shape
+        ):
+            return np.zeros(shape, dtype=bool)
+        return context.terrain_snapshot.confidence > 0.0
+
+    @staticmethod
+    def _nearby_mask_count(
+        mask: np.ndarray,
+        target: Position,
+        *,
+        radius: int,
+    ) -> int:
+        """Return the number of matching cells in a square local window."""
+        height, width = mask.shape
+        x, y = int(target[0]), int(target[1])
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return 0
+        radius = max(1, int(radius))
+        y0 = max(0, y - radius)
+        y1 = min(height, y + radius + 1)
+        x0 = max(0, x - radius)
+        x1 = min(width, x + radius + 1)
+        return int(np.count_nonzero(mask[y0:y1, x0:x1]))
+
+    @staticmethod
+    def _large_unexplored_threshold(radius: int) -> int:
+        """Return the minimum local unknown size treated as a large cluster."""
+        radius = max(1, int(radius))
+        return max(LARGE_UNEXPLORED_MIN_CELLS, (radius * radius) // 4)
+
+    @staticmethod
+    def _unexplored_score_radius(radius: int) -> int:
+        """Return the local window radius used for frontier hierarchy scoring."""
+        return max(3, int(radius) // 2)
+
+    @staticmethod
+    def _coordinate_tiebreak(target: Position) -> int:
+        """Return a stable tie-break without absolute row/column bias."""
+        x, y = int(target[0]), int(target[1])
+        return ((x * 73_856_093) ^ (y * 19_349_663)) & 0xFFFFFFFF
 
     def extract_frontiers(
         self,

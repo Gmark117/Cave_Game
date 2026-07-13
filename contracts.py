@@ -131,6 +131,7 @@ class MissionDebugDependencies:
     dirty_map_count: Callable[[], int]
     simulation_time: Callable[[], float]
     frame_profiler: Any | None = None
+    runtime_trace: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ class DroneMovementDependencies:
     simulation_time: Callable[[], float]
     pause_checkpoint: Callable[[], bool]
     wait_simulation_delay: Callable[[float], bool]
+    runtime_trace: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,7 @@ class DroneSensorDependencies:
     terrain_roughness: np.ndarray
     simulation_time: Callable[[], float]
     record_terrain_scan: Callable[[Iterable[TerrainSample]], None]
+    runtime_trace: Any | None = None
 
 
 @dataclass(frozen=True)

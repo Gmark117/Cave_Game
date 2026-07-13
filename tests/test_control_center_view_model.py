@@ -52,7 +52,7 @@ class ControlCenterViewModelTests(unittest.TestCase):
         deployed_snapshot = replace(state.snapshot(), battery=72)
         deployed = build_drone_status_views([drone], [deployed_snapshot])
 
-        state.evaluate_mission_state()
+        state.start_returning_home()
         homing_snapshot = replace(state.snapshot(), battery=72)
         homing = build_drone_status_views([drone], [homing_snapshot])
 

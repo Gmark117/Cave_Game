@@ -126,6 +126,32 @@ class AgentRendererTests(unittest.TestCase):
 
         self.assertEqual(draw_line.call_count, 2)
 
+    def test_drone_vision_redraws_only_when_snapshot_changes(self) -> None:
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        drone = Drone(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (255, 0, 0),
+            icon,
+            self.cave,
+        )
+        drone.runtime_state.set_ray_points([(40, 20), (24, 20)])
+        first_snapshot = drone.snapshot()
+
+        with patch(
+            "rendering.agent_renderer.pygame.draw.polygon",
+            return_value=pygame.Rect(0, 0, 1, 1),
+        ) as draw_polygon:
+            drone.renderer.draw_vision_overlay(first_snapshot)
+            drone.renderer.draw_vision_overlay(first_snapshot)
+
+            drone.runtime_state.set_ray_points([(42, 20), (22, 20)])
+            drone.renderer.draw_vision_overlay(drone.snapshot())
+
+        self.assertEqual(draw_polygon.call_count, 2)
+
     def test_rover_renderer_owns_path_surface(self) -> None:
         icon = pygame.Surface((4, 4), pygame.SRCALPHA)
         icon.fill((255, 255, 255, 255))

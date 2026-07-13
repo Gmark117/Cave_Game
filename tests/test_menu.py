@@ -80,6 +80,10 @@ class MenuFacadeTests(unittest.TestCase):
                     rover_interval=0.75,
                 ),
                 frontier=replace(source.config.frontier, stride=2),
+                exploration=replace(
+                    source.config.exploration,
+                    iterations=64,
+                ),
             )
             source.save_simulation_settings()
 
@@ -100,6 +104,7 @@ class MenuFacadeTests(unittest.TestCase):
         self.assertEqual(target.config.rendering.refresh_interval, 0.2)
         self.assertEqual(target.config.sharing.rover_interval, 0.75)
         self.assertEqual(target.config.frontier.stride, 2)
+        self.assertEqual(target.config.exploration.iterations, 64)
 
     def test_default_seed_is_owned_only_by_text_item(self) -> None:
         menu = self.make_menu()

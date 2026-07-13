@@ -40,6 +40,17 @@ class VisionSensorTests(unittest.TestCase):
         self.assertAlmostEqual(hit.distance, 2.0)
         self.assertEqual(hit.points, ((4, 4), (5, 4), (6, 4)))
 
+    def test_sparse_ray_cannot_skip_wall_between_samples(self) -> None:
+        cave = np.zeros((7, 7), dtype=np.uint8)
+        cave[3, 3] = 1
+        sensor = VisionSensor(cave, num_rays=1, step=2, max_range=4)
+
+        hit = sensor.cast_cone((3, 4), heading_deg=0)[0]
+
+        self.assertTrue(hit.hit)
+        self.assertEqual(hit.end, (3, 3))
+        self.assertEqual(hit.points, ((3, 4), (3, 3)))
+
     def test_cone_spans_requested_field_of_view(self) -> None:
         sensor = VisionSensor(
             np.zeros((5, 5), dtype=np.uint8),

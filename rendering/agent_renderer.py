@@ -27,6 +27,7 @@ class DroneRenderer:
             game.window.get_size(),
             pygame.SRCALPHA,
         )
+        self._vision_signature = None
 
         self.start_surface = pygame.Surface((12, 12), pygame.SRCALPHA)
         pygame.draw.circle(
@@ -79,25 +80,33 @@ class DroneRenderer:
         if not snapshot.show_vision:
             return
 
-        self.vision_surface.fill((0, 0, 0, 0))
-        if len(snapshot.ray_points) > 1:
-            points = [snapshot.position, *snapshot.ray_points]
-            pygame.draw.polygon(
-                self.vision_surface,
-                (*drone.color, drone.alpha),
-                points,
-            )
-        else:
-            pygame.draw.circle(
-                self.vision_surface,
-                (*drone.color, drone.alpha),
-                (
-                    int(snapshot.position[0]),
-                    int(snapshot.position[1]),
-                ),
-                12,
-                1,
-            )
+        signature = (
+            snapshot.position,
+            snapshot.ray_points,
+            drone.color,
+            drone.alpha,
+        )
+        if signature != self._vision_signature:
+            self.vision_surface.fill((0, 0, 0, 0))
+            if len(snapshot.ray_points) > 1:
+                points = [snapshot.position, *snapshot.ray_points]
+                pygame.draw.polygon(
+                    self.vision_surface,
+                    (*drone.color, drone.alpha),
+                    points,
+                )
+            else:
+                pygame.draw.circle(
+                    self.vision_surface,
+                    (*drone.color, drone.alpha),
+                    (
+                        int(snapshot.position[0]),
+                        int(snapshot.position[1]),
+                    ),
+                    12,
+                    1,
+                )
+            self._vision_signature = signature
 
         drone.game.window.blit(self.vision_surface, (0, 0))
 

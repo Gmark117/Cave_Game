@@ -54,6 +54,12 @@ class MissionDebugInfo:
             f"Frontiers: {frontier_count}",
             f"Frontier cooldown: {cooldown_remaining:.2f}s",
         ]
+        mcts_line = self._mcts_debug_line(selected_id)
+        if mcts_line is not None:
+            lines.append(mcts_line)
+        trace = dependencies.runtime_trace
+        if trace is not None and getattr(trace, "enabled", False):
+            lines.append(f"Trace: {trace.path}")
 
         profiler = dependencies.frame_profiler
         if profiler is not None:
@@ -80,3 +86,49 @@ class MissionDebugInfo:
                 )
 
         return lines
+
+    def _mcts_debug_line(self, selected_id: int | None) -> str | None:
+        """Return a concise line for the selected drone's MCTS search."""
+        try:
+            drones = tuple(self.dependencies.get_drones())
+        except (TypeError, AttributeError):
+            return None
+        if not drones:
+            return None
+
+        indexed_drones = list(enumerate(drones))
+        if selected_id is not None and 0 <= selected_id < len(drones):
+            indexed_drones = [(selected_id, drones[selected_id])]
+
+        for index, drone in indexed_drones:
+            policy = getattr(drone, "exploration_policy", None)
+            diagnostics = getattr(policy, "last_search_diagnostics", None)
+            if diagnostics is None:
+                continue
+
+            config = getattr(policy, "config", None)
+            max_iterations = getattr(
+                config,
+                "iterations",
+                diagnostics.iterations,
+            )
+            selected_kind = diagnostics.selected_kind or "none"
+            direction_text = (
+                "-"
+                if diagnostics.selected_direction is None
+                else f"{diagnostics.selected_direction}deg"
+            )
+            target = diagnostics.selected_target
+            target_text = (
+                "-"
+                if target is None
+                else f"{target[0]},{target[1]}"
+            )
+            return (
+                f"MCTS d{index}: {selected_kind} {direction_text} "
+                f"-> {target_text}, {diagnostics.iterations}/"
+                f"{max_iterations} it, {diagnostics.generated_nodes} nodes, "
+                f"{diagnostics.elapsed_ms:.0f} ms"
+            )
+
+        return None

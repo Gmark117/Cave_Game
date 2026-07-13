@@ -119,6 +119,35 @@ class SlamMapTests(unittest.TestCase):
         self.assertAlmostEqual(float(snapshot.confidence[1, 1]), 0.9)
         self.assertIn((1, 1), snapshot.point_cloud)
 
+    def test_collision_repairs_equal_confidence_false_free_cell(self) -> None:
+        slam = SlamMap(3, 3)
+        slam.merge_from(
+            make_snapshot((3, 3), cells=[(1, 1, FREE, 1.0)])
+        )
+
+        changed = slam.record_collision((1, 1))
+        snapshot = slam.snapshot()
+
+        self.assertTrue(changed)
+        self.assertEqual(int(snapshot.occupancy[1, 1]), OCCUPIED)
+        self.assertEqual(float(snapshot.confidence[1, 1]), 1.0)
+        self.assertIn((1, 1), snapshot.point_cloud)
+
+    def test_merge_prefers_occupied_cell_at_equal_confidence(self) -> None:
+        target = SlamMap(2, 2)
+        target.merge_from(
+            make_snapshot((2, 2), cells=[(0, 0, FREE, 1.0)])
+        )
+
+        changed = target.merge_from(
+            make_snapshot((2, 2), cells=[(0, 0, OCCUPIED, 1.0)])
+        )
+        snapshot = target.snapshot(point_limit=0)
+
+        self.assertTrue(changed)
+        self.assertEqual(int(snapshot.occupancy[0, 0]), OCCUPIED)
+        self.assertEqual(float(snapshot.confidence[0, 0]), 1.0)
+
     def test_point_cloud_is_unique_bounded_and_snapshot_tail_is_recent_first(
         self,
     ) -> None:

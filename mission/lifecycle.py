@@ -20,6 +20,12 @@ class MissionControlLifecycleMixin:
 
     def _shutdown_mission(self, threads: List[threading.Thread]) -> None:
         """Stop workers, join threads, and release process/shared-memory resources."""
+        runtime_trace = getattr(self, "runtime_trace", None)
+        if runtime_trace is not None:
+            runtime_trace.record(
+                "mission_shutdown_started",
+                worker_threads=len(threads),
+            )
         self.mission_event.set()
         self.pause_event.set()
         self.pause_coordinator.stop()
@@ -31,6 +37,9 @@ class MissionControlLifecycleMixin:
 
         self.clock = None
         self._runtime_initialized = False
+        if runtime_trace is not None:
+            runtime_trace.record("mission_shutdown_complete")
+            runtime_trace.close()
 
     def _start_agent_threads(self) -> List[threading.Thread]:
         """Create and start mission worker threads."""
@@ -129,6 +138,43 @@ class MissionControlLifecycleMixin:
                     "display": frame_finished - render_finished,
                 },
             )
+            runtime_trace = getattr(self, "runtime_trace", None)
+            if runtime_trace is not None:
+                sim_time = self.simulation_time()
+                if runtime_trace.should_record_interval(
+                    "frame_summary",
+                    sim_time,
+                    self.settings.trace.frame_interval,
+                ):
+                    timing = self.frame_profiler.snapshot()
+                    drone_snapshots = [
+                        (drone, drone.snapshot())
+                        for drone in self.drones
+                    ]
+                    runtime_trace.record(
+                        "frame_summary",
+                        sim_time=sim_time,
+                        completed=self.completed,
+                        paused=self.is_paused,
+                        fps=timing.fps,
+                        frame_ms=timing.frame_ms,
+                        work_ms=timing.work_ms,
+                        wait_ms=timing.wait_ms,
+                        stages_ms=dict(timing.stages_ms),
+                        dirty_maps=self.slam_view.dirty_map_count(),
+                        drone_states=[
+                            {
+                                "id": drone.id,
+                                "position": snapshot.position,
+                                "heading": snapshot.heading_deg,
+                                "frontiers": len(snapshot.frontiers),
+                                "returning_home": snapshot.returning_home,
+                                "done": snapshot.done,
+                                "slam_version": drone.slam_map.version,
+                            }
+                            for drone, snapshot in drone_snapshots
+                        ],
+                    )
 
     def run(self) -> None:
         """Initialize and run this mission exactly once."""
@@ -144,6 +190,9 @@ class MissionControlLifecycleMixin:
             if self.control_center is None:
                 raise RuntimeError("Mission control center is not initialized")
             self.control_center.start_timer()
+            runtime_trace = getattr(self, "runtime_trace", None)
+            if runtime_trace is not None:
+                runtime_trace.record("mission_run_started")
             threads = self._start_agent_threads()
             self._run_mission_loop()
         finally:

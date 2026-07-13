@@ -47,14 +47,51 @@ class DroneMovementController:
         if done:
             return
 
+        self._trace(
+            "drone_move_start",
+            state=self._snapshot_summary(drone.snapshot()),
+            slam_version=drone.slam_map.version,
+        )
         node_found = False
         while not node_found:
             decision = self.choose_exploration_action()
+            self._trace_decision("drone_decision", decision)
             if decision.kind == ExplorationDecisionKind.EXHAUSTED:
-                self.update_borders()
+                self._trace(
+                    "drone_policy_exhausted",
+                    state=self._snapshot_summary(drone.snapshot()),
+                    slam_version=drone.slam_map.version,
+                )
+                self.rebuild_frontiers(
+                    stride=max(1, self.frontier_stride),
+                    confidence_threshold=self.frontier_confidence_threshold,
+                )
                 decision = self.choose_exploration_action()
+                self._trace_decision("drone_post_rebuild_decision", decision)
+                if decision.kind == ExplorationDecisionKind.EXHAUSTED:
+                    drone.runtime_state.start_returning_home()
+                    self._trace(
+                        "drone_start_homing_after_exhaustion",
+                        state=self._snapshot_summary(drone.snapshot()),
+                    )
+                    decision = ExplorationDecision(
+                        kind=ExplorationDecisionKind.HOMING,
+                        target=drone.start_pos,
+                    )
 
             node_found = self.execute_exploration_action(decision)
+            self._trace(
+                "drone_action_result",
+                decision_kind=decision.kind.value,
+                node_found=node_found,
+                state=self._snapshot_summary(drone.snapshot()),
+            )
+            if (
+                not node_found
+                and decision.kind == ExplorationDecisionKind.STEP
+                and decision.planned_path
+            ):
+                return
             if decision.kind != ExplorationDecisionKind.STEP:
                 return
 
@@ -62,7 +99,10 @@ class DroneMovementController:
         """Ask the exploration policy for the next high-level action."""
         drone = self.drone
         snapshot = drone.snapshot()
-        context = self._build_exploration_context(snapshot=snapshot)
+        context = self._build_exploration_context(
+            snapshot=snapshot,
+            slam_snapshot=drone.slam_map.snapshot(point_limit=0),
+        )
         return drone.exploration_policy.decide(
             context,
             drone.runtime_state.graph_is_valid,
@@ -76,6 +116,7 @@ class DroneMovementController:
         if decision.kind == ExplorationDecisionKind.HOMING:
             if self.reach_start_point():
                 self.drone.runtime_state.mark_done()
+                self._trace("drone_homing_done")
             return True
 
         if decision.kind == ExplorationDecisionKind.FRONTIER:
@@ -88,6 +129,9 @@ class DroneMovementController:
         if decision.kind == ExplorationDecisionKind.STEP:
             return self._execute_step_decision(decision)
 
+        if decision.kind == ExplorationDecisionKind.ROTATE:
+            return self._execute_rotate_decision(decision)
+
         return False
 
     def reach_start_point(self) -> bool:
@@ -95,9 +139,16 @@ class DroneMovementController:
         drone = self.drone
         snapshot = drone.snapshot()
         if snapshot.position == drone.start_pos:
+            self._trace("drone_homing_already_home")
             return True
 
         path = self._compute_path(snapshot.position, drone.start_pos)
+        self._trace(
+            "drone_homing_path",
+            start=snapshot.position,
+            goal=drone.start_pos,
+            path_len=len(path),
+        )
         if not path:
             return False
 
@@ -143,11 +194,31 @@ class DroneMovementController:
             return False
 
         self.drone.runtime_state.set_direction(decision.direction)
+        if decision.planned_path:
+            self.drone.runtime_state.begin_exploration(
+                decision.direction,
+                decision.frontier_targets,
+            )
+            return self._follow_policy_path(list(decision.planned_path))
+
         return self.explore(
             list(decision.valid_directions),
             list(decision.frontier_targets),
             decision.target,
         )
+
+    def _execute_rotate_decision(
+        self,
+        decision: ExplorationDecision,
+    ) -> bool:
+        """Execute an in-place policy rotation."""
+        if decision.direction is None:
+            return False
+        self.drone.runtime_state.begin_exploration(
+            decision.direction,
+            decision.frontier_targets,
+        )
+        return True
 
     def explore(
         self,
@@ -197,12 +268,29 @@ class DroneMovementController:
         for target in frontiers:
             current_position = drone.snapshot().position
             if target == current_position:
+                self._trace(
+                    "drone_frontier_skip",
+                    target=target,
+                    reason="current_position",
+                )
                 continue
             retry_at = self.border_retry_until.get(target, 0.0)
             if now < retry_at:
+                self._trace(
+                    "drone_frontier_skip",
+                    target=target,
+                    reason="cooldown",
+                    retry_in=retry_at - now,
+                )
                 continue
 
             path = self._compute_path(current_position, target)
+            self._trace(
+                "drone_frontier_path",
+                start=current_position,
+                target=target,
+                path_len=len(path),
+            )
             if not path or len(path) <= 1:
                 self.border_retry_until[target] = (
                     now + self.border_retry_cooldown
@@ -212,8 +300,18 @@ class DroneMovementController:
             self._follow_path(path)
             drone.runtime_state.remove_frontier(target)
             self.border_retry_until.pop(target, None)
+            self._trace(
+                "drone_frontier_reached",
+                target=target,
+                state=self._snapshot_summary(drone.snapshot()),
+            )
             return True
 
+        self._trace(
+            "drone_frontier_targets_exhausted",
+            frontier_count=len(frontiers),
+            state=self._snapshot_summary(drone.snapshot()),
+        )
         return False
 
     def update_borders(self) -> None:
@@ -251,9 +349,22 @@ class DroneMovementController:
             stride=stride,
             confidence_threshold=confidence_threshold,
         )
+        update_registry = getattr(
+            drone.exploration_policy,
+            "update_priority_frontier_registry",
+            None,
+        )
+        if update_registry is not None:
+            update_registry(context, frontiers)
 
         drone.runtime_state.replace_frontiers(frontiers)
         self.border_retry_until = {}
+        self._trace(
+            "drone_frontiers_rebuilt",
+            frontier_count=len(frontiers),
+            frontier_sample=self._position_sample(frontiers),
+            slam_version=slam.version,
+        )
 
     def mission_completed(self) -> bool:
         """Return True once exploration is exhausted and the drone is home."""
@@ -348,6 +459,157 @@ class DroneMovementController:
                 return False
 
             drone.runtime_state.move_to(node)
+
+            if not self.dependencies.wait_simulation_delay(
+                drone.delay / drone.speed_factor
+            ):
+                return False
+        return True
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        """Write one movement trace event when runtime tracing is enabled."""
+        trace = getattr(self.dependencies, "runtime_trace", None)
+        if trace is None:
+            return
+        trace.record(
+            event,
+            sim_time=self._simulation_time(),
+            drone_id=self.drone.id,
+            **fields,
+        )
+
+    def _trace_decision(
+        self,
+        event: str,
+        decision: ExplorationDecision,
+    ) -> None:
+        """Trace a policy decision with the latest MCTS diagnostics."""
+        self._trace(
+            event,
+            decision=self._decision_summary(decision),
+            mcts=self._mcts_summary(),
+        )
+
+    def _decision_summary(
+        self,
+        decision: ExplorationDecision,
+    ) -> dict[str, Any]:
+        """Return compact JSON-safe decision fields."""
+        return {
+            "kind": decision.kind.value,
+            "target": decision.target,
+            "direction": decision.direction,
+            "valid_direction_count": len(decision.valid_directions),
+            "frontier_count": len(decision.frontier_targets),
+            "frontier_sample": self._position_sample(
+                decision.frontier_targets
+            ),
+            "planned_path_len": len(decision.planned_path),
+        }
+
+    def _mcts_summary(self) -> dict[str, Any] | None:
+        """Return the latest MCTS diagnostic summary, when present."""
+        policy = getattr(self.drone, "exploration_policy", None)
+        diagnostics = getattr(policy, "last_search_diagnostics", None)
+        if diagnostics is None:
+            return None
+        config = getattr(policy, "config", None)
+        root_limit = getattr(
+            self.drone.settings.trace,
+            "mcts_root_visits",
+            0,
+        )
+        root_visits = sorted(
+            diagnostics.root_visits,
+            key=lambda visit: (-visit.visits, -visit.mean_reward),
+        )[:root_limit]
+        return {
+            "iterations": diagnostics.iterations,
+            "max_iterations": getattr(config, "iterations", None),
+            "generated_nodes": diagnostics.generated_nodes,
+            "selected_kind": diagnostics.selected_kind,
+            "selected_direction": diagnostics.selected_direction,
+            "selected_target": diagnostics.selected_target,
+            "selected_reward": diagnostics.selected_reward,
+            "slam_version": diagnostics.slam_version,
+            "elapsed_ms": diagnostics.elapsed_ms,
+            "root_visits": [
+                {
+                    "kind": visit.kind,
+                    "direction": visit.direction,
+                    "target": visit.target,
+                    "visits": visit.visits,
+                    "mean_reward": visit.mean_reward,
+                }
+                for visit in root_visits
+            ],
+        }
+
+    @staticmethod
+    def _snapshot_summary(snapshot: Any) -> dict[str, Any]:
+        """Return compact drone runtime state for trace events."""
+        return {
+            "position": snapshot.position,
+            "direction": snapshot.direction,
+            "heading": snapshot.heading_deg,
+            "frontier_count": len(snapshot.frontiers),
+            "frontier_sample": DroneMovementController._position_sample(
+                snapshot.frontiers
+            ),
+            "returning_home": snapshot.returning_home,
+            "done": snapshot.done,
+            "explored": snapshot.explored,
+            "battery": snapshot.battery,
+            "path_len": len(snapshot.path_history),
+        }
+
+    @staticmethod
+    def _position_sample(
+        positions: tuple[Position, ...] | list[Position],
+        limit: int = 8,
+    ) -> list[Position]:
+        """Return the first few positions for readable trace events."""
+        return [
+            (int(position[0]), int(position[1]))
+            for position in tuple(positions)[:limit]
+        ]
+
+    def _follow_policy_path(self, path: List[Position]) -> bool:
+        """Walk a policy path after simulator collision validation."""
+        drone = self.drone
+        current = drone.snapshot().position
+        for node in path:
+            if node == current:
+                continue
+            try:
+                valid_segment = drone.runtime_state.graph_is_valid(
+                    current,
+                    node,
+                )
+            except (IndexError, ValueError):
+                self._trace(
+                    "drone_policy_path_invalid",
+                    current=current,
+                    node=node,
+                    reason="validation_exception",
+                )
+                return False
+            if not valid_segment:
+                slam_updated = drone.slam_map.record_collision(node)
+                self._trace(
+                    "drone_policy_path_invalid",
+                    current=current,
+                    node=node,
+                    reason="blocked_segment",
+                    slam_updated=slam_updated,
+                    slam_version=drone.slam_map.version,
+                )
+                return False
+            if not self.dependencies.pause_checkpoint():
+                return False
+
+            drone.runtime_state.move_to(node)
+            current = node
 
             if not self.dependencies.wait_simulation_delay(
                 drone.delay / drone.speed_factor

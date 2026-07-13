@@ -16,9 +16,16 @@ from agents.drone import Drone
 from agents.exploration_policy import (
     ExplorationDecision,
     ExplorationDecisionKind,
+    FrontierExplorationPolicy,
 )
+from agents.mcts_exploration_policy import MctsExplorationPolicy
 from asset_config.helpers import next_cell_coords
-from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
+from config.simulation_config import (
+    ExplorationConfig,
+    MissionConfig,
+    SimulationConfig,
+    SlamConfig,
+)
 from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
 from agents.drone_movement import DroneMovementController
 from mapping.terrain_knowledge import TerrainKnowledge
@@ -66,6 +73,38 @@ class FixedDecisionPolicy:
         return self.decision
 
 
+class VersionRecordingPolicy:
+    def __init__(self) -> None:
+        self.versions = []
+
+    def decide(self, context, is_segment_valid):
+        self.versions.append(context.slam_snapshot.version)
+        return ExplorationDecision(
+            kind=ExplorationDecisionKind.ROTATE,
+            target=context.pose_estimate.position,
+            direction=0,
+            frontier_targets=(context.pose_estimate.position,),
+        )
+
+
+class ExhaustedPolicy:
+    def __init__(self) -> None:
+        self.contexts = []
+
+    def decide(self, context, is_segment_valid):
+        self.contexts.append(context)
+        return ExplorationDecision(kind=ExplorationDecisionKind.EXHAUSTED)
+
+    def extract_frontiers(
+        self,
+        context,
+        *,
+        stride=None,
+        confidence_threshold=None,
+    ):
+        return ()
+
+
 class DroneMovementTests(unittest.TestCase):
     def setUp(self) -> None:
         settings = SimulationConfig(
@@ -94,6 +133,35 @@ class DroneMovementTests(unittest.TestCase):
             (255, 0, 0),
             icon,
             cave,
+        )
+
+    def test_drone_uses_configured_exploration_policy(self) -> None:
+        self.assertIsInstance(self.drone.exploration_policy, MctsExplorationPolicy)
+
+        settings = SimulationConfig(
+            mission_config=MissionConfig(map_dim="LARGE"),
+            exploration=ExplorationConfig(policy="frontier"),
+        )
+        game = SimpleNamespace(
+            sim_settings=settings,
+            window=self.window,
+            width=64,
+            height=64,
+        )
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        drone = Drone(
+            game,
+            self.control,
+            1,
+            (16, 16),
+            (0, 255, 0),
+            icon,
+            np.zeros((64, 64), dtype=np.uint8),
+        )
+
+        self.assertIsInstance(
+            drone.exploration_policy,
+            FrontierExplorationPolicy,
         )
 
     def test_homing_follows_path_and_updates_heading(self) -> None:
@@ -190,6 +258,128 @@ class DroneMovementTests(unittest.TestCase):
             self.drone.exploration_policy.contexts[0].pose_estimate.position,
             (16, 16),
         )
+
+    def test_empty_cached_frontiers_do_not_force_homing_before_policy_decides(self) -> None:
+        target = (18, 16)
+        self.control.paths[((16, 16), target)] = [target]
+        self.drone.runtime_state.begin_exploration(0, [])
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.STEP,
+                target=target,
+                direction=90,
+                valid_directions=(90,),
+                frontier_targets=((24, 16),),
+            )
+        )
+
+        self.drone.movement_controller.move()
+        first_context = self.drone.exploration_policy.contexts[0]
+
+        self.assertFalse(first_context.runtime_snapshot.returning_home)
+        self.assertEqual(self.drone.snapshot().position, target)
+        self.assertFalse(self.drone.snapshot().returning_home)
+
+    def test_confirmed_exhaustion_starts_homing_after_frontier_rebuild(self) -> None:
+        self.drone.runtime_state.move_to((20, 16))
+        self.control.paths[((20, 16), (16, 16))] = [
+            (20, 16),
+            (16, 16),
+        ]
+        self.drone.exploration_policy = ExhaustedPolicy()
+
+        self.drone.movement_controller.move()
+        snapshot = self.drone.snapshot()
+
+        self.assertEqual(snapshot.position, (16, 16))
+        self.assertTrue(snapshot.returning_home)
+        self.assertTrue(snapshot.done)
+        self.assertEqual(len(self.drone.exploration_policy.contexts), 2)
+
+    def test_move_executes_policy_planned_path_with_safety_validation(self) -> None:
+        target = (18, 16)
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.STEP,
+                target=target,
+                direction=90,
+                valid_directions=(90,),
+                frontier_targets=((24, 16),),
+                planned_path=((17, 16), target),
+            )
+        )
+        calls = []
+        original_is_valid = self.drone.runtime_state.graph_is_valid
+
+        def record_validation(current, candidate):
+            calls.append((current, candidate))
+            return original_is_valid(current, candidate)
+
+        self.drone.runtime_state.graph_is_valid = record_validation
+
+        self.drone.movement_controller.move()
+
+        self.assertEqual(self.drone.snapshot().position, target)
+        self.assertEqual(
+            calls,
+            [((16, 16), (17, 16)), ((17, 16), target)],
+        )
+        self.assertEqual(len(self.drone.exploration_policy.contexts), 1)
+
+    def test_rejected_policy_step_records_collision_in_slam(self) -> None:
+        blocked = (17, 16)
+        self.drone.cave[blocked[1], blocked[0]] = 1
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.STEP,
+                target=(18, 16),
+                direction=90,
+                valid_directions=(90,),
+                planned_path=(blocked, (18, 16)),
+            )
+        )
+
+        self.drone.movement_controller.move()
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+
+        self.assertEqual(self.drone.snapshot().position, (16, 16))
+        self.assertEqual(int(slam.occupancy[blocked[1], blocked[0]]), 1)
+        self.assertEqual(float(slam.confidence[blocked[1], blocked[0]]), 1.0)
+
+    def test_move_executes_policy_rotate_decision(self) -> None:
+        self.drone.exploration_policy = FixedDecisionPolicy(
+            ExplorationDecision(
+                kind=ExplorationDecisionKind.ROTATE,
+                target=(16, 16),
+                direction=135,
+                frontier_targets=((24, 16),),
+            )
+        )
+
+        self.drone.movement_controller.move()
+        snapshot = self.drone.snapshot()
+
+        self.assertEqual(snapshot.position, (16, 16))
+        self.assertEqual(snapshot.direction, 135)
+        self.assertEqual(snapshot.heading_deg, 135.0)
+        self.assertEqual(snapshot.frontiers, ((24, 16),))
+
+    def test_choose_action_replans_from_newer_slam_snapshot(self) -> None:
+        policy = VersionRecordingPolicy()
+        self.drone.exploration_policy = policy
+
+        self.drone.movement_controller.move()
+
+        occupancy = np.full((64, 64), UNKNOWN, dtype=np.int8)
+        confidence = np.zeros((64, 64), dtype=np.float32)
+        occupancy[20, 20] = FREE
+        confidence[20, 20] = 1.0
+        self.drone.slam_map.merge_from(
+            SlamSnapshot(occupancy, confidence)
+        )
+        self.drone.movement_controller.move()
+
+        self.assertEqual(policy.versions, [0, 1])
 
     def test_move_executes_policy_frontier_decision(self) -> None:
         target = (24, 16)

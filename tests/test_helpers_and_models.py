@@ -1,8 +1,11 @@
 import unittest
 from dataclasses import FrozenInstanceError
+import json
+import tempfile
 from pathlib import Path
 
-from config.simulation_config import SimulationConfig, SlamConfig
+from config.simulation_config import SimulationConfig, SlamConfig, TraceConfig
+from mission.runtime_trace import RuntimeTraceLogger
 from mapping.poi import POI
 from asset_config.gameplay import GameOptions
 from asset_config.helpers import next_cell_coords, wall_hit
@@ -33,10 +36,33 @@ class HelperAndModelTests(unittest.TestCase):
         settings = SimulationConfig(slam=SlamConfig(scan_rays=24))
 
         self.assertEqual(settings.slam.scan_rays, 24)
+        self.assertFalse(settings.trace.enabled)
         with self.assertRaises(FrozenInstanceError):
             settings.slam.scan_rays = 12
         with self.assertRaises(ValueError):
             SlamConfig(scan_rays=0)
+        with self.assertRaises(ValueError):
+            TraceConfig(directory="")
+
+    def test_runtime_trace_writes_jsonl_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace = RuntimeTraceLogger(
+                Path(temp_dir),
+                TraceConfig(enabled=True, directory="logs"),
+            )
+            trace.record("example", value=3, position=(1, 2))
+            path = trace.path
+            trace.close()
+
+            self.assertIsNotNone(path)
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+
+        events = [json.loads(line) for line in lines]
+
+        self.assertEqual(events[0]["event"], "trace_started")
+        self.assertEqual(events[1]["event"], "example")
+        self.assertEqual(events[1]["position"], [1, 2])
+        self.assertEqual(events[-1]["event"], "trace_closed")
 
     def test_configuration_resources_and_options_are_available(self) -> None:
         self.assertEqual(GameOptions.MAP_SIZE, ["Small", "Medium", "Large"])
@@ -71,6 +97,7 @@ class HelperAndModelTests(unittest.TestCase):
             "GameConfig/simulation.local.ini",
             "Assets/Map/*.png",
             "Assets/Map/*.txt",
+            "logs/",
         ):
             self.assertIn(pattern, patterns)
 

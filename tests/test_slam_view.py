@@ -185,6 +185,26 @@ class SlamViewServiceTests(unittest.TestCase):
             (0, 0),
         )
 
+    def test_draw_ignores_terrain_dirty_when_heatmap_hidden(self) -> None:
+        control = self.make_control()
+        drone = make_drone()
+        control.drones = [drone]
+        control.presentation.terrain_heatmap_dirty = True
+        control.presentation.show_terrain_heatmap = False
+        control.game.window = SimpleNamespace(blit=Mock())
+        service = SlamViewService(control.dependencies)
+        service.rendered_versions[0] = drone.slam_map.version
+        service.refresh = Mock()
+
+        service.draw()
+
+        service.refresh.assert_not_called()
+        self.assertTrue(control.presentation.terrain_heatmap_dirty)
+        control.game.window.blit.assert_called_once_with(
+            control.slam_renderer.surface,
+            (0, 0),
+        )
+
     def test_draw_throttles_dirty_surface_rebuilds_but_keeps_blitting(self) -> None:
         control = self.make_control()
         control.presentation.show_full_map = False

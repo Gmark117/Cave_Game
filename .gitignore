@@ -27,3 +27,6 @@ GameConfig/simulation.ini
 # Runtime-generated cave map artifacts.
 Assets/Map/*.png
 Assets/Map/*.txt
+
+# Runtime diagnostics.
+logs/

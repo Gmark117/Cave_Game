@@ -211,6 +211,29 @@ class DroneSensorTests(unittest.TestCase):
         )
         self.assertEqual(fake_localizer.runtime_snapshot.position, (32, 32))
 
+    def test_sensor_update_skips_unchanged_pose(self) -> None:
+        sensor = self.drone.sensor_controller.vision_sensor
+        original_cast = sensor.cast_cone
+        calls = []
+
+        def record_cast(origin, heading):
+            calls.append((origin, heading))
+            return original_cast(origin, heading)
+
+        sensor.cast_cone = record_cast
+
+        self.drone.update_sensors()
+        first_version = self.drone.slam_map.version
+        self.drone.update_sensors()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.drone.slam_map.version, first_version)
+
+        self.drone.runtime_state.begin_exploration(90, ())
+        self.drone.update_sensors()
+
+        self.assertEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
