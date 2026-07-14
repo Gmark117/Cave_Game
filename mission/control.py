@@ -34,10 +34,12 @@ from contracts import (
     TerrainSharingDependencies,
 )
 from navigation.pathfinding import PathfindingService
+from navigation.waypoint_graph import WaypointGraph
 from mission.presentation_adapter import PresentationAdapter
 from rendering.slam_renderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
 from rendering.slam_view import SlamViewService
+from rendering.waypoint_renderer import WaypointRenderer
 from mission.lifecycle import MissionControlLifecycleMixin
 
 
@@ -95,6 +97,17 @@ class MissionControl(MissionControlLifecycleMixin):
             self.map_matrix,
             self.settings.mission_config.num_drones,
         )
+        waypoint_settings = self.settings.waypoints
+        self.waypoint_graph = (
+            WaypointGraph(
+                spacing=waypoint_settings.spacing,
+                merge_radius=waypoint_settings.merge_radius,
+                connector_distance=waypoint_settings.connector_distance,
+                connector_limit=waypoint_settings.connector_limit,
+            )
+            if waypoint_settings.enabled
+            else None
+        )
         self.mission_event = threading.Event()
         self.simulation_clock = SimulationClock()
         self.pause_coordinator = PauseCoordinator(self.mission_event)
@@ -125,6 +138,15 @@ class MissionControl(MissionControlLifecycleMixin):
             map_width=self.map_w,
             map_height=self.map_h,
             exploration_policy=self.settings.exploration.policy,
+            waypoint_routing=self.settings.waypoints.enabled,
+            waypoint_spacing=self.settings.waypoints.spacing,
+            waypoint_direct_path_limit=(
+                self.settings.waypoints.direct_path_limit
+            ),
+            waypoint_bridge_distance=(
+                self.settings.waypoints.direct_path_limit
+                + self.settings.waypoints.connector_distance
+            ),
         )
         
         self.delay = 1/15 # Set a delay for frame updates
@@ -135,6 +157,11 @@ class MissionControl(MissionControlLifecycleMixin):
         # Initialize presentation adapter for UI state and map rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
         self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
+        self.waypoint_renderer = (
+            WaypointRenderer(self.waypoint_graph, self.map_w, self.map_h)
+            if self.waypoint_graph is not None
+            else None
+        )
         self.last_explored_update = 0.0
         self.explored_update_interval = 0.5
         # Dependency bundles keep services decoupled from the large
@@ -205,6 +232,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 presentation=self.presentation,
                 is_paused=lambda: self.is_paused,
                 is_music_enabled=self.music_enabled,
+                waypoint_renderer=self.waypoint_renderer,
             )
         )
         

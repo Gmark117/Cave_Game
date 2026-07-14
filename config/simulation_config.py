@@ -91,6 +91,33 @@ class FrontierConfig:
 
 
 @dataclass(frozen=True)
+class WaypointConfig:
+    """Sparse highway routing and local connector limits."""
+
+    enabled: bool = True
+    spacing: float = 32.0
+    merge_radius: float = 4.0
+    direct_path_limit: float = 128.0
+    connector_distance: float = 64.0
+    connector_limit: int = 8
+
+    def __post_init__(self) -> None:
+        """Validate waypoint density and bounded-routing controls."""
+        if self.spacing <= 0.0:
+            raise ValueError("waypoint spacing must be positive")
+        if self.merge_radius < 0.0:
+            raise ValueError("waypoint merge_radius must be non-negative")
+        if self.merge_radius >= self.spacing:
+            raise ValueError("waypoint merge_radius must be smaller than spacing")
+        if self.direct_path_limit <= 0.0:
+            raise ValueError("direct_path_limit must be positive")
+        if self.connector_distance <= 0.0:
+            raise ValueError("connector_distance must be positive")
+        if self.connector_limit <= 0:
+            raise ValueError("connector_limit must be positive")
+
+
+@dataclass(frozen=True)
 class ExplorationConfig:
     """Exploration policy selection and MCTS search controls."""
 
@@ -179,3 +206,4 @@ class SimulationConfig:
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     rendering: RenderingConfig = field(default_factory=RenderingConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
+    waypoints: WaypointConfig = field(default_factory=WaypointConfig)

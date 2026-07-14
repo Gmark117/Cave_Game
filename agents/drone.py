@@ -11,6 +11,7 @@ from agents.drone_runtime_state import DroneRuntimeState, DroneSnapshot
 from mapping.drone_sensor import DroneSensorController
 from mapping.localization import PerfectPoseLocalizer
 from mapping.terrain_knowledge import TerrainKnowledge
+from navigation.waypoint_graph import WaypointGraph
 from contracts import (
     DroneMovementDependencies,
     DroneSensorDependencies,
@@ -78,6 +79,22 @@ class Drone:
         self.localizer = PerfectPoseLocalizer()
         self.exploration_policy = self._build_exploration_policy()
 
+        waypoint_settings = getattr(self.settings, "waypoints", None)
+        waypoint_graph = getattr(control, "waypoint_graph", None)
+        if (
+            waypoint_graph is None
+            and waypoint_settings is not None
+            and waypoint_settings.enabled
+        ):
+            # Lightweight test/custom controls may not own mission services.
+            # Production MissionControl injects one graph shared by all drones.
+            waypoint_graph = WaypointGraph(
+                spacing=waypoint_settings.spacing,
+                merge_radius=waypoint_settings.merge_radius,
+                connector_distance=waypoint_settings.connector_distance,
+                connector_limit=waypoint_settings.connector_limit,
+            )
+
         # SLAM state
         map_h = len(self.cave)
         map_w = len(self.cave[0]) if map_h else 0
@@ -92,6 +109,7 @@ class Drone:
                 pause_checkpoint=control.pause_checkpoint,
                 wait_simulation_delay=control.wait_simulation_delay,
                 runtime_trace=getattr(control, "runtime_trace", None),
+                waypoint_graph=waypoint_graph,
             ),
         )
         self.sensor_controller = DroneSensorController(

@@ -64,6 +64,7 @@ class MissionRendererTests(unittest.TestCase):
             ),
             is_paused=lambda: getattr(control, "is_paused", False),
             is_music_enabled=lambda: getattr(control, "music_enabled", True),
+            waypoint_renderer=getattr(control, "waypoint_renderer", None),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -102,6 +103,9 @@ class MissionRendererTests(unittest.TestCase):
         slam_view = SimpleNamespace(
             draw=lambda: events.append("slam"),
         )
+        waypoint_renderer = SimpleNamespace(
+            draw=lambda window: events.append("waypoints"),
+        )
         build_debug_lines = Mock(
             side_effect=lambda snapshots: events.append("debug") or ["line"],
         )
@@ -117,6 +121,7 @@ class MissionRendererTests(unittest.TestCase):
         control = SimpleNamespace(
             game=SimpleNamespace(window=RecordingWindow(events)),
             slam_view=slam_view,
+            waypoint_renderer=waypoint_renderer,
             debug_info=debug_info,
             control_center=control_center,
             drones=[drone],
@@ -138,6 +143,7 @@ class MissionRendererTests(unittest.TestCase):
             [
                 "clear",
                 "slam",
+                "waypoints",
                 "drone_path",
                 "rover_path",
                 "drone_vision",

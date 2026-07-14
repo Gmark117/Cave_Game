@@ -16,6 +16,7 @@ from config.simulation_config import (
     SimulationConfig,
     SlamConfig,
     TraceConfig,
+    WaypointConfig,
 )
 from asset_config.gameplay import GameOptions
 
@@ -140,6 +141,14 @@ class MenuSettingsRepository:
             ),
             "rebuild_cooldown": str(settings.frontier.rebuild_cooldown),
         }
+        config["WAYPOINTS"] = {
+            "enabled": str(settings.waypoints.enabled),
+            "spacing": str(settings.waypoints.spacing),
+            "merge_radius": str(settings.waypoints.merge_radius),
+            "direct_path_limit": str(settings.waypoints.direct_path_limit),
+            "connector_distance": str(settings.waypoints.connector_distance),
+            "connector_limit": str(settings.waypoints.connector_limit),
+        }
         config["EXPLORATION"] = {
             "policy": settings.exploration.policy,
             "iterations": str(settings.exploration.iterations),
@@ -214,6 +223,15 @@ class MenuSettingsRepository:
                     defaults.frontier,
                 ),
                 defaults.frontier,
+            ),
+            waypoints=self._section_or_default(
+                lambda: self._read_waypoints(
+                    config["WAYPOINTS"]
+                    if config.has_section("WAYPOINTS")
+                    else {},
+                    defaults.waypoints,
+                ),
+                defaults.waypoints,
             ),
             exploration=self._section_or_default(
                 lambda: self._read_exploration(
@@ -340,6 +358,37 @@ class MenuSettingsRepository:
                     "rebuild_cooldown",
                     defaults.rebuild_cooldown,
                 )
+            ),
+        )
+
+    @staticmethod
+    def _read_waypoints(
+        section: object,
+        defaults: WaypointConfig,
+    ) -> WaypointConfig:
+        """Parse sparse waypoint/highway routing settings."""
+        enabled_value = str(section.get("enabled", defaults.enabled))
+        enabled = enabled_value.casefold() in {"1", "true", "yes", "on"}
+        return WaypointConfig(
+            enabled=enabled,
+            spacing=float(section.get("spacing", defaults.spacing)),
+            merge_radius=float(
+                section.get("merge_radius", defaults.merge_radius)
+            ),
+            direct_path_limit=float(
+                section.get(
+                    "direct_path_limit",
+                    defaults.direct_path_limit,
+                )
+            ),
+            connector_distance=float(
+                section.get(
+                    "connector_distance",
+                    defaults.connector_distance,
+                )
+            ),
+            connector_limit=int(
+                section.get("connector_limit", defaults.connector_limit)
             ),
         )
 

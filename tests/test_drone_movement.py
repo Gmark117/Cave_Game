@@ -1,3 +1,4 @@
+import math
 import os
 import threading
 import time
@@ -30,6 +31,7 @@ from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
 from agents.drone_movement import DroneMovementController
 from mapping.terrain_knowledge import TerrainKnowledge
 from mission.pause_control import PauseCoordinator
+from navigation.waypoint_graph import WaypointGraph
 
 
 class ImmediateEvent:
@@ -44,12 +46,14 @@ class MovementControl:
     def __init__(self) -> None:
         self.mission_event = ImmediateEvent()
         self.paths = {}
+        self.path_requests = []
         self.terrain_knowledge = TerrainKnowledge(
             np.zeros((64, 64), dtype=np.uint8)
         )
         self.terrain_fusion = SimpleNamespace(record_scan=lambda samples: None)
 
     def compute_path(self, start, goal):
+        self.path_requests.append((start, goal))
         return list(self.paths.get((start, goal), []))
 
     def simulation_time(self) -> float:
@@ -61,6 +65,14 @@ class MovementControl:
     def wait_simulation_delay(self, duration: float) -> bool:
         self.mission_event.wait(duration)
         return True
+
+
+class RecordingTrace:
+    def __init__(self) -> None:
+        self.events = []
+
+    def record(self, event, **fields) -> None:
+        self.events.append((event, fields))
 
 
 class FixedDecisionPolicy:
@@ -235,6 +247,63 @@ class DroneMovementTests(unittest.TestCase):
         self.assertEqual(controller.frontier_stride, 2)
         self.assertEqual(controller.border_retry_cooldown, 3.0)
 
+    def test_short_policy_moves_share_waypoint_spacing_across_actions(self) -> None:
+        graph = WaypointGraph(
+            spacing=32.0,
+            merge_radius=4.0,
+            connector_distance=64.0,
+            connector_limit=8,
+        )
+        graph.add_waypoint((16, 16), source="home")
+        controller = self.drone.movement_controller
+        controller.waypoint_graph = graph
+        controller._waypoint_pending_path = [(16, 16)]
+
+        for target in ((26, 16), (36, 16), (46, 16), (56, 16)):
+            self.assertTrue(controller._follow_policy_path([target]))
+
+        self.assertEqual(graph.counts(), (2, 1))
+        self.assertEqual(
+            tuple(node.position for node in graph.snapshot().nodes),
+            ((16, 16), (48, 16)),
+        )
+        self.assertEqual(
+            (
+                controller._waypoint_pending_path[0],
+                controller._waypoint_pending_path[-1],
+            ),
+            ((48, 16), (56, 16)),
+        )
+
+    def test_waypoint_spacing_survives_many_registration_chunks(self) -> None:
+        graph = WaypointGraph(
+            spacing=32.0,
+            merge_radius=4.0,
+            connector_distance=64.0,
+            connector_limit=8,
+        )
+        graph.add_waypoint((0, 0), source="home")
+        controller = self.drone.movement_controller
+        controller.waypoint_graph = graph
+        controller._waypoint_pending_path = [(0, 0)]
+
+        for index in range(100):
+            controller._register_travelled_path(
+                [(index * 10, 0), ((index + 1) * 10, 0)]
+            )
+
+        self.assertEqual(graph.counts(), (32, 31))
+        self.assertEqual(
+            (
+                controller._waypoint_pending_path[0],
+                controller._waypoint_pending_path[-1],
+            ),
+            ((992, 0), (1000, 0)),
+        )
+        controller._flush_pending_waypoint_path(force=True)
+        self.assertEqual(graph.counts(), (33, 32))
+        self.assertEqual(controller._waypoint_pending_path, [(1000, 0)])
+
     def test_move_executes_policy_step_decision(self) -> None:
         target = (18, 16)
         self.control.paths[((16, 16), target)] = [target]
@@ -397,6 +466,348 @@ class DroneMovementTests(unittest.TestCase):
 
         self.assertEqual(self.drone.snapshot().position, target)
         self.assertEqual(self.drone.snapshot().frontiers, ())
+
+    def test_failed_direct_frontier_path_uses_one_waypoint_segment(self) -> None:
+        target = (56, 16)
+        graph = self._configured_highway_graph(direct_path_limit=100.0)
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths[((16, 16), (36, 16))] = [
+            (16, 16),
+            (36, 16),
+        ]
+        self.drone.runtime_state.merge_frontiers([target])
+
+        moved = controller._reach_frontier_targets([target])
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, (36, 16))
+        self.assertIn(target, self.drone.snapshot().frontiers)
+        self.assertEqual(
+            self.control.path_requests,
+            [((16, 16), target), ((16, 16), (36, 16))],
+        )
+        event_names = [event for event, _fields in trace.events]
+        self.assertIn("drone_frontier_direct_path_failed", event_names)
+        self.assertIn("drone_waypoint_route", event_names)
+        self.assertIn("drone_waypoint_segment_path", event_names)
+        self.assertNotIn("drone_frontier_reached", event_names)
+        route_event = next(
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_route"
+        )
+        self.assertEqual(route_event["status"], "ok")
+        self.assertEqual(route_event["gateway_status"], "ok")
+        self.assertGreaterEqual(route_event["route_elapsed_ms"], 0.0)
+        self.assertGreater(route_event["graph_nodes"], 0)
+
+    def test_waypoint_frontier_replans_and_consumes_only_at_target(self) -> None:
+        target = (56, 16)
+        graph = self._configured_highway_graph(direct_path_limit=1.0)
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths.update(
+            {
+                ((16, 16), (36, 16)): [(16, 16), (36, 16)],
+                ((36, 16), (52, 16)): [(36, 16), (52, 16)],
+                ((52, 16), target): [(52, 16), target],
+            }
+        )
+        self.drone.runtime_state.merge_frontiers([target])
+
+        self.assertTrue(controller._reach_frontier_targets([target]))
+        self.assertEqual(self.drone.snapshot().position, (36, 16))
+        self.assertIn(target, self.drone.snapshot().frontiers)
+
+        self.assertTrue(controller._reach_frontier_targets([target]))
+        self.assertEqual(self.drone.snapshot().position, (52, 16))
+        self.assertIn(target, self.drone.snapshot().frontiers)
+
+        self.assertTrue(controller._reach_frontier_targets([target]))
+        self.assertEqual(self.drone.snapshot().position, target)
+        self.assertNotIn(target, self.drone.snapshot().frontiers)
+        segment_events = [
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_segment_path"
+        ]
+        reached_events = [
+            fields
+            for event, fields in trace.events
+            if event == "drone_frontier_reached"
+        ]
+        self.assertEqual(len(segment_events), 3)
+        self.assertEqual(len(reached_events), 1)
+
+    def test_unroutable_far_frontier_falls_back_to_near_direct_target(self) -> None:
+        far_target = (56, 56)
+        near_target = (20, 16)
+        graph = self._configured_highway_graph(direct_path_limit=10.0)
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+        )
+        self.control.paths[((16, 16), near_target)] = [
+            (16, 16),
+            near_target,
+        ]
+        self.drone.runtime_state.merge_frontiers(
+            [far_target, near_target]
+        )
+
+        moved = controller._reach_frontier_targets(
+            [far_target, near_target]
+        )
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, near_target)
+        self.assertIn(far_target, self.drone.snapshot().frontiers)
+        self.assertNotIn(near_target, self.drone.snapshot().frontiers)
+        self.assertIn(far_target, controller.border_retry_until)
+        self.assertEqual(
+            self.control.path_requests,
+            [((16, 16), near_target)],
+        )
+
+    def test_bridge_advances_far_frontier_before_near_direct_target(self) -> None:
+        far_target = (56, 40)
+        near_target = (20, 16)
+        graph = self._configured_highway_graph(direct_path_limit=10.0)
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths[((16, 16), (36, 16))] = [
+            (16, 16),
+            (36, 16),
+        ]
+        self.control.paths[((16, 16), near_target)] = [
+            (16, 16),
+            near_target,
+        ]
+        self.drone.runtime_state.merge_frontiers(
+            [far_target, near_target]
+        )
+        known_free = controller._known_free_mask(
+            self.drone.slam_map.snapshot(point_limit=0)
+        )
+
+        self.assertGreater(
+            math.dist((52, 16), far_target),
+            graph.connector_distance,
+        )
+        self.assertLessEqual(
+            math.dist((52, 16), far_target),
+            controller._waypoint_bridge_distance(),
+        )
+        self.assertEqual(
+            graph.find_route((16, 16), far_target, known_free).status,
+            "no_goal_connector",
+        )
+
+        moved = controller._reach_frontier_targets(
+            [far_target, near_target]
+        )
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, (36, 16))
+        self.assertIn(far_target, self.drone.snapshot().frontiers)
+        self.assertIn(near_target, self.drone.snapshot().frontiers)
+        self.assertEqual(
+            self.control.path_requests,
+            [((16, 16), (36, 16))],
+        )
+        bridge_event = next(
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_bridge"
+        )
+        self.assertEqual(bridge_event["status"], "ok")
+        self.assertGreater(bridge_event["added_edge_count"], 0)
+
+    def test_bridge_repairs_disconnected_shared_gateway(self) -> None:
+        far_target = (56, 40)
+        graph = self._configured_highway_graph(direct_path_limit=10.0)
+        graph.add_waypoint(far_target, source="gateway")
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths[((16, 16), (36, 16))] = [
+            (16, 16),
+            (36, 16),
+        ]
+        self.drone.runtime_state.merge_frontiers([far_target])
+        known_free = controller._known_free_mask(
+            self.drone.slam_map.snapshot(point_limit=0)
+        )
+
+        self.assertEqual(
+            graph.find_route((16, 16), far_target, known_free).status,
+            "disconnected",
+        )
+
+        moved = controller._reach_frontier_targets([far_target])
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, (36, 16))
+        bridge_event = next(
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_bridge"
+        )
+        self.assertEqual(
+            bridge_event["initial_route_status"],
+            "disconnected",
+        )
+        self.assertEqual(bridge_event["status"], "ok")
+
+    def test_non_bridgeable_target_does_not_consume_bridge_budget(self) -> None:
+        unknown_target = (56, 56)
+        bridge_target = (56, 40)
+        graph = self._configured_highway_graph(direct_path_limit=10.0)
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths[((16, 16), (36, 16))] = [
+            (16, 16),
+            (36, 16),
+        ]
+        self.drone.runtime_state.merge_frontiers(
+            [unknown_target, bridge_target]
+        )
+        known_free = controller._known_free_mask(
+            self.drone.slam_map.snapshot(point_limit=0)
+        )
+        known_free[unknown_target[1], unknown_target[0]] = False
+
+        with patch.object(
+            controller,
+            "_known_free_mask",
+            return_value=known_free,
+        ):
+            moved = controller._reach_frontier_targets(
+                [unknown_target, bridge_target]
+            )
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, (36, 16))
+        bridge_events = [
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_bridge"
+        ]
+        self.assertEqual(len(bridge_events), 1)
+        self.assertEqual(bridge_events[0]["target"], bridge_target)
+        self.assertEqual(bridge_events[0]["status"], "ok")
+
+    def test_unsafe_astar_shortcut_uses_trusted_route_shape(self) -> None:
+        target = (36, 16)
+        graph = WaypointGraph(
+            spacing=100.0,
+            merge_radius=0.0,
+            connector_distance=4.0,
+            connector_limit=4,
+        )
+        travelled = (
+            (16, 16),
+            (16, 24),
+            (36, 24),
+            target,
+        )
+        graph.register_travelled_path(travelled)
+        occupancy = np.full((64, 64), UNKNOWN, dtype=np.int8)
+        confidence = np.zeros((64, 64), dtype=np.float32)
+        for x, y in ((16, 16), target):
+            occupancy[y, x] = FREE
+            confidence[y, x] = 1.0
+        self.drone.slam_map.merge_from(
+            SlamSnapshot(occupancy, confidence)
+        )
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        controller.waypoint_graph = graph
+        controller.waypoint_config = replace(
+            self.drone.settings.waypoints,
+            direct_path_limit=1.0,
+        )
+        controller.dependencies = replace(
+            controller.dependencies,
+            waypoint_graph=graph,
+            runtime_trace=trace,
+        )
+        self.control.paths[((16, 16), target)] = [
+            (16, 16),
+            (26, 16),
+            target,
+        ]
+        self.drone.runtime_state.merge_frontiers([target])
+
+        moved = controller._reach_frontier_targets([target])
+
+        self.assertTrue(moved)
+        self.assertEqual(self.drone.snapshot().position, target)
+        self.assertNotIn(target, self.drone.snapshot().frontiers)
+        self.assertIn((16, 24), self.drone.snapshot().path_history)
+        segment_event = next(
+            fields
+            for event, fields in trace.events
+            if event == "drone_waypoint_segment_path"
+        )
+        self.assertEqual(
+            segment_event["path_source"],
+            "trusted_route_fallback",
+        )
+        self.assertEqual(segment_event["astar_path_len"], 3)
+        self.assertGreater(segment_event["path_len"], 3)
+
+    def _configured_highway_graph(
+        self,
+        *,
+        direct_path_limit: float,
+    ) -> WaypointGraph:
+        """Install a known-free travelled chain for waypoint integration tests."""
+        occupancy = np.full((64, 64), FREE, dtype=np.int8)
+        confidence = np.ones((64, 64), dtype=np.float32)
+        self.drone.slam_map.merge_from(
+            SlamSnapshot(occupancy, confidence)
+        )
+        graph = WaypointGraph(
+            spacing=20.0,
+            merge_radius=0.0,
+            connector_distance=15.0,
+            connector_limit=4,
+        )
+        graph.register_travelled_path([(16, 16), (52, 16)])
+        controller = self.drone.movement_controller
+        controller.waypoint_graph = graph
+        controller.waypoint_config = replace(
+            self.drone.settings.waypoints,
+            direct_path_limit=direct_path_limit,
+        )
+        return graph
 
     def test_move_executes_policy_homing_decision_and_marks_done(self) -> None:
         self.drone.runtime_state.move_to((20, 20))

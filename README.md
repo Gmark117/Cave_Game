@@ -95,13 +95,13 @@ still blitted every frame.
 
 ### Agent Responsibilities
 
-`agents/drone.py` focuses on exploration. Each drone moves through the cave, scans its surroundings, records terrain observations locally, and uses pathfinding when it needs to reach a frontier or a chosen target.
+`agents/drone.py` focuses on exploration. Each drone moves through the cave, scans its surroundings, records terrain observations locally, and uses pathfinding when it needs to reach a frontier or a chosen target. Long frontier journeys use a sparse mission waypoint graph learned from travelled paths and confident SLAM free space. Observed frontier regions are joined to that graph by bounded, sampled known-free corridors; drones execute and replan one short A* segment at a time.
 
 `agents/rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
 
 ### Support Systems
 
-`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `navigation/astar_pathfinder.py` contains the algorithms themselves. `agents/graph.py` stores and validates exploration connectivity, while `ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI concerns outside the simulation core.
+`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `navigation/astar_pathfinder.py` contains the grid algorithms, and `navigation/waypoint_graph.py` provides sparse, thread-safe highway routing without reading the ground-truth cave topology. `agents/graph.py` stores and validates local exploration connectivity, while `ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI concerns outside the simulation core.
 
 ## Runtime and Data Flow
 
@@ -180,15 +180,16 @@ This is why the game feels like an exploration system rather than a simple sprit
 
 The rendering path is deliberately separated from mission logic.
 
-`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, while each agent renderer owns paths, vision, and icons. The control-center facade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
+`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, `rendering/waypoint_renderer.py` caches the persistent highway overlay, and each agent renderer owns paths, vision, and icons. The control-center facade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
 
 Rendering is layered so the visual output stays readable:
 
 1. Black canvas and SLAM or terrain surface
-2. Agent paths
-3. Drone vision
-4. Agent icons
-5. Control center and stop button
+2. Waypoint highway edges and nodes
+3. Agent paths
+4. Drone vision
+5. Agent icons
+6. Control center and stop button
 
 Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 
@@ -197,7 +198,8 @@ Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 The project keeps its runtime settings and visual assets in predictable locations.
 
 - `GameConfig/options.default.ini` and `GameConfig/simulation.default.ini`
-  store committed defaults.
+  store committed defaults, including waypoint spacing and bounded connector
+  controls.
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
   user changes and are ignored by Git.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
@@ -231,7 +233,7 @@ Simulation settings available in-game:
 | Known map visualization | Implemented | Available in current simulation flow |
 | Distributed terrain sharing | Implemented | Drone-to-drone and rover terrain sharing are active |
 | POI and path sharing | Planned | POI model exists; runtime integration is deferred |
-| Waypoints for optimal path segmentation | Planned | Not yet implemented |
+| Waypoints for path segmentation | Implemented | Shared SLAM-safe highways, bounded frontier bridges, one-segment replanning, and a cached overlay are active |
 | Battery management | Planned | Not yet implemented |
 | Non-random exploration logic | Planned | Current behavior includes random exploration components |
 | Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |

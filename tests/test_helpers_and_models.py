@@ -4,13 +4,19 @@ import json
 import tempfile
 from pathlib import Path
 
-from config.simulation_config import SimulationConfig, SlamConfig, TraceConfig
+from config.simulation_config import (
+    SimulationConfig,
+    SlamConfig,
+    TraceConfig,
+    WaypointConfig,
+)
 from mission.runtime_trace import RuntimeTraceLogger
 from mapping.poi import POI
 from asset_config.gameplay import GameOptions
 from asset_config.helpers import next_cell_coords, wall_hit
 from asset_config.media import Audio, Images
 from asset_config.rendering import Fonts
+from tools.analyze_runtime_trace import summarize
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +49,8 @@ class HelperAndModelTests(unittest.TestCase):
             SlamConfig(scan_rays=0)
         with self.assertRaises(ValueError):
             TraceConfig(directory="")
+        with self.assertRaises(ValueError):
+            WaypointConfig(spacing=4.0, merge_radius=4.0)
 
     def test_runtime_trace_writes_jsonl_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -63,6 +71,37 @@ class HelperAndModelTests(unittest.TestCase):
         self.assertEqual(events[1]["event"], "example")
         self.assertEqual(events[1]["position"], [1, 2])
         self.assertEqual(events[-1]["event"], "trace_closed")
+
+    def test_trace_analyzer_summarizes_waypoint_health(self) -> None:
+        lines = summarize(
+            [
+                {"event": "trace_started", "path": "example.jsonl"},
+                {
+                    "event": "drone_waypoint_route",
+                    "drone_id": 0,
+                    "sim_time": 1.0,
+                    "status": "ok",
+                    "bridge_status": "ok",
+                    "gateway_status": "ok",
+                    "route_elapsed_ms": 0.5,
+                    "graph_nodes": 33,
+                    "graph_edges": 32,
+                },
+                {
+                    "event": "drone_waypoint_segment_path",
+                    "drone_id": 0,
+                    "sim_time": 1.1,
+                    "path_source": "astar",
+                },
+            ]
+        )
+        summary = "\n".join(lines)
+
+        self.assertIn("waypoint route statuses: ok=1", summary)
+        self.assertIn("waypoint bridge statuses: ok=1", summary)
+        self.assertIn("waypoint gateway statuses: ok=1", summary)
+        self.assertIn("avg=0.50ms max=0.50ms graph=33n/32e", summary)
+        self.assertIn("waypoint segment paths: astar=1", summary)
 
     def test_configuration_resources_and_options_are_available(self) -> None:
         self.assertEqual(GameOptions.MAP_SIZE, ["Small", "Medium", "Large"])

@@ -16,6 +16,7 @@ from config.simulation_config import MissionConfig, SimulationConfig
 from mapping.terrain_knowledge import TerrainKnowledge
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
+from rendering.waypoint_renderer import WaypointRenderer
 
 
 class FakeGame:
@@ -85,6 +86,15 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(hasattr(mission, "known_roughness"))
         self.assertIsInstance(mission.pathfinding, PathfindingService)
         self.assertIsInstance(mission.renderer, MissionRenderer)
+        self.assertIsInstance(mission.waypoint_renderer, WaypointRenderer)
+        self.assertIs(
+            mission.waypoint_renderer.graph,
+            mission.waypoint_graph,
+        )
+        self.assertIs(
+            mission.renderer.dependencies.waypoint_renderer,
+            mission.waypoint_renderer,
+        )
         self.assertFalse(hasattr(mission.renderer, "stop_button_rect"))
         self.assertFalse(mission.restart_requested)
         self.assertFalse(mission.exit_requested)

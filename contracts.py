@@ -147,6 +147,7 @@ class MissionRendererDependencies:
     presentation: PresentationInvalidator
     is_paused: Callable[[], bool]
     is_music_enabled: Callable[[], bool]
+    waypoint_renderer: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ class DroneMovementDependencies:
     pause_checkpoint: Callable[[], bool]
     wait_simulation_delay: Callable[[float], bool]
     runtime_trace: Any | None = None
+    waypoint_graph: Any | None = None
 
 
 @dataclass(frozen=True)

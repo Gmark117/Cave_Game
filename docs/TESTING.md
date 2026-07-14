@@ -48,11 +48,13 @@ they protect.
 | Rover target reservation | `test_rover_targets.py` | Unit/service | Scoring, reservation, and completion must remain independent of rendering or threads. |
 | A* algorithms | `test_astar_pathfinder.py` | Unit/integration | Tests use real NumPy maps and shared memory, but no worker pool. |
 | Pathfinding resources | `test_pathfinding_service.py` | Service | Pool creation, bounded submission, fallback, and cleanup belong to the resource owner. |
+| Sparse waypoint routing | `test_waypoint_graph.py`, `test_drone_movement.py` | Unit/concurrency/interaction | Travel sampling, straight and curved known-free bridges, Dijkstra routing, graph locking, one-segment execution, and frontier retention protect long-route behavior without a live mission. |
 | Drone runtime state | `test_drone_runtime_state.py` | Unit/concurrency | Immutable snapshots, atomic movement/path updates, frontier timing, and concurrent read consistency belong to the synchronized state owner. |
 | Drone behavior | `test_drone_movement.py`, `test_drone_sensor.py` | Characterization/unit | Mission-facing actions use the small `Drone` API; detailed movement, sensing, terrain, and SLAM behavior is tested through owned collaborators with injected pathfinding, pause, clock, and terrain callbacks. |
 | Rover behavior | `test_rover.py` | Characterization | Planning, advancing, and target release form one rover workflow through explicit navigation dependencies. |
 | Agent construction | `test_agent_factory.py` | Interaction | Asset loading is mocked while constructor arguments, initialized agent state, and the first-aid/charging rover count policy are verified. |
 | Agent rendering | `test_agent_renderer.py` | Surface | Renderer-owned surfaces consume detached agent snapshots; non-empty drawing output is more stable than screenshots. |
+| Waypoint rendering | `test_waypoint_renderer.py`, `test_mission_renderer.py` | Surface/interaction | Graph revisions invalidate one transparent cache; stored edge polylines and source-colored nodes remain below agent overlays in the frame order. |
 | Mission construction and loop | `test_mission_lifecycle.py`, `test_pause_control.py` | Interaction/concurrency | Tests protect setup-only construction, explicit run lifecycle, stop/restart behavior, pause barriers, pause-aware time, cave reuse, and cleanup. |
 | Frame performance telemetry | `test_frame_timing.py`, `test_mission_lifecycle.py` | Unit/interaction | Smoothing and lifecycle stage boundaries are deterministic and should not require real-time sleeps. |
 | Mission frame composition | `test_mission_renderer.py` | Interaction/surface | Draw order, one coherent drone snapshot per frame, and detached status values crossing into the control center are contracts. |
@@ -157,7 +159,7 @@ audio, or full-frame layout:
 2. Navigate every menu and confirm selector, slider, seed, and audio behavior.
 3. Start a small mission with three drones.
 4. Confirm cave generation completes without worker or shared-memory warnings.
-5. Toggle global terrain, per-drone terrain, path, and vision controls.
+5. Toggle global terrain, per-drone terrain, path, and vision controls; confirm the waypoint edges and nodes remain aligned with the cave map.
 6. Confirm drones move, sense, share, return home, and remain visually aligned.
 7. Confirm rover information changes after nearby terrain sharing.
 8. Press `PAUSE` and verify agents, mission updates, and the timer freeze while

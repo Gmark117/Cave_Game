@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict, deque
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -35,6 +36,13 @@ def summarize(events: Iterable[dict[str, Any]]) -> list[str]:
         lambda: deque(maxlen=12)
     )
     last_decision: dict[int, dict[str, Any]] = {}
+    waypoint_route_statuses: dict[int, Counter[str]] = defaultdict(Counter)
+    waypoint_bridge_statuses: dict[int, Counter[str]] = defaultdict(Counter)
+    waypoint_gateway_statuses: dict[int, Counter[str]] = defaultdict(Counter)
+    waypoint_segment_sources: dict[int, Counter[str]] = defaultdict(Counter)
+    waypoint_route_time_total: dict[int, float] = defaultdict(float)
+    waypoint_route_time_max: dict[int, float] = defaultdict(float)
+    waypoint_graph_size: dict[int, tuple[int, int]] = {}
     last_frame: dict[str, Any] | None = None
     trace_path = "-"
 
@@ -52,6 +60,33 @@ def summarize(events: Iterable[dict[str, Any]]) -> list[str]:
         drone_id = int(drone_id)
         per_drone_counts[drone_id][event_name] += 1
         last_by_drone[drone_id].append(event)
+        if event_name == "drone_waypoint_route":
+            waypoint_route_statuses[drone_id][
+                str(event.get("status", "unknown"))
+            ] += 1
+            bridge_status = event.get("bridge_status")
+            if bridge_status is not None:
+                waypoint_bridge_statuses[drone_id][
+                    str(bridge_status)
+                ] += 1
+            waypoint_gateway_statuses[drone_id][
+                str(event.get("gateway_status", "unknown"))
+            ] += 1
+            route_elapsed_ms = float(event.get("route_elapsed_ms", 0.0))
+            if math.isfinite(route_elapsed_ms):
+                waypoint_route_time_total[drone_id] += route_elapsed_ms
+                waypoint_route_time_max[drone_id] = max(
+                    waypoint_route_time_max[drone_id],
+                    route_elapsed_ms,
+                )
+            waypoint_graph_size[drone_id] = (
+                int(event.get("graph_nodes", 0)),
+                int(event.get("graph_edges", 0)),
+            )
+        if event_name == "drone_waypoint_segment_path":
+            waypoint_segment_sources[drone_id][
+                str(event.get("path_source", "unknown"))
+            ] += 1
         if event_name in {"drone_decision", "drone_post_rebuild_decision"}:
             last_decision[drone_id] = event
 
@@ -90,6 +125,12 @@ def summarize(events: Iterable[dict[str, Any]]) -> list[str]:
             "drone_post_rebuild_decision",
             "drone_policy_exhausted",
             "drone_frontier_path",
+            "drone_frontier_direct_path_failed",
+            "drone_frontier_direct_path_skipped",
+            "drone_waypoint_route",
+            "drone_waypoint_bridge",
+            "drone_waypoint_segment_path",
+            "drone_waypoint_segment_complete",
             "drone_frontier_targets_exhausted",
             "drone_policy_path_invalid",
             "drone_start_homing_after_exhaustion",
@@ -99,6 +140,46 @@ def summarize(events: Iterable[dict[str, Any]]) -> list[str]:
         for name in interesting:
             if counts[name]:
                 lines.append(f"  {name}: {counts[name]}")
+        if waypoint_route_statuses[drone_id]:
+            statuses = ", ".join(
+                f"{status}={count}"
+                for status, count in waypoint_route_statuses[drone_id].most_common()
+            )
+            lines.append(f"  waypoint route statuses: {statuses}")
+        if waypoint_gateway_statuses[drone_id]:
+            statuses = ", ".join(
+                f"{status}={count}"
+                for status, count in waypoint_gateway_statuses[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(f"  waypoint gateway statuses: {statuses}")
+        if waypoint_bridge_statuses[drone_id]:
+            statuses = ", ".join(
+                f"{status}={count}"
+                for status, count in waypoint_bridge_statuses[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(f"  waypoint bridge statuses: {statuses}")
+        route_count = sum(waypoint_route_statuses[drone_id].values())
+        if route_count:
+            graph_nodes, graph_edges = waypoint_graph_size.get(
+                drone_id,
+                (0, 0),
+            )
+            lines.append(
+                "  waypoint route timing: "
+                f"avg={waypoint_route_time_total[drone_id] / route_count:.2f}ms "
+                f"max={waypoint_route_time_max[drone_id]:.2f}ms "
+                f"graph={graph_nodes}n/{graph_edges}e"
+            )
+        if waypoint_segment_sources[drone_id]:
+            sources = ", ".join(
+                f"{source}={count}"
+                for source, count in waypoint_segment_sources[drone_id].most_common()
+            )
+            lines.append(f"  waypoint segment paths: {sources}")
 
         decision = last_decision.get(drone_id)
         if decision is not None:

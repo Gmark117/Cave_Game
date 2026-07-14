@@ -2,6 +2,7 @@
 
 import logging
 import math
+import time
 from typing import Any, List, Tuple
 
 import numpy as np
@@ -12,6 +13,12 @@ from agents.exploration_policy import (
     ExplorationDecisionKind,
 )
 from contracts import DroneMovementDependencies
+from mapping.ray_geometry import bresenham_line_points
+from mapping.slam_map import FREE
+from navigation.waypoint_graph import (
+    ROUTE_DISCONNECTED,
+    ROUTE_NO_GOAL_CONNECTOR,
+)
 
 
 Position = Tuple[int, int]
@@ -39,6 +46,13 @@ class DroneMovementController:
         self.frontier_confidence_threshold = (
             settings.frontier.confidence_threshold
         )
+        self.waypoint_config = getattr(settings, "waypoints", None)
+        self.waypoint_graph = dependencies.waypoint_graph
+        self.waypoint_bridge_attempt_limit = 1
+        self._waypoint_pending_path: List[Position] = [
+            (int(drone.start_pos[0]), int(drone.start_pos[1]))
+        ]
+        self._seed_home_waypoint()
 
     def move(self) -> None:
         """Advance the drone's exploration or homing state."""
@@ -262,9 +276,12 @@ class DroneMovementController:
         self,
         frontiers: tuple[Position, ...] | list[Position],
     ) -> bool:
-        """Follow an A* path to the first reachable frontier target."""
+        """Reach a frontier directly or advance one sparse highway segment."""
         drone = self.drone
         now = self._simulation_time()
+        slam_snapshot = None
+        known_free = None
+        bridge_budget = [self.waypoint_bridge_attempt_limit]
         for target in frontiers:
             current_position = drone.snapshot().position
             if target == current_position:
@@ -284,28 +301,74 @@ class DroneMovementController:
                 )
                 continue
 
-            path = self._compute_path(current_position, target)
-            self._trace(
-                "drone_frontier_path",
-                start=current_position,
-                target=target,
-                path_len=len(path),
+            distance = math.dist(current_position, target)
+            direct_limit = self._direct_path_limit()
+            direct_attempted = (
+                self.waypoint_graph is None or distance <= direct_limit
             )
-            if not path or len(path) <= 1:
-                self.border_retry_until[target] = (
-                    now + self.border_retry_cooldown
+            if direct_attempted:
+                path = self._compute_path(current_position, target)
+                self._trace(
+                    "drone_frontier_path",
+                    start=current_position,
+                    target=target,
+                    distance=distance,
+                    attempted=True,
+                    path_len=len(path),
                 )
-                continue
+                if path and len(path) > 1:
+                    followed = self._follow_path(path)
+                    if self._frontier_was_reached(target):
+                        self._mark_frontier_reached(target)
+                        return True
+                    # A shutdown or pause-barrier stop must not consume the
+                    # target or start another route from the partially moved
+                    # position in the same action.
+                    if not followed:
+                        return False
+                    if drone.snapshot().position != current_position:
+                        return True
 
-            self._follow_path(path)
-            drone.runtime_state.remove_frontier(target)
-            self.border_retry_until.pop(target, None)
-            self._trace(
-                "drone_frontier_reached",
-                target=target,
-                state=self._snapshot_summary(drone.snapshot()),
+                self._trace(
+                    "drone_frontier_direct_path_failed",
+                    start=current_position,
+                    target=target,
+                    distance=distance,
+                    path_len=len(path),
+                )
+            else:
+                self._trace(
+                    "drone_frontier_direct_path_skipped",
+                    start=current_position,
+                    target=target,
+                    distance=distance,
+                    direct_path_limit=direct_limit,
+                    reason="far_target",
+                )
+
+            if self.waypoint_graph is not None:
+                if slam_snapshot is None:
+                    slam_snapshot = drone.slam_map.snapshot(point_limit=0)
+                    known_free = self._known_free_mask(slam_snapshot)
+                    current_x, current_y = current_position
+                    if (
+                        0 <= current_y < known_free.shape[0]
+                        and 0 <= current_x < known_free.shape[1]
+                    ):
+                        # Occupying the current cell is direct traversal
+                        # evidence even if the latest scan confidence is low.
+                        known_free[current_y, current_x] = True
+                if known_free is not None and self._advance_waypoint_segment(
+                    current_position,
+                    target,
+                    known_free,
+                    bridge_budget=bridge_budget,
+                ):
+                    return True
+
+            self.border_retry_until[target] = (
+                now + self.border_retry_cooldown
             )
-            return True
 
         self._trace(
             "drone_frontier_targets_exhausted",
@@ -313,6 +376,180 @@ class DroneMovementController:
             state=self._snapshot_summary(drone.snapshot()),
         )
         return False
+
+    def _advance_waypoint_segment(
+        self,
+        start: Position,
+        target: Position,
+        known_free: np.ndarray,
+        *,
+        bridge_budget: List[int] | None = None,
+    ) -> bool:
+        """Plan and traverse only the next segment toward a far frontier."""
+        graph = self.waypoint_graph
+        if graph is None:
+            return False
+
+        # Short policy actions are accumulated across calls to preserve sparse
+        # spacing. A route needs the live pose anchored, so flush the remaining
+        # physically travelled tail before connector search.
+        self._flush_pending_waypoint_path(force=True)
+        route_started = time.perf_counter()
+        route = graph.find_route(start, target, known_free)
+        initial_route_status = route.status
+        bridge_status = "not_attempted"
+        bridge_update = None
+        bridge_search_distance = self._waypoint_bridge_distance()
+        bridgeable_statuses = {
+            ROUTE_NO_GOAL_CONNECTOR,
+            ROUTE_DISCONNECTED,
+        }
+        allow_bridge = (
+            bridge_budget is None or bridge_budget[0] > 0
+        )
+        if route.status in bridgeable_statuses and allow_bridge:
+            if bridge_budget is not None:
+                bridge_budget[0] -= 1
+            bridge_update = graph.connect_known_free_corridor(
+                target,
+                known_free,
+                search_distance=bridge_search_distance,
+                source="gateway",
+            )
+            bridge_status = bridge_update.status
+            if bridge_update.status == "ok":
+                route = graph.find_route(start, target, known_free)
+        elif route.status in bridgeable_statuses:
+            bridge_status = "attempt_budget_exhausted"
+        gateway_status = "not_attempted"
+        gateway_update = None
+        if route.found:
+            # Route search already uses an ephemeral, requester-validated goal
+            # connector. Persist a gateway only for a target that can actually
+            # make progress, avoiding graph growth from failed alternatives.
+            gateway_update = graph.connect_known_free_waypoint(
+                target,
+                known_free,
+                source="gateway",
+            )
+            gateway_status = gateway_update.status
+        route_elapsed_ms = (time.perf_counter() - route_started) * 1000.0
+        graph_nodes, graph_edges = graph.counts()
+        if bridge_update is not None:
+            self._trace_waypoint_update(bridge_update)
+            self._trace(
+                "drone_waypoint_bridge",
+                start=start,
+                target=target,
+                initial_route_status=initial_route_status,
+                status=bridge_status,
+                search_distance=bridge_search_distance,
+                sampled_waypoint_count=len(
+                    bridge_update.sampled_waypoints
+                ),
+                sampled_waypoints=self._position_sample(
+                    list(bridge_update.sampled_waypoints)
+                ),
+                added_waypoint_count=len(
+                    bridge_update.added_waypoints
+                ),
+                added_edge_count=len(bridge_update.added_edges),
+            )
+        if gateway_update is not None:
+            self._trace_waypoint_update(gateway_update)
+        route_positions = tuple(route.waypoints)
+        next_waypoint = (
+            route_positions[1] if len(route_positions) > 1 else None
+        )
+        self._trace(
+            "drone_waypoint_route",
+            start=start,
+            target=target,
+            initial_status=initial_route_status,
+            status=route.status,
+            bridge_status=bridge_status,
+            gateway_status=gateway_status,
+            route_len=len(route_positions),
+            route_sample=self._position_sample(list(route_positions)),
+            next_waypoint=next_waypoint,
+            route_cost=route.cost if math.isfinite(route.cost) else None,
+            route_elapsed_ms=route_elapsed_ms,
+            graph_nodes=graph_nodes,
+            graph_edges=graph_edges,
+        )
+        if not route.found or next_waypoint is None:
+            return False
+
+        astar_path = self._compute_path(start, next_waypoint)
+        trusted_path = list(route.first_segment_path)
+        segment_path: List[Position] = []
+        path_source = "failed"
+        if (
+            astar_path
+            and len(astar_path) > 1
+            and tuple(astar_path[0]) == start
+            and tuple(astar_path[-1]) == next_waypoint
+            and self._segment_path_is_known(
+                astar_path,
+                known_free,
+                trusted_path,
+            )
+        ):
+            segment_path = astar_path
+            path_source = "astar"
+        elif len(trusted_path) > 1:
+            # Every route edge is either physical traversal evidence or was
+            # validated against this requester's known-free mask. Following
+            # that stored shape is safer than accepting an omniscient A*
+            # shortcut through cells this drone has not learned yet.
+            segment_path = trusted_path
+            path_source = "trusted_route_fallback"
+
+        self._trace(
+            "drone_waypoint_segment_path",
+            start=start,
+            target=target,
+            segment_goal=next_waypoint,
+            route_source=route.first_segment_source,
+            path_source=path_source,
+            astar_path_len=len(astar_path),
+            path_len=len(segment_path),
+        )
+        if len(segment_path) <= 1:
+            return False
+
+        followed = self._follow_path(segment_path)
+        current = self.drone.snapshot().position
+        if self._frontier_was_reached(target):
+            self._mark_frontier_reached(target)
+            return True
+        if not followed:
+            return False
+        if current == start:
+            return False
+
+        self.border_retry_until.pop(target, None)
+        self._trace(
+            "drone_waypoint_segment_complete",
+            target=target,
+            segment_goal=next_waypoint,
+            state=self._snapshot_summary(self.drone.snapshot()),
+        )
+        return True
+
+    def _frontier_was_reached(self, target: Position) -> bool:
+        """Return whether movement ended at the selected frontier."""
+        return self.drone.snapshot().position == target
+
+    def _mark_frontier_reached(self, target: Position) -> None:
+        """Consume and trace a frontier only after physically reaching it."""
+        self.drone.runtime_state.remove_frontier(target)
+        self.border_retry_until.pop(target, None)
+        self._trace(
+            "drone_frontier_reached",
+            target=target,
+            state=self._snapshot_summary(self.drone.snapshot()),
+        )
 
     def update_borders(self) -> None:
         """Rebuild frontier targets when the cooldown permits."""
@@ -447,6 +684,81 @@ class DroneMovementController:
         """Ask MissionControl's pathfinding service for a route."""
         return self.dependencies.compute_path(start, goal)
 
+    def _direct_path_limit(self) -> float:
+        """Return the largest distance that may use one direct A* request."""
+        if self.waypoint_config is None:
+            return float("inf")
+        return float(self.waypoint_config.direct_path_limit)
+
+    def _waypoint_bridge_distance(self) -> float:
+        """Return the bounded last-mile search radius for observed frontiers."""
+        graph = self.waypoint_graph
+        if graph is None:
+            return self._direct_path_limit()
+        return self._direct_path_limit() + float(graph.connector_distance)
+
+    def _known_free_mask(self, slam_snapshot: Any) -> np.ndarray:
+        """Build the strict SLAM-only traversability mask used by highways."""
+        return (
+            (slam_snapshot.occupancy == FREE)
+            & (
+                slam_snapshot.confidence
+                >= self.frontier_confidence_threshold
+            )
+        )
+
+    @staticmethod
+    def _segment_path_is_known(
+        path: List[Position],
+        known_free: np.ndarray,
+        trusted_path: List[Position],
+    ) -> bool:
+        """Reject A* shortcuts outside known-free or travelled route cells."""
+        trusted_cells = set(trusted_path)
+        height, width = known_free.shape
+
+        def allowed(point: Position) -> bool:
+            x, y = point
+            return (
+                0 <= x < width
+                and 0 <= y < height
+                and (
+                    bool(known_free[y, x])
+                    or point in trusted_cells
+                )
+            )
+
+        previous: Position | None = None
+        previous_cell: Position | None = None
+        for raw_point in path:
+            point = (int(raw_point[0]), int(raw_point[1]))
+            points = (
+                [point]
+                if previous is None
+                else bresenham_line_points(
+                    previous[0],
+                    previous[1],
+                    point[0],
+                    point[1],
+                )[1:]
+            )
+            for cell in points:
+                if not allowed(cell):
+                    return False
+                if (
+                    previous_cell is not None
+                    and cell[0] != previous_cell[0]
+                    and cell[1] != previous_cell[1]
+                    and not (
+                        allowed((cell[0], previous_cell[1]))
+                        or allowed((previous_cell[0], cell[1]))
+                    )
+                ):
+                    return False
+                previous_cell = cell
+            previous = point
+        return previous is not None
+
     def _simulation_time(self) -> float:
         """Return mission time with paused duration removed."""
         return self.dependencies.simulation_time()
@@ -454,17 +766,133 @@ class DroneMovementController:
     def _follow_path(self, path: List[Position]) -> bool:
         """Walk a path one node at a time, stopping cleanly on pause/shutdown."""
         drone = self.drone
-        for node in path:
-            if not self.dependencies.pause_checkpoint():
-                return False
+        executed = [drone.snapshot().position]
+        try:
+            for node in path:
+                normalized = (int(node[0]), int(node[1]))
+                if not self.dependencies.pause_checkpoint():
+                    return False
 
-            drone.runtime_state.move_to(node)
+                drone.runtime_state.move_to(normalized)
+                if normalized != executed[-1]:
+                    executed.append(normalized)
 
-            if not self.dependencies.wait_simulation_delay(
-                drone.delay / drone.speed_factor
-            ):
-                return False
-        return True
+                if not self.dependencies.wait_simulation_delay(
+                    drone.delay / drone.speed_factor
+                ):
+                    return False
+            return True
+        finally:
+            self._register_travelled_path(executed)
+
+    def _seed_home_waypoint(self) -> None:
+        """Add the shared mission home node before any drone starts moving."""
+        graph = self.waypoint_graph
+        if graph is None:
+            return
+        waypoint, added = graph.add_waypoint(
+            self.drone.start_pos,
+            source="home",
+        )
+        if added:
+            self._trace(
+                "waypoint_added",
+                waypoint=waypoint,
+                source="home",
+                node_count=graph.node_count,
+            )
+
+    def _register_travelled_path(self, path: List[Position]) -> None:
+        """Accumulate executed motion until one sparse interval is available."""
+        graph = self.waypoint_graph
+        if graph is None or len(path) <= 1:
+            return
+
+        normalized: List[Position] = []
+        for point in path:
+            position = (int(point[0]), int(point[1]))
+            if not normalized or normalized[-1] != position:
+                normalized.append(position)
+        if len(normalized) <= 1:
+            return
+
+        pending = self._waypoint_pending_path
+        if not pending:
+            pending.append(normalized[0])
+        elif pending[-1] != normalized[0]:
+            # External/test motion may bypass this controller. Do not invent an
+            # edge across that discontinuity; retain only the new observed tail.
+            self._flush_pending_waypoint_path(force=True)
+            pending = [normalized[0]]
+            self._waypoint_pending_path = pending
+        pending.extend(normalized[1:])
+        self._flush_pending_waypoint_path(force=False)
+
+    def _flush_pending_waypoint_path(self, *, force: bool) -> None:
+        """Commit the accumulated travelled tail when spacing or routing needs it."""
+        graph = self.waypoint_graph
+        pending = self._waypoint_pending_path
+        if graph is None or len(pending) <= 1:
+            return
+
+        dense: List[Position] = [pending[0]]
+        for start, end in zip(pending, pending[1:]):
+            dense.extend(
+                bresenham_line_points(
+                    start[0],
+                    start[1],
+                    end[0],
+                    end[1],
+                )[1:]
+            )
+        cumulative_distances = [0.0]
+        for start, end in zip(dense, dense[1:]):
+            cumulative_distances.append(
+                cumulative_distances[-1] + math.dist(start, end)
+            )
+        total_distance = cumulative_distances[-1]
+
+        if force:
+            commit_index = len(dense) - 1
+        else:
+            completed_intervals = int(
+                (total_distance + 1e-9) // graph.spacing
+            )
+            if completed_intervals <= 0:
+                return
+            commit_distance = completed_intervals * graph.spacing
+            commit_index = next(
+                index
+                for index, distance in enumerate(cumulative_distances)
+                if distance + 1e-9 >= commit_distance
+            )
+
+        committed = dense[: commit_index + 1]
+        self._waypoint_pending_path = dense[commit_index:]
+        update = graph.register_travelled_path(committed)
+        self._trace_waypoint_update(update)
+
+    def _trace_waypoint_update(self, update: Any) -> None:
+        """Trace actual sparse-graph mutations, excluding duplicate merges."""
+        graph = self.waypoint_graph
+        if graph is None:
+            return
+        for node in update.added_waypoints:
+            self._trace(
+                "waypoint_added",
+                waypoint=node.position,
+                source=node.source,
+                node_count=graph.node_count,
+            )
+        for edge in update.added_edges:
+            self._trace(
+                "waypoint_edge_added",
+                start=edge.start,
+                end=edge.end,
+                source=edge.source,
+                distance=edge.cost,
+                edge_count=graph.edge_count,
+            )
 
     def _trace(self, event: str, **fields: Any) -> None:
         """Write one movement trace event when runtime tracing is enabled."""
@@ -578,41 +1006,47 @@ class DroneMovementController:
         """Walk a policy path after simulator collision validation."""
         drone = self.drone
         current = drone.snapshot().position
-        for node in path:
-            if node == current:
-                continue
-            try:
-                valid_segment = drone.runtime_state.graph_is_valid(
-                    current,
-                    node,
-                )
-            except (IndexError, ValueError):
-                self._trace(
-                    "drone_policy_path_invalid",
-                    current=current,
-                    node=node,
-                    reason="validation_exception",
-                )
-                return False
-            if not valid_segment:
-                slam_updated = drone.slam_map.record_collision(node)
-                self._trace(
-                    "drone_policy_path_invalid",
-                    current=current,
-                    node=node,
-                    reason="blocked_segment",
-                    slam_updated=slam_updated,
-                    slam_version=drone.slam_map.version,
-                )
-                return False
-            if not self.dependencies.pause_checkpoint():
-                return False
+        executed = [current]
+        try:
+            for raw_node in path:
+                node = (int(raw_node[0]), int(raw_node[1]))
+                if node == current:
+                    continue
+                try:
+                    valid_segment = drone.runtime_state.graph_is_valid(
+                        current,
+                        node,
+                    )
+                except (IndexError, ValueError):
+                    self._trace(
+                        "drone_policy_path_invalid",
+                        current=current,
+                        node=node,
+                        reason="validation_exception",
+                    )
+                    return False
+                if not valid_segment:
+                    slam_updated = drone.slam_map.record_collision(node)
+                    self._trace(
+                        "drone_policy_path_invalid",
+                        current=current,
+                        node=node,
+                        reason="blocked_segment",
+                        slam_updated=slam_updated,
+                        slam_version=drone.slam_map.version,
+                    )
+                    return False
+                if not self.dependencies.pause_checkpoint():
+                    return False
 
-            drone.runtime_state.move_to(node)
-            current = node
+                drone.runtime_state.move_to(node)
+                current = node
+                executed.append(node)
 
-            if not self.dependencies.wait_simulation_delay(
-                drone.delay / drone.speed_factor
-            ):
-                return False
-        return True
+                if not self.dependencies.wait_simulation_delay(
+                    drone.delay / drone.speed_factor
+                ):
+                    return False
+            return True
+        finally:
+            self._register_travelled_path(executed)
