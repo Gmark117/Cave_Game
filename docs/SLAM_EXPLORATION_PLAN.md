@@ -80,9 +80,10 @@ On each sensor update:
 
 1. Capture one runtime snapshot.
 2. Ask the localizer for a `PoseEstimate`.
-3. Cast rays from the estimated pose.
-4. Update `SlamMap` using the estimated pose as the origin.
-5. Continue terrain sampling from the same ray hits.
+3. Build one gap-free `VisionScan` from the estimated pose.
+4. Update `SlamMap` from every visible free/occupied cone cell.
+5. Continue terrain sampling every second point on the scan's sparse ray hits;
+   terrain samples do not contribute to exploration gain.
 6. Store or expose the latest pose estimate for debugging/tests.
 
 Do not move localization logic into `SlamMap`; `SlamMap` should remain a synchronized occupancy/confidence/point-cloud store.

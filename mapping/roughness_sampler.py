@@ -23,7 +23,7 @@ class RoughnessSampler:
         self,
         origin: Tuple[float, float],
         ray_hits: Iterable[RayHit],
-        step: int = 4
+        step: int = 2
     ) -> List[Tuple[int, int, float, float]]:
         """Generate roughness samples along rays until wall hits."""
         if self.map_w <= 0 or self.map_h <= 0:

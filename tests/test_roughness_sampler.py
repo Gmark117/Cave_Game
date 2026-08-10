@@ -58,6 +58,31 @@ class RoughnessSamplerTests(unittest.TestCase):
             [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
         )
 
+    def test_default_sampling_keeps_every_second_visible_ray_cell(self) -> None:
+        cave = np.zeros((1, 5), dtype=np.uint8)
+        sampler = RoughnessSampler(
+            np.full((1, 5), 0.4, dtype=np.float32),
+            cave,
+        )
+        hit = RayHit(
+            end=(4, 0),
+            hit=False,
+            distance=4.0,
+            angle_deg=90.0,
+            points=((0, 0), (1, 0), (2, 0), (3, 0), (4, 0)),
+        )
+
+        with patch(
+            "mapping.roughness_sampler.np.random.uniform",
+            return_value=0.0,
+        ):
+            samples = sampler.sample_from_rays((0, 0), [hit])
+
+        self.assertEqual(
+            [(x, y) for x, y, _, _ in samples],
+            [(0, 0), (2, 0), (4, 0)],
+        )
+
     def test_ignores_hits_with_out_of_bounds_endpoints(self) -> None:
         sampler = RoughnessSampler(
             np.zeros((2, 2), dtype=np.float32),

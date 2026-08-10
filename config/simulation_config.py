@@ -72,49 +72,96 @@ class SharingConfig:
 
 @dataclass(frozen=True)
 class FrontierConfig:
-    """Frontier sampling and rebuild timing."""
+    """Stable frontier extraction and lifecycle settings."""
 
-    stride: int = 4
     confidence_threshold: float = 0.6
+    minimum_unknown_support: int = 4
+    continuation_min_distance: float = 12.0
+    continuation_scan_headings: int = 3
     rebuild_cooldown: float = 0.25
+    cluster_match_distance: float = 32.0
+    missing_refresh_limit: int = 3
+    gateway_min_separation: float = 64.0
 
     def __post_init__(self) -> None:
-        """Validate frontier sampling and rebuild timing."""
-        if self.stride <= 0:
-            raise ValueError("stride must be positive")
+        """Validate frontier extraction and lifecycle controls."""
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise ValueError(
                 "confidence_threshold must be between zero and one"
             )
+        if not 1 <= self.minimum_unknown_support <= 9:
+            raise ValueError(
+                "minimum_unknown_support must be between one and nine"
+            )
+        if self.continuation_min_distance < 0.0:
+            raise ValueError("continuation_min_distance must be non-negative")
+        if not 1 <= self.continuation_scan_headings <= 6:
+            raise ValueError(
+                "continuation_scan_headings must be between one and six"
+            )
         if self.rebuild_cooldown < 0.0:
             raise ValueError("rebuild_cooldown must be non-negative")
+        if self.cluster_match_distance < 0.0:
+            raise ValueError("cluster_match_distance must be non-negative")
+        if self.missing_refresh_limit < 0:
+            raise ValueError("missing_refresh_limit must be non-negative")
+        if self.gateway_min_separation < 0.0:
+            raise ValueError("gateway_min_separation must be non-negative")
 
 
 @dataclass(frozen=True)
 class WaypointConfig:
-    """Sparse highway routing and local connector limits."""
+    """Strategic trail, highway routing, and local connector limits."""
 
     enabled: bool = True
-    spacing: float = 32.0
-    merge_radius: float = 4.0
-    direct_path_limit: float = 128.0
+    spatial_hash_cell: int = 32
+    merge_radius: float = 8.0
     connector_distance: float = 64.0
+    gateway_connector_distance: float = 192.0
+    route_cache_capacity: int = 64
     connector_limit: int = 8
+    turn_threshold_degrees: float = 45.0
+    minimum_turn_leg: float = 24.0
+    chokepoint_narrow_clearance: float = 8.0
+    chokepoint_shoulder_clearance: float = 16.0
+    chokepoint_shoulder_length: float = 24.0
+    recovery_anchor_interval: float = 128.0
 
     def __post_init__(self) -> None:
-        """Validate waypoint density and bounded-routing controls."""
-        if self.spacing <= 0.0:
-            raise ValueError("waypoint spacing must be positive")
+        """Validate strategic-graph and bounded-connector controls."""
+        if self.spatial_hash_cell <= 0:
+            raise ValueError("spatial_hash_cell must be positive")
         if self.merge_radius < 0.0:
             raise ValueError("waypoint merge_radius must be non-negative")
-        if self.merge_radius >= self.spacing:
-            raise ValueError("waypoint merge_radius must be smaller than spacing")
-        if self.direct_path_limit <= 0.0:
-            raise ValueError("direct_path_limit must be positive")
+        if self.merge_radius >= self.spatial_hash_cell:
+            raise ValueError(
+                "waypoint merge_radius must be smaller than spatial_hash_cell"
+            )
         if self.connector_distance <= 0.0:
             raise ValueError("connector_distance must be positive")
+        if self.gateway_connector_distance <= 0.0:
+            raise ValueError("gateway_connector_distance must be positive")
+        if self.gateway_connector_distance < self.connector_distance:
+            raise ValueError(
+                "gateway_connector_distance must not be below connector_distance"
+            )
+        if self.route_cache_capacity <= 0:
+            raise ValueError("route_cache_capacity must be positive")
         if self.connector_limit <= 0:
             raise ValueError("connector_limit must be positive")
+        if min(
+            self.turn_threshold_degrees,
+            self.minimum_turn_leg,
+            self.chokepoint_narrow_clearance,
+            self.chokepoint_shoulder_clearance,
+            self.chokepoint_shoulder_length,
+            self.recovery_anchor_interval,
+        ) <= 0.0:
+            raise ValueError("strategic waypoint thresholds must be positive")
+        if self.chokepoint_narrow_clearance >= self.chokepoint_shoulder_clearance:
+            raise ValueError(
+                "chokepoint narrow clearance must be below shoulder clearance"
+            )
 
 
 @dataclass(frozen=True)
@@ -124,12 +171,9 @@ class ExplorationConfig:
     policy: str = "mcts"
     iterations: int = 256
     horizon: int = 4
-    branching_factor: int = 6
-    frontier_cluster_limit: int = 3
     planning_rays: int = 4
     uct_exploration: float = 1.414
     discount: float = 0.95
-    rollout_temperature: float = 0.35
     decision_time_budget_ms: float = 40.0
 
     def __post_init__(self) -> None:
@@ -143,18 +187,12 @@ class ExplorationConfig:
             raise ValueError("iterations must be positive")
         if self.horizon <= 0:
             raise ValueError("horizon must be positive")
-        if self.branching_factor <= 0:
-            raise ValueError("branching_factor must be positive")
-        if self.frontier_cluster_limit < 0:
-            raise ValueError("frontier_cluster_limit must be non-negative")
         if self.planning_rays <= 0:
             raise ValueError("planning_rays must be positive")
         if self.uct_exploration < 0.0:
             raise ValueError("uct_exploration must be non-negative")
         if not 0.0 <= self.discount <= 1.0:
             raise ValueError("discount must be between zero and one")
-        if self.rollout_temperature < 0.0:
-            raise ValueError("rollout_temperature must be non-negative")
         if self.decision_time_budget_ms < 0.0:
             raise ValueError(
                 "decision_time_budget_ms must be non-negative"

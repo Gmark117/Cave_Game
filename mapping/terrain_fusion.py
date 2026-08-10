@@ -1,8 +1,7 @@
-"""Mission-level terrain telemetry fusion.
+"""Mission-level terrain telemetry fusion for rover route planning/rendering.
 
-This service updates the aggregate used for progress reporting and combined
-rendering. It does not distribute knowledge to agents and must not influence
-active agent decisions.
+Terrain roughness is deliberately separate from exploration completion.  Wall
+mapping progress is derived from distributed SLAM occupancy instead.
 """
 
 from typing import Iterable
@@ -23,19 +22,5 @@ class TerrainFusionService:
         dependencies = self.dependencies
         map_updated = dependencies.terrain_knowledge.record_samples(samples)
 
-        now = dependencies.simulation_time()
-        # Progress text is relatively expensive to redraw every sensor tick, so
-        # update it at a small interval while still marking the heatmap dirty.
-        if (
-            map_updated
-            and (now - dependencies.last_explored_update)
-            >= dependencies.explored_update_interval
-        ):
-            dependencies.get_control_center().set_explored_percent(
-                round(
-                    dependencies.terrain_knowledge.explored_ratio() * 100
-                )
-            )
-            dependencies.last_explored_update = now
         if map_updated:
             dependencies.presentation.terrain_heatmap_dirty = True

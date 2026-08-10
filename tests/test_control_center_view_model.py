@@ -47,7 +47,7 @@ class ControlCenterViewModelTests(unittest.TestCase):
         ready_snapshot = state.snapshot()
         initial = build_drone_status_views([drone], [ready_snapshot])
 
-        state.begin_exploration(0, [])
+        state.begin_exploration(0)
         state.toggle_path()
         deployed_snapshot = replace(state.snapshot(), battery=72)
         deployed = build_drone_status_views([drone], [deployed_snapshot])

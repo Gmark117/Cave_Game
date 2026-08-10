@@ -18,6 +18,8 @@ from config.simulation_config import TraceConfig
 class RuntimeTraceLogger:
     """Write compact structured mission events to a JSONL file."""
 
+    SCHEMA_VERSION = 3
+
     def __init__(
         self,
         project_root: Path,
@@ -30,6 +32,7 @@ class RuntimeTraceLogger:
         self._lock = threading.RLock()
         self._file = None
         self._last_interval: dict[str, float] = {}
+        self._sequence = 0
 
         if not self.enabled:
             return
@@ -38,9 +41,23 @@ class RuntimeTraceLogger:
         if not directory.is_absolute():
             directory = Path(project_root) / directory
         directory.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = directory / f"mission_trace_{timestamp}.jsonl"
-        self._file = self.path.open("a", encoding="utf-8", buffering=1)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        suffix = 0
+        while self._file is None:
+            discriminator = "" if suffix == 0 else f"_{suffix}"
+            candidate = directory / (
+                f"mission_trace_{timestamp}{discriminator}.jsonl"
+            )
+            try:
+                self._file = candidate.open(
+                    "x",
+                    encoding="utf-8",
+                    buffering=1,
+                )
+            except FileExistsError:
+                suffix += 1
+                continue
+            self.path = candidate
         self.record("trace_started", path=str(self.path))
 
     def record(self, event: str, **fields: Any) -> None:
@@ -48,21 +65,28 @@ class RuntimeTraceLogger:
         if not self.enabled or self._file is None:
             return
 
-        payload = {
-            "event": str(event),
-            "wall_time": time.time(),
-            "perf_time": time.perf_counter(),
+        normalized_fields = {
+            str(key): self._normalize(value)
+            for key, value in fields.items()
         }
-        payload.update(
-            {
-                str(key): self._normalize(value)
-                for key, value in fields.items()
-            }
-        )
-        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._lock:
-            if self._file is not None:
-                self._file.write(line + "\n")
+            if self._file is None:
+                return
+            payload = dict(normalized_fields)
+            payload.update({
+                "schema_version": self.SCHEMA_VERSION,
+                "sequence": self._sequence,
+                "event": str(event),
+                "wall_time": time.time(),
+                "perf_time": time.perf_counter(),
+            })
+            line = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            self._file.write(line + "\n")
+            self._sequence += 1
 
     def should_record_interval(
         self,

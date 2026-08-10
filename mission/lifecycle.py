@@ -148,7 +148,11 @@ class MissionControlLifecycleMixin:
                 ):
                     timing = self.frame_profiler.snapshot()
                     drone_snapshots = [
-                        (drone, drone.snapshot())
+                        (
+                            drone,
+                            drone.snapshot(),
+                            drone.slam_map.progress_snapshot(),
+                        )
                         for drone in self.drones
                     ]
                     runtime_trace.record(
@@ -162,6 +166,22 @@ class MissionControlLifecycleMixin:
                         wait_ms=timing.wait_ms,
                         stages_ms=dict(timing.stages_ms),
                         dirty_maps=self.slam_view.dirty_map_count(),
+                        team_exhausted=bool(
+                            self.exploration_coordinator.team_exhausted
+                        ),
+                        wall_mapping={
+                            "mapped_wall_pixels": (
+                                self.wall_mapping_progress.mapped_wall_pixels
+                            ),
+                            "total_wall_pixels": (
+                                self.wall_mapping_progress.total_wall_pixels
+                            ),
+                            "ratio": self.wall_mapping_progress.ratio,
+                            "complete": self.wall_mapping_progress.complete,
+                            "slam_versions": (
+                                self.wall_mapping_progress.slam_versions
+                            ),
+                        },
                         drone_states=[
                             {
                                 "id": drone.id,
@@ -170,9 +190,33 @@ class MissionControlLifecycleMixin:
                                 "frontiers": len(snapshot.frontiers),
                                 "returning_home": snapshot.returning_home,
                                 "done": snapshot.done,
-                                "slam_version": drone.slam_map.version,
+                                "slam_version": progress.version,
+                                "completed_scan_sequence": (
+                                    progress.completed_scan_sequence
+                                ),
+                                "sensor_newly_known_cells": (
+                                    progress.sensor_newly_known_cells
+                                ),
+                                "sensor_confidence_gain": (
+                                    progress.sensor_confidence_gain
+                                ),
+                                "shared_newly_known_cells": (
+                                    progress.shared_newly_known_cells
+                                ),
+                                "shared_confidence_gain": (
+                                    progress.shared_confidence_gain
+                                ),
+                                "collision_observations": (
+                                    progress.collision_observations
+                                ),
+                                "collision_newly_known_cells": (
+                                    progress.collision_newly_known_cells
+                                ),
+                                "collision_confidence_gain": (
+                                    progress.collision_confidence_gain
+                                ),
                             }
-                            for drone, snapshot in drone_snapshots
+                            for drone, snapshot, progress in drone_snapshots
                         ],
                     )
 

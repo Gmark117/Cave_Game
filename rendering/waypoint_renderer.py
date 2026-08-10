@@ -11,6 +11,7 @@ from navigation.waypoint_graph import (
     EDGE_KNOWN_FREE_CORRIDOR,
     EDGE_SLAM_LOS,
     EDGE_TRAVELLED,
+    WaypointRole,
 )
 
 
@@ -27,7 +28,7 @@ class _EdgeStyle:
 
 @dataclass(frozen=True)
 class _NodeStyle:
-    """Visual style for one persistent waypoint-node source."""
+    """Visual style for one strategic waypoint role."""
 
     color: Color
     radius: int
@@ -41,20 +42,24 @@ _EDGE_STYLES: Mapping[str, _EdgeStyle] = {
 }
 
 _DEFAULT_NODE_STYLE = _NodeStyle((240, 240, 240, 220), 3)
-_NODE_STYLES: Mapping[str, _NodeStyle] = {
-    "home": _NodeStyle((80, 140, 255, 245), 5),
-    EDGE_TRAVELLED: _NodeStyle((80, 235, 175, 225), 3),
-    "known_free": _NodeStyle((185, 120, 255, 225), 3),
-    "gateway": _NodeStyle((255, 126, 45, 240), 4),
+_ROLE_STYLES: Mapping[WaypointRole, _NodeStyle] = {
+    WaypointRole.HOME: _NodeStyle((80, 140, 255, 245), 5),
+    WaypointRole.JUNCTION: _NodeStyle((255, 235, 90, 245), 4),
+    WaypointRole.CHOKEPOINT: _NodeStyle((255, 90, 90, 245), 4),
+    WaypointRole.TURN: _NodeStyle((80, 235, 175, 225), 3),
+    WaypointRole.FRONTIER_GATEWAY: _NodeStyle((255, 126, 45, 240), 4),
+    WaypointRole.RECOVERY_ANCHOR: _NodeStyle((210, 210, 255, 225), 3),
 }
+_ROLE_PRIORITY = tuple(_ROLE_STYLES)
 
 
 class WaypointRenderer:
-    """Render a versioned waypoint graph into one reusable map overlay.
+    """Render a revisioned waypoint graph into one reusable map overlay.
 
-    Graph changes happen on drone worker threads.  Reading ``graph.version``
-    before requesting a detached snapshot keeps unchanged frames inexpensive;
-    the cached transparent surface is simply blitted again.
+    Graph changes happen on drone worker threads. Reading the committed
+    topology revision before requesting a detached snapshot keeps unchanged
+    frames inexpensive; the cached transparent surface is simply blitted
+    again.
     """
 
     def __init__(self, graph: Any, map_width: int, map_height: int) -> None:
@@ -65,22 +70,22 @@ class WaypointRenderer:
             pygame.SRCALPHA,
         )
         self.surface.fill((0, 0, 0, 0))
-        self._rendered_version = -1
+        self._rendered_revision = -1
 
     @property
-    def rendered_version(self) -> int:
-        """Return the graph version currently represented by the cache."""
-        return self._rendered_version
+    def rendered_revision(self) -> int:
+        """Return the topology revision represented by the cache."""
+        return self._rendered_revision
 
     def draw(self, target: pygame.Surface) -> None:
         """Refresh the cache when necessary and blit it onto ``target``."""
-        graph_version = int(self.graph.version)
-        if graph_version != self._rendered_version:
+        graph_revision = int(self.graph.topology_revision)
+        if graph_revision != self._rendered_revision:
             snapshot = self.graph.snapshot()
-            snapshot_version = int(snapshot.version)
-            if snapshot_version != self._rendered_version:
+            snapshot_revision = int(snapshot.topology_revision)
+            if snapshot_revision != self._rendered_revision:
                 self._rebuild(snapshot)
-                self._rendered_version = snapshot_version
+                self._rendered_revision = snapshot_revision
 
         target.blit(self.surface, (0, 0))
 
@@ -103,8 +108,16 @@ class WaypointRenderer:
                 style.width,
             )
 
-        for node in snapshot.waypoints:
-            style = _NODE_STYLES.get(node.source, _DEFAULT_NODE_STYLE)
+        for node in snapshot.nodes:
+            role = next(
+                (
+                    candidate
+                    for candidate in _ROLE_PRIORITY
+                    if candidate in node.roles
+                ),
+                None,
+            )
+            style = _ROLE_STYLES.get(role, _DEFAULT_NODE_STYLE)
             pygame.draw.circle(
                 self.surface,
                 style.color,

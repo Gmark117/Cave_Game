@@ -15,6 +15,8 @@ from mapping.drone_sensor import LIDAR_RANGE_RADIUS_MULTIPLIER
 from mapping.localization import PoseEstimate
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
+from mapping.vision_sensor import VisionScan
+from navigation.navigation_intent import MovementMode, NavigationIntent
 
 
 class RecordingControl:
@@ -23,6 +25,7 @@ class RecordingControl:
 
     def __init__(self) -> None:
         self.samples = []
+        self.runtime_trace = RecordingTrace()
         self.terrain_fusion = SimpleNamespace(
             record_scan=lambda samples: self.samples.extend(samples),
         )
@@ -38,6 +41,14 @@ class RecordingControl:
 
     def wait_simulation_delay(self, duration: float) -> bool:
         return True
+
+
+class RecordingTrace:
+    def __init__(self) -> None:
+        self.events = []
+
+    def record(self, event, **fields) -> None:
+        self.events.append((event, fields))
 
 
 class DroneSensorTests(unittest.TestCase):
@@ -109,6 +120,55 @@ class DroneSensorTests(unittest.TestCase):
             roughness_before,
             self.drone.terrain_knowledge.roughness,
         )
+
+    def test_sensor_scan_trace_reports_progress_delta_and_cumulative_gain(
+        self,
+    ) -> None:
+        self.drone.update_sensors()
+
+        event = next(
+            fields
+            for name, fields in self.control.runtime_trace.events
+            if name == "sensor_scan"
+        )
+        progress = self.drone.slam_map.progress_snapshot()
+
+        self.assertEqual(event["completed_scan_sequence"], 1)
+        self.assertGreater(event["newly_known_cells"], 0)
+        self.assertGreater(event["confidence_gain"], 0.0)
+        self.assertGreater(event["visible_cell_count"], event["ray_count"])
+        self.assertEqual(
+            event["visible_cell_count"],
+            event["visible_free_cells"] + event["visible_occupied_cells"],
+        )
+        self.assertEqual(
+            event["cumulative_sensor_newly_known_cells"],
+            progress.sensor_newly_known_cells,
+        )
+        self.assertAlmostEqual(
+            event["cumulative_sensor_confidence_gain"],
+            progress.sensor_confidence_gain,
+        )
+
+    def test_zero_gain_sensor_scan_is_traced_as_completed(self) -> None:
+        self.drone.sensor_controller.vision_sensor.scan_cone = (
+            lambda origin, heading: VisionScan((), (), ())
+        )
+
+        self.drone.update_sensors()
+
+        event = next(
+            fields
+            for name, fields in self.control.runtime_trace.events
+            if name == "sensor_scan"
+        )
+        progress = self.drone.slam_map.progress_snapshot()
+
+        self.assertFalse(event["slam_updated"])
+        self.assertEqual(event["completed_scan_sequence"], 1)
+        self.assertEqual(event["newly_known_cells"], 0)
+        self.assertEqual(event["confidence_gain"], 0.0)
+        self.assertEqual(progress.completed_scan_sequence, 1)
 
     def test_terrain_merge_is_confidence_weighted_and_ignores_walls(self) -> None:
         self.drone.terrain_knowledge.floor_mask[0, 1] = False
@@ -185,17 +245,22 @@ class DroneSensorTests(unittest.TestCase):
         fake_localizer = FakeLocalizer()
         self.drone.localizer = fake_localizer
         recorded = {}
-        original_update = self.drone.slam_map.update_from_rays
+        original_update = self.drone.slam_map.update_from_observations
 
-        def record_slam_origin(origin, ray_hits):
+        def record_slam_origin(origin, *, free_cells, occupied_cells):
             recorded["slam_origin"] = origin
-            return original_update(origin, ray_hits)
+            return original_update(
+                origin,
+                free_cells=free_cells,
+                occupied_cells=occupied_cells,
+            )
 
-        def record_terrain_origin(origin, ray_hits):
+        def record_terrain_origin(origin, ray_hits, step=2):
             recorded["terrain_origin"] = origin
+            recorded["terrain_step"] = step
             return []
 
-        self.drone.slam_map.update_from_rays = record_slam_origin
+        self.drone.slam_map.update_from_observations = record_slam_origin
         self.drone.sensor_controller.roughness_sampler.sample_from_rays = (
             record_terrain_origin
         )
@@ -204,6 +269,7 @@ class DroneSensorTests(unittest.TestCase):
 
         self.assertEqual(recorded["slam_origin"], (40, 32))
         self.assertEqual(recorded["terrain_origin"], (40, 32))
+        self.assertEqual(recorded["terrain_step"], 2)
         self.assertEqual(self.drone.snapshot().position, (32, 32))
         self.assertEqual(
             self.drone.sensor_controller.latest_pose_estimate.source,
@@ -229,10 +295,57 @@ class DroneSensorTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.drone.slam_map.version, first_version)
 
-        self.drone.runtime_state.begin_exploration(90, ())
+        self.drone.runtime_state.begin_exploration(90)
         self.drone.update_sensors()
 
         self.assertEqual(len(calls), 2)
+
+    def test_scan_intent_admits_one_unchanged_pose_sensor_sequence(self) -> None:
+        self.drone.update_sensors()
+        progress = self.drone.slam_map.progress_snapshot()
+        self.drone.runtime_state.set_navigation_intent(NavigationIntent(
+            mode=MovementMode.SCAN,
+            target=self.drone.snapshot().position,
+            scan_sequence=progress.completed_scan_sequence,
+        ))
+
+        self.drone.update_sensors()
+        admitted = self.drone.slam_map.progress_snapshot()
+        self.drone.update_sensors()
+        suppressed = self.drone.slam_map.progress_snapshot()
+
+        self.assertEqual(
+            admitted.completed_scan_sequence,
+            progress.completed_scan_sequence + 1,
+        )
+        self.assertEqual(
+            suppressed.completed_scan_sequence,
+            admitted.completed_scan_sequence,
+        )
+
+    def test_pending_local_scan_admits_one_unchanged_pose_sequence(self) -> None:
+        self.drone.update_sensors()
+        progress = self.drone.slam_map.progress_snapshot()
+        self.drone.runtime_state.set_navigation_intent(NavigationIntent(
+            mode=MovementMode.TRAVEL,
+            target=(40, 32),
+            scan_sequence=progress.completed_scan_sequence,
+            local_scan_pending=True,
+        ))
+
+        self.drone.update_sensors()
+        admitted = self.drone.slam_map.progress_snapshot()
+        self.drone.update_sensors()
+        suppressed = self.drone.slam_map.progress_snapshot()
+
+        self.assertEqual(
+            admitted.completed_scan_sequence,
+            progress.completed_scan_sequence + 1,
+        )
+        self.assertEqual(
+            suppressed.completed_scan_sequence,
+            admitted.completed_scan_sequence,
+        )
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ class ControlCenterController:
     def __init__(self) -> None:
         """Initialize non-rendering state for the control panel."""
         self.active_tab = "drones"
-        self.explored_percent = 100
+        self.explored_percent = 0
         self._tic: Optional[float] = None
         self._paused_at: Optional[float] = None
         self._paused_duration = 0.0
@@ -121,7 +121,7 @@ class ControlCenterController:
         return f"{minutes:02d}:{seconds:02d}"
 
     def set_explored_percent(self, value: int) -> None:
-        """Store explored percentage for the next rendered frame."""
+        """Store wall-surface mapping percentage for the next frame."""
         self.explored_percent = int(value)
 
     def handle_click(

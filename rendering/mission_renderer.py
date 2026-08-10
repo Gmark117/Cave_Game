@@ -36,7 +36,10 @@ class MissionRenderer:
         dependencies.slam_view.draw()
 
         waypoint_renderer = dependencies.waypoint_renderer
-        if waypoint_renderer is not None:
+        if (
+            waypoint_renderer is not None
+            and dependencies.presentation.selected_drone_heatmap_id is None
+        ):
             waypoint_renderer.draw(window)
 
         # Layer order: waypoint highways, historical paths, translucent vision

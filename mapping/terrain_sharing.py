@@ -7,6 +7,7 @@ from typing import Any, Tuple
 import numpy as np
 
 from contracts import TerrainSharingDependencies
+from mapping.slam_map import OCCUPIED
 
 
 class TerrainSharingService:
@@ -80,6 +81,12 @@ class TerrainSharingService:
     def _simulation_time(self) -> float:
         """Return pause-adjusted mission time for cooldown checks."""
         return self.dependencies.simulation_time()
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        """Emit compact pair-level sharing evidence when tracing is enabled."""
+        trace = getattr(self.dependencies, "runtime_trace", None)
+        if trace is not None:
+            trace.record(event, sim_time=self._simulation_time(), **fields)
 
     def has_line_of_sight(self, a: Tuple[int, int], b: Tuple[int, int]) -> bool:
         """Return True when segment a->b does not cross cave walls."""
@@ -163,38 +170,27 @@ class TerrainSharingService:
         target_occ: np.ndarray,
         target_conf: np.ndarray,
     ) -> bool:
-        """Return True when SLAM occupancy sharing adds meaningful info."""
-        stride = self.compare_stride
+        """Return whether the source contains any cell the merge can improve.
 
-        # SLAM sharing uses the same "new info or meaningful disagreement"
-        # idea, but compares occupancy labels instead of roughness values.
-        src_conf = source_conf[::stride, ::stride]
-        tgt_conf = target_conf[::stride, ::stride]
-        src_occ = source_occ[::stride, ::stride]
-        tgt_occ = target_occ[::stride, ::stride]
-
-        src_known = src_conf > 0.0
-        if not np.any(src_known):
+        SLAM is mission state, not optional terrain telemetry.  A strided ratio
+        filter could permanently miss a small late frontier, so mirror the
+        exact confidence-dominance and occupied-tie rules used by SlamMap.
+        """
+        height = min(source_occ.shape[0], target_occ.shape[0])
+        width = min(source_occ.shape[1], target_occ.shape[1])
+        if height <= 0 or width <= 0:
             return False
-
-        tgt_known = tgt_conf > 0.0
-        src_known_count = int(np.count_nonzero(src_known))
-        if src_known_count == 0:
-            return False
-
-        new_info = src_known & (~tgt_known)
-        new_info_ratio = np.count_nonzero(new_info) / src_known_count
-        if new_info_ratio >= self.min_new_info_ratio:
-            return True
-
-        overlap = src_known & tgt_known
-        overlap_count = int(np.count_nonzero(overlap))
-        if overlap_count == 0:
-            return False
-
-        diff = src_occ != tgt_occ
-        overlap_diff_ratio = np.count_nonzero(diff & overlap) / overlap_count
-        return overlap_diff_ratio >= self.min_overlap_diff_ratio
+        src_occ = source_occ[:height, :width]
+        src_conf = source_conf[:height, :width]
+        tgt_occ = target_occ[:height, :width]
+        tgt_conf = target_conf[:height, :width]
+        higher_confidence = src_conf > tgt_conf
+        occupied_ties = (
+            (src_occ == OCCUPIED)
+            & (tgt_occ != OCCUPIED)
+            & (src_conf >= tgt_conf - 1e-4)
+        )
+        return bool(np.any(higher_confidence | occupied_ties))
 
     def share_with_nearby_drones(self, drone_id: int) -> None:
         """Check for nearby drones and exchange terrain and SLAM data."""
@@ -231,9 +227,27 @@ class TerrainSharingService:
                 drone_snapshot.position,
                 other_snapshot.position,
             ):
+                self._trace(
+                    "drone_sharing_pair",
+                    drone_id=drone_id,
+                    other_drone_id=other_id,
+                    pair_key=pair_key,
+                    distance=distance,
+                    shared=False,
+                    reason="no_line_of_sight",
+                )
                 continue
 
             if not self._reserve_pair(pair_key, now):
+                self._trace(
+                    "drone_sharing_pair",
+                    drone_id=drone_id,
+                    other_drone_id=other_id,
+                    pair_key=pair_key,
+                    distance=distance,
+                    shared=False,
+                    reason="cooldown_or_active",
+                )
                 continue
 
             shared = False
@@ -246,6 +260,17 @@ class TerrainSharingService:
                 )
                 if shared:
                     dependencies.presentation.terrain_heatmap_dirty = True
+                self._trace(
+                    "drone_sharing_pair",
+                    drone_id=drone_id,
+                    other_drone_id=other_id,
+                    pair_key=pair_key,
+                    distance=distance,
+                    shared=bool(shared),
+                    reason=("exchanged" if shared else "no_delta"),
+                    drone_slam_version=drone.slam_map.version,
+                    other_slam_version=other_drone.slam_map.version,
+                )
             finally:
                 self._release_pair(pair_key, now, shared)
 
@@ -288,20 +313,31 @@ class TerrainSharingService:
             drone_slam.confidence,
         )
 
+        transfer_clusters = getattr(drone, "share_frontier_clusters_with", None)
+        transferred_cluster_ids = (
+            transfer_clusters(other_drone)
+            if transfer_clusters is not None else ()
+        )
+        reverse_transfer = getattr(other_drone, "share_frontier_clusters_with", None)
+        reverse_cluster_ids = (
+            reverse_transfer(drone)
+            if reverse_transfer is not None else ()
+        )
+
         if not (
             should_other_receive
             or should_drone_receive
             or should_other_receive_slam
             or should_drone_receive_slam
+            or transferred_cluster_ids
+            or reverse_cluster_ids
         ):
             return False
 
         if should_other_receive:
             other_drone.terrain_knowledge.merge_from(drone_terrain)
-            other_drone.merge_frontiers(drone_snapshot.frontiers)
         if should_drone_receive:
             drone.terrain_knowledge.merge_from(other_terrain)
-            drone.merge_frontiers(other_snapshot.frontiers)
 
         if should_other_receive_slam:
             other_drone.slam_map.merge_from(drone_slam)

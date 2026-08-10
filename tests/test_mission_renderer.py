@@ -199,6 +199,28 @@ class MissionRendererTests(unittest.TestCase):
             ["background", "slam", "control_center"],
         )
 
+    def test_selected_drone_view_hides_shared_waypoint_overlay(self) -> None:
+        waypoint_renderer = SimpleNamespace(draw=Mock())
+        control = SimpleNamespace(
+            game=SimpleNamespace(window=RecordingWindow([])),
+            slam_view=SimpleNamespace(draw=lambda: None),
+            waypoint_renderer=waypoint_renderer,
+            control_center=SimpleNamespace(
+                draw_control_center=Mock(),
+            ),
+            drones=[],
+            rovers=[],
+            presentation=SimpleNamespace(
+                show_terrain_heatmap=False,
+                selected_drone_heatmap_id=0,
+                show_full_map=False,
+            ),
+        )
+
+        MissionRenderer(self.make_dependencies(control)).draw()
+
+        waypoint_renderer.draw.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

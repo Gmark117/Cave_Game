@@ -1,8 +1,11 @@
+import concurrent.futures
 import unittest
 from dataclasses import FrozenInstanceError
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from config.simulation_config import (
     SimulationConfig,
@@ -50,9 +53,10 @@ class HelperAndModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TraceConfig(directory="")
         with self.assertRaises(ValueError):
-            WaypointConfig(spacing=4.0, merge_radius=4.0)
+            WaypointConfig(spatial_hash_cell=4, merge_radius=4.0)
 
     def test_runtime_trace_writes_jsonl_events(self) -> None:
+        self.assertEqual(RuntimeTraceLogger.SCHEMA_VERSION, 3)
         with tempfile.TemporaryDirectory() as temp_dir:
             trace = RuntimeTraceLogger(
                 Path(temp_dir),
@@ -71,6 +75,115 @@ class HelperAndModelTests(unittest.TestCase):
         self.assertEqual(events[1]["event"], "example")
         self.assertEqual(events[1]["position"], [1, 2])
         self.assertEqual(events[-1]["event"], "trace_closed")
+        self.assertEqual(
+            [event["sequence"] for event in events],
+            list(range(len(events))),
+        )
+        self.assertTrue(
+            all(
+                event["schema_version"]
+                == RuntimeTraceLogger.SCHEMA_VERSION
+                for event in events
+            )
+        )
+
+    def test_runtime_trace_sequence_matches_concurrent_file_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace = RuntimeTraceLogger(
+                Path(temp_dir),
+                TraceConfig(enabled=True, directory="logs"),
+            )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=4
+            ) as executor:
+                list(
+                    executor.map(
+                        lambda value: trace.record(
+                            "concurrent",
+                            value=value,
+                        ),
+                        range(40),
+                    )
+                )
+            path = trace.path
+            trace.close()
+            self.assertIsNotNone(path)
+            events = [
+                json.loads(line)
+                for line in Path(path).read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual(
+            [event["sequence"] for event in events],
+            list(range(len(events))),
+        )
+        self.assertEqual(
+            sum(event["event"] == "concurrent" for event in events),
+            40,
+        )
+
+    def test_runtime_trace_uses_distinct_files_within_the_same_instant(
+        self,
+    ) -> None:
+        fixed_now = datetime(2026, 7, 15, 12, 0, 0, 123456)
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "mission.runtime_trace.datetime"
+        ) as mocked_datetime:
+            mocked_datetime.now.return_value = fixed_now
+            first = RuntimeTraceLogger(
+                Path(temp_dir),
+                TraceConfig(enabled=True, directory="logs"),
+            )
+            second = RuntimeTraceLogger(
+                Path(temp_dir),
+                TraceConfig(enabled=True, directory="logs"),
+            )
+            first_path = first.path
+            second_path = second.path
+            first.close()
+            second.close()
+
+            self.assertIsNotNone(first_path)
+            self.assertIsNotNone(second_path)
+            self.assertNotEqual(first_path, second_path)
+            for path in (first_path, second_path):
+                events = [
+                    json.loads(line)
+                    for line in Path(path).read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                self.assertEqual(
+                    [event["sequence"] for event in events],
+                    list(range(len(events))),
+                )
+
+    def test_runtime_trace_reserves_schema_and_ordering_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace = RuntimeTraceLogger(
+                Path(temp_dir),
+                TraceConfig(enabled=True, directory="logs"),
+            )
+            trace.record(
+                "example",
+                schema_version=-1,
+                sequence=999,
+                wall_time=-1.0,
+                perf_time=-1.0,
+            )
+            path = trace.path
+            trace.close()
+            self.assertIsNotNone(path)
+            event = json.loads(
+                Path(path).read_text(encoding="utf-8").splitlines()[1]
+            )
+
+        self.assertEqual(event["schema_version"], RuntimeTraceLogger.SCHEMA_VERSION)
+        self.assertEqual(event["sequence"], 1)
+        self.assertGreater(event["wall_time"], 0.0)
+        self.assertGreater(event["perf_time"], 0.0)
 
     def test_trace_analyzer_summarizes_waypoint_health(self) -> None:
         lines = summarize(
@@ -102,6 +215,8 @@ class HelperAndModelTests(unittest.TestCase):
         self.assertIn("waypoint gateway statuses: ok=1", summary)
         self.assertIn("avg=0.50ms max=0.50ms graph=33n/32e", summary)
         self.assertIn("waypoint segment paths: astar=1", summary)
+        self.assertIn("Characterization:", summary)
+        self.assertIn("waypoint routes: calls=1 ok=1 failed=0", summary)
 
     def test_configuration_resources_and_options_are_available(self) -> None:
         self.assertEqual(GameOptions.MAP_SIZE, ["Small", "Medium", "Large"])

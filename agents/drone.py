@@ -1,7 +1,7 @@
 """Drone agent state for the Cave Explorer simulation."""
 
 import random as rand
-from typing import List, Tuple, TYPE_CHECKING
+from typing import Tuple, TYPE_CHECKING
 
 from agents.exploration_policy import FrontierExplorationPolicy
 from agents.mcts_exploration_policy import MctsExplorationPolicy
@@ -12,6 +12,12 @@ from mapping.drone_sensor import DroneSensorController
 from mapping.localization import PerfectPoseLocalizer
 from mapping.terrain_knowledge import TerrainKnowledge
 from navigation.waypoint_graph import WaypointGraph
+from navigation.frontier_clusters import (
+    AssignmentRegistry,
+    FrontierClusterRegistry,
+    FrontierExtractor,
+    FrontierGatewayManager,
+)
 from contracts import (
     DroneMovementDependencies,
     DroneSensorDependencies,
@@ -78,6 +84,22 @@ class Drone:
         )
         self.localizer = PerfectPoseLocalizer()
         self.exploration_policy = self._build_exploration_policy()
+        frontier_settings = self.settings.frontier
+        self.frontier_registry = getattr(control, "frontier_registry", None)
+        if self.frontier_registry is None:
+            self.frontier_registry = FrontierClusterRegistry(
+                match_distance=frontier_settings.cluster_match_distance,
+                missing_refresh_limit=frontier_settings.missing_refresh_limit,
+            )
+        self.frontier_assignments = getattr(control, "frontier_assignments", None)
+        if self.frontier_assignments is None:
+            self.frontier_assignments = AssignmentRegistry()
+        self.frontier_extractor = FrontierExtractor(
+            frontier_settings.confidence_threshold,
+            minimum_unknown_support=(
+                frontier_settings.minimum_unknown_support
+            ),
+        )
 
         waypoint_settings = getattr(self.settings, "waypoints", None)
         waypoint_graph = getattr(control, "waypoint_graph", None)
@@ -89,11 +111,24 @@ class Drone:
             # Lightweight test/custom controls may not own mission services.
             # Production MissionControl injects one graph shared by all drones.
             waypoint_graph = WaypointGraph(
-                spacing=waypoint_settings.spacing,
                 merge_radius=waypoint_settings.merge_radius,
                 connector_distance=waypoint_settings.connector_distance,
                 connector_limit=waypoint_settings.connector_limit,
+                spatial_hash_cell=waypoint_settings.spatial_hash_cell,
+                route_cache_capacity=waypoint_settings.route_cache_capacity,
             )
+        self.frontier_gateway_manager = getattr(
+            control, "frontier_gateway_manager", None
+        )
+        if self.frontier_gateway_manager is None and waypoint_graph is not None:
+            self.frontier_gateway_manager = FrontierGatewayManager(
+                self.frontier_registry,
+                waypoint_graph,
+                minimum_separation=frontier_settings.gateway_min_separation,
+            )
+        self.exploration_coordinator = getattr(
+            control, "exploration_coordinator", None
+        )
 
         # SLAM state
         map_h = len(self.cave)
@@ -104,7 +139,6 @@ class Drone:
         self.movement_controller = DroneMovementController(
             self,
             DroneMovementDependencies(
-                compute_path=control.compute_path,
                 simulation_time=control.simulation_time,
                 pause_checkpoint=control.pause_checkpoint,
                 wait_simulation_delay=control.wait_simulation_delay,
@@ -163,28 +197,16 @@ class Drone:
         """Return detached runtime state for cross-thread consumers."""
         return self.runtime_state.snapshot()
 
-    def merge_frontiers(
-        self,
-        other_border: List[Tuple[int, int]],
-    ) -> None:
-        """Merge valid frontier coordinates received from another drone."""
-        if other_border is None:
-            return
-
-        valid_frontiers = []
-        for border in other_border:
-            position = (int(border[0]), int(border[1]))
-            # Shared frontiers may be stale by the time this thread receives
-            # them, so validate bounds and wall/floor state before merging.
-            if (
-                0 <= position[1] < len(self.cave)
-                and 0 <= position[0] < len(self.cave[0])
-                and self.cave[position[1]][position[0]] == 0
-            ):
-                valid_frontiers.append(position)
-        self.runtime_state.merge_frontiers(valid_frontiers)
-
-        self.movement_controller.update_borders()
+    def share_frontier_clusters_with(self, other_drone: "Drone") -> tuple[int, ...]:
+        """Transfer stable frontier knowledge across an authorized link."""
+        if self.frontier_registry is not other_drone.frontier_registry:
+            return ()
+        transferred = self.frontier_registry.share(self.id, other_drone.id)
+        if transferred:
+            other_drone.runtime_state.replace_frontier_clusters(
+                self.frontier_registry.visible_to(other_drone.id)
+            )
+        return transferred
 
     def toggle_path(self) -> None:
         """Toggle rendering visibility for the drone path overlay."""

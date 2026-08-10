@@ -13,6 +13,14 @@ from mapping.terrain_sharing import TerrainSharingService
 from contracts import TerrainSharingDependencies
 
 
+class RecordingTrace:
+    def __init__(self) -> None:
+        self.events = []
+
+    def record(self, event, **fields) -> None:
+        self.events.append((event, fields))
+
+
 def make_agent(
     agent_id: int,
     position: tuple[int, int],
@@ -34,7 +42,7 @@ def make_agent(
         runtime_state=runtime_state,
         snapshot=runtime_state.snapshot,
         slam_map=SlamMap(*shape),
-        merge_frontiers=Mock(),
+        share_frontier_clusters_with=Mock(return_value=()),
     )
 
 
@@ -100,20 +108,20 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertFalse(service.has_line_of_sight((0, 0), (8, 8)))
         self.assertTrue(service.has_line_of_sight((2, 0), (3, 0)))
 
-    def test_nearby_drone_receives_new_terrain_and_frontiers(self) -> None:
+    def test_nearby_drone_receives_new_terrain_and_stable_clusters(self) -> None:
         control = make_control()
         source = make_agent(0, (1, 1))
         target = make_agent(1, (2, 1))
         source.terrain_knowledge.roughness[1, 1] = 0.8
         source.terrain_knowledge.confidence[1, 1] = 1.0
-        source.runtime_state.merge_frontiers([(3, 3)])
         self.seed_slam(source, 2, 2, 1, 0.9)
         control.drones = [source, target]
         service = TerrainSharingService(control.dependencies)
 
         service.share_with_nearby_drones(0)
 
-        target.merge_frontiers.assert_called_once_with(((3, 3),))
+        source.share_frontier_clusters_with.assert_called_once_with(target)
+        target.share_frontier_clusters_with.assert_called_once_with(source)
         self.assertAlmostEqual(
             float(target.terrain_knowledge.roughness[1, 1]),
             0.8,
@@ -128,6 +136,44 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertEqual(service.last_drone_share[0], 10.0)
         self.assertEqual(service.last_pair_share[(0, 1)], 10.0)
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
+
+    def test_sparse_unsampled_slam_delta_is_still_shared(self) -> None:
+        control = make_control()
+        source = make_agent(0, (1, 1))
+        target = make_agent(1, (2, 1))
+        self.seed_slam(source, 1, 1, 1, 0.9)
+        control.drones = [source, target]
+        service = TerrainSharingService(control.dependencies)
+        service.compare_stride = 8
+        service.min_new_info_ratio = 1.0
+
+        service.share_with_nearby_drones(0)
+
+        shared = target.slam_map.snapshot()
+        self.assertEqual(int(shared.occupancy[1, 1]), 1)
+        self.assertAlmostEqual(float(shared.confidence[1, 1]), 0.9)
+
+    def test_nearby_pair_trace_reports_exchange_outcome(self) -> None:
+        control = make_control()
+        trace = RecordingTrace()
+        object.__setattr__(control.dependencies, "runtime_trace", trace)
+        source = make_agent(0, (1, 1))
+        target = make_agent(1, (2, 1))
+        self.seed_slam(source, 1, 1, 1, 0.9)
+        control.drones = [source, target]
+
+        TerrainSharingService(control.dependencies).share_with_nearby_drones(0)
+
+        event, fields = next(
+            item for item in trace.events
+            if item[0] == "drone_sharing_pair"
+        )
+        self.assertEqual(event, "drone_sharing_pair")
+        self.assertEqual(fields["drone_id"], 0)
+        self.assertEqual(fields["other_drone_id"], 1)
+        self.assertTrue(fields["shared"])
+        self.assertEqual(fields["reason"], "exchanged")
+        self.assertAlmostEqual(fields["distance"], 1.0)
 
     def test_pair_cooldown_prevents_duplicate_exchange(self) -> None:
         control = make_control()

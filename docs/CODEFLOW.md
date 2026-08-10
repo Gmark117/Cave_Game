@@ -4,7 +4,7 @@ This guide follows the project from the executable entry point into the
 mission loop, agent threads, sensing, SLAM, terrain sharing, pathfinding, and
 UI rendering. It is intended as a first-read map for a new developer.
 
-Generated from the current worktree on 2026-07-03.
+Generated from the current worktree on 2026-07-16.
 
 ## 1. Big Picture
 
@@ -18,19 +18,22 @@ flowchart TD
     Main["main.py<br/>Game() and Game.run()"]
     Game["Game<br/>window, events, menu shell"]
     Menu["Menu<br/>settings, options, start action"]
-    Settings["SimulationConfig<br/>mission, SLAM, sharing, frontier, rendering"]
+    Settings["SimulationConfig<br/>mission, SLAM, sharing, frontier, strategic graph, MCTS, rendering"]
     MapGen["MapGenerator<br/>multiprocess cave generation"]
     Mission["MissionControl<br/>mission setup and agent coordination"]
     Lifecycle["MissionControlLifecycleMixin<br/>threads, events, run loop, shutdown"]
     Factory["AgentFactory<br/>build_drones(), build_rovers()"]
     Drones["Drone objects<br/>movement and owned collaborators"]
-    Runtime["DroneRuntimeState<br/>lock, Graph, detached snapshots"]
-    Movement["DroneMovementController<br/>exploration, frontiers, homing"]
+    Runtime["DroneRuntimeState<br/>lock, intent/watchdog, detached snapshots"]
+    Movement["DroneMovementController<br/>strategic selection and local execution"]
     Slam["SlamMap<br/>private grids, lock, snapshots, versions"]
+    Frontiers["Frontier registries<br/>stable clusters, assignments, gateways"]
+    Highway["WaypointGraph<br/>stable topology IDs, exact polylines, route cache"]
+    LocalMcts["LocalMctsController<br/>bounded goal-conditioned primitives"]
     Rovers["Rover objects<br/>terrain-aware support state"]
     Knowledge["TerrainKnowledge<br/>roughness, confidence, lock, snapshots, merge"]
-    Navigation["PathfindingService<br/>shared map, worker pool, route API"]
-    Path["navigation.astar_pathfinder<br/>A* algorithms"]
+    Navigation["PathfindingService<br/>physical/rover boundary"]
+    Path["navigation.astar_pathfinder<br/>standalone and rover A* algorithms"]
     Terrain["Focused mission services<br/>fusion, sharing, rover targets, SLAM view, debug"]
     UI["ControlCenter facade + controller<br/>timer, tabs, action tokens"]
     ControlRender["ControlCenterRenderer<br/>Pygame layout, caches, hit map"]
@@ -50,6 +53,11 @@ flowchart TD
     Drones --> Runtime
     Drones --> Movement
     Drones --> Slam
+    Mission --> Frontiers
+    Mission --> Highway
+    Movement --> Frontiers
+    Movement --> Highway
+    Movement --> LocalMcts
     Factory --> Rovers
     Mission --> Knowledge
     Drones --> Knowledge
@@ -397,7 +405,9 @@ Key methods:
   - restores the windowed view after shutdown.
 
 - `is_mission_over(self) -> bool`
-  - returns true only if every drone reports `mission_completed()`.
+  - returns true only if every drone reports `mission_completed()` after the
+    team coordinator confirms shared frontier exhaustion and coordinated
+    homing.
 
 - `_shutdown_mission(self, threads: list[threading.Thread]) -> None`
   - sets `mission_event`.
@@ -411,96 +421,127 @@ Concurrency model:
 - Optional rover threads: rover target acquisition and movement.
 - Process pool workers: A* pathfinding using shared-memory map.
 
-## 7. Drone Movement Call Stack
+## 7. Drone Strategic Navigation Call Stack
 
-Drone movement is driven by `MissionControl.drone_thread(drone_id)`.
+Drone movement is driven by `MissionControl.drone_thread(drone_id)`, but the
+planning inputs remain scoped to the requesting drone's detached runtime and
+SLAM belief. `DroneMovementDependencies` contains the simulation clock, pause
+callbacks, trace logger, and strategic graph; it contains no cave map or
+mission A* callback.
 
 ```mermaid
 flowchart TD
     Thread["MissionControl.drone_thread(drone_id)"]
     Move["Drone.move()<br/>intentional agent API"]
     Controller["DroneMovementController.move()"]
-    Complete["DroneMovementController.mission_completed()"]
+    Intent{"valid NavigationIntent?"}
+    Local["deterministic intent or MCTS<br/>bounded local primitive"]
+    Execute["execute exact stored-route prefix"]
+    Watchdog["NavigationWatchdog<br/>progress, revisits, reversals"]
+    Refresh["FrontierExtractor.refresh(local SlamSnapshot)"]
+    Registry["FrontierClusterRegistry<br/>stable visible cluster IDs"]
+    Team["TeamExplorationCoordinator<br/>reconcile retirement and exhaustion"]
+    Reserve["AssignmentRegistry.reserve(cluster_id)"]
+    Waypoint["select requester-known-free<br/>cell within stable cluster"]
+    Gateway["FrontierGatewayManager.ensure_gateway()<br/>adopt required existing corridor only"]
+    Route["WaypointGraph.find_route()<br/>cached stable-ID route"]
+    Latch["DroneRuntimeState.set_navigation_intent()"]
+    Physical["DroneRuntimeState.move_to()<br/>physical collision/history boundary"]
     Share["terrain_sharing.share_with_nearby_drones(drone_id)"]
-    HomeCheck{"returning_home<br/>or explored and no border?"}
-    Start["DroneMovementController.reach_start_point()"]
-    Find["DroneMovementController.find_new_node()"]
-    Explore["DroneMovementController.explore(...)"]
-    UpdateBorders["DroneMovementController.update_borders()"]
-    ReachBorder["DroneMovementController.reach_border()"]
-    Path["MissionControl.compute_path(start, goal)"]
-    Service["PathfindingService.compute_path(start, goal)"]
-    AStar["astar_pathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
-    Runtime["DroneRuntimeState.move_to(node)<br/>position, heading, Graph history"]
 
-    Thread --> Complete
-    Thread --> Move --> Controller
-    Controller --> HomeCheck
-    HomeCheck -->|"yes"| Start --> Path
-    HomeCheck -->|"no"| Find --> Explore --> Path
-    Find -->|"no valid direction"| UpdateBorders --> ReachBorder --> Path
-    Path --> Service --> AStar
-    Start --> Runtime
-    Explore --> Runtime
-    ReachBorder --> Runtime
+    Thread --> Move --> Controller --> Intent
+    Intent -->|"yes"| Local --> Execute --> Physical --> Watchdog
+    Intent -->|"no"| Refresh --> Registry --> Team --> Reserve --> Waypoint --> Route --> Gateway --> Latch
+    Latch --> Local
+    Watchdog -->|"stalled or second reversal"| Local
     Thread --> Share
 ```
 
-Important drone methods and arguments:
+Important state and control boundaries:
 
-- `Drone.__init__(game, control, id: int, start_pos: tuple[int, int], color: tuple[int, int, int], icon: pygame.Surface, cave: list) -> None`
-  - stores immutable identity/configuration plus owned runtime state, terrain,
-    SLAM, movement, sensing, and rendering collaborators.
+- `DroneRuntimeState` atomically owns position, heading, physical history,
+  stable frontier representatives, `MovementMode`, `NavigationIntent`, the
+  navigation watchdog, transition reasons, sensor-ray endpoints, lifecycle,
+  battery, and overlay visibility. Cross-thread readers receive detached
+  `DroneSnapshot` values.
+- `FrontierExtractor` derives confidently free/occupied and
+  unknown-or-low-confidence masks from a `SlamSnapshot`. Generic discovery
+  space must have at least the configured local unknown support, so isolated
+  gaps between sampled rays do not become targets. An unknown cell adjacent to
+  both confident free space and an observed occupied wall remains actionable
+  as wall-surface continuation. Components carry separate `expected_gain`,
+  `wall_gain`, and wall-adjacent free cells.
+- `FrontierClusterRegistry` assigns monotonic cluster IDs, retains temporarily
+  missing clusters, tombstones retired geometry, and limits visibility through
+  each cluster's `known_by` set. `AssignmentRegistry` gives a reservation a
+  stable token so two drones cannot own one cluster concurrently.
+- `TeamExplorationCoordinator` reconciles the canonical registry into every
+  runtime snapshot, releases retired reservations, invalidates stale intents,
+  and starts every drone homing only after all drones report the team registry
+  exhausted.
+- A stable cluster keeps its canonical representative and ID, while each drone
+  selects a waypoint from cluster cells confirmed free by that drone's SLAM.
+  Wall-continuation cells with stronger nearby unknown support are preferred.
+  A retained wall requires the configured minimum displacement (12 px by
+  default); an unchanged closer tip is suppressed only for that drone until
+  its canonical geometry changes. Global selection considers reachable,
+  unreserved wall-continuation clusters first and falls back to coherent open
+  unknown space only when that tier is empty.
+- `FrontierGatewayManager` never creates a speculative protected node. It only
+  adopts a corridor endpoint already required by connectivity repair, then
+  retires orphan cluster corridor/gateway state when safe.
+- `WaypointGraph` stores HOME, TURN, JUNCTION, CHOKEPOINT,
+  FRONTIER_GATEWAY, and RECOVERY_ANCHOR nodes under monotonic IDs. One logical
+  mutation commits one `GraphDelta` and topology revision. Travelled and
+  requester-scoped belief-corridor edges retain their complete oriented
+  polylines.
+- `StrategicTrailAccumulator` keeps the current pose and uncommitted tail
+  ephemeral. It promotes confirmed turns, travelled intersections,
+  chokepoints, and coarse recovery anchors instead of fixed-spacing
+  breadcrumbs.
+- `WaypointGraph.find_route()` uses component rejection and a bounded LRU of
+  multi-source reverse route trees keyed by the goal-connector set, topology
+  revision, requester, and requester-scoped belief-edge validity. All visible
+  goal connectors seed one exact Dijkstra traversal instead of rebuilding one
+  tree per connector. Close non-LOS targets may use one 4 ms bounded
+  known-free A* during route construction. Normal execution never reconstructs
+  the route or invokes A* for a movement prefix.
+- Graph maintenance retires orphan frontier corridors and roleless inactive
+  travelled leaves, contracts only short *connected* inactive turn/junction
+  edges, and batch-collapses safe inactive degree-two turn/junction nodes.
+  Connected-node contraction joins the stored edge polylines through the
+  retired position; spatial proximity alone never creates an edge. Active
+  route IDs, HOME, CHOKEPOINT, RECOVERY_ANCHOR, and active FRONTIER_GATEWAY
+  nodes are protected.
+- `NavigationIntent` latches stable intent/route/cluster/gateway/assignment
+  identity, route node and edge IDs, exact oriented segment paths, topology and
+  knowledge revisions, edge/polyline cursors, scan heading count, sensor-local
+  scan baselines, and remaining cost. Each tick advances only the physically
+  executed distance and corresponding cursors.
+- `FrontierExplorationPolicy` provides deterministic control on the same
+  intent substrate. `MctsExplorationPolicy` changes only local execution: the
+  exact `FOLLOW_EDGE` fast path remains deterministic, and a scan's sole
+  `ROTATE_SCAN` action advances directly by 60 degrees without constructing an
+  MCTS window. First-time regions retain the six-heading sweep; retained wall
+  continuations center a configurable three-heading sweep on locally unknown
+  wall-adjacent cells. Scan gain uses only the drone's sensor counters, so
+  concurrent sharing cannot retain locally unproductive work. Recovery also
+  follows its already-stored exact intent directly;
+  belief preprocessing cannot change a single legal action. Only genuine
+  competing local deviations use the bounded goal-conditioned
+  `LocalMctsController`. A 40 ms decision gives
+  28 ms to search and reserves 12 ms for scheduler margin, fallback, and
+  diagnostics. Bounded SLAM-window acquisition is non-blocking; a busy sensor
+  writer produces an immediate safe `preprocessing_lock` fallback instead of
+  consuming the MCTS deadline while waiting for the map lock.
+- `NavigationWatchdog` treats route-cost reduction or information gain as
+  progress, records recent stable visits and A-B-A reversals, and transitions
+  explicitly to RECOVERY after its thresholds.
 
-- `DroneRuntimeState`
-  - owns position, heading, direction history, the `Graph`, frontiers,
-    lifecycle flags, sensor-ray endpoints, battery, overlay visibility, and
-    frontier-rebuild timing behind one lock.
-  - returns immutable `DroneSnapshot` values for every cross-thread reader.
-
-- `DroneMovementController.move() -> None`
-  - if done, returns.
-  - if returning home or exploration is exhausted, calls `reach_start_point()`.
-  - otherwise tries `find_new_node()` and `explore(...)`.
-  - if no local node is available, calls `update_borders()` and `reach_border()`.
-
-- `DroneMovementController.find_new_node() -> tuple[list[int], list[tuple[int, int]], tuple[int, int]]`
-  - scans directions from 0 to 359 degrees.
-  - uses `next_cell_coords(x, y, step_len, direction)`.
-  - validates candidates with `Graph.is_valid(curr_pos, candidate_pos)`.
-  - chooses a valid direction randomly.
-
-- `DroneMovementController.explore(valid_dirs, valid_targets, chosen_target) -> bool`
-  - atomically records the chosen direction and valid frontier targets.
-  - calls `control.compute_path(snapshot.position, chosen_target)`.
-  - follows the returned path through `DroneRuntimeState.move_to()`, which
-    updates position, heading, and graph history together.
-
-- `DroneMovementController.reach_border() -> bool`
-  - sorts detached frontier values by distance.
-  - calls `control.compute_path(snapshot.position, target)` for candidates.
-  - follows the first useful path.
-
-- `DroneMovementController.reach_start_point() -> bool`
-  - calls `control.compute_path(snapshot.position, drone.start_pos)`.
-  - follows path home and returns whether the drone reached start.
-
-- `DroneMovementController.rebuild_frontiers(stride=4, confidence_threshold=0.6) -> None`
-  - derives frontiers from local SLAM occupancy, SLAM confidence, local terrain confidence, and cave floor mask.
-
-- `Drone.move()` and `Drone.mission_completed()`
-  - form the small movement-facing API used by mission orchestration.
-  - detailed exploration, homing, frontier, and heading operations are called
-    directly on `DroneMovementController`.
-
-Support methods/classes:
-
-- `Graph.__init__(x_start, y_start, cave_mat) -> None`
-  - stores visited positions and cave matrix inside `DroneRuntimeState`.
-- `Graph.is_valid(curr_pos, candidate_pos) -> bool`
-  - checks `wall_hit(...)` and `cross_obs(...)`.
-- `Graph.cross_obs(x1, y1, x2, y2) -> bool`
-  - Bresenham line check for wall crossings.
+The physical cave array remains in `Drone`/`DroneRuntimeState` only where the
+simulator enforces collision and produces sensor truth. Planner-facing
+contexts, movement dependencies, frontier extraction, route selection, and
+local MCTS receive belief snapshots rather than the true cave topology.
 
 ## 8. Sensing, SLAM, and Terrain Sampling
 
@@ -514,19 +555,22 @@ flowchart TD
     MissionUpdate["MissionControl.update_sensors()"]
     DroneUpdate["Drone.update_sensors()"]
     Sensor["DroneSensorController.update()<br/>capture DroneSnapshot"]
-    Cast["VisionSensor.cast_cone(origin, heading_deg)"]
+    Scan["VisionSensor.scan_cone(origin, heading_deg)<br/>gap-free visible cells + sparse rays"]
+    Dense["VisionScan.free_cells + occupied_cells"]
+    Cast["VisionSensor.cast_cone(origin, heading_deg)<br/>overlay/terrain rays only"]
     Ray["VisionSensor._cast_single_ray(origin, angle_deg)"]
-    Slam["SlamMap.update_from_rays(origin, ray_hits)<br/>internally synchronized"]
+    Slam["SlamMap.update_from_observations(origin, cells)<br/>internally synchronized"]
     TerrainScan["DroneSensorController.scan_terrain(ray_hits)"]
-    Sample["RoughnessSampler.sample_from_rays(origin, ray_hits, step=4)"]
+    Sample["RoughnessSampler.sample_from_rays(origin, ray_hits, step=2)"]
     Local["drone.terrain_knowledge.record_samples(samples)"]
     Global["TerrainFusionService.record_scan(samples)"]
     Draw["MissionRenderer.draw()"]
     RenderCone["drone.renderer.draw_vision_overlay(snapshot)"]
 
-    MissionUpdate --> DroneUpdate --> Sensor --> Cast --> Ray
-    Sensor --> Slam
-    Sensor --> TerrainScan --> Sample --> Local --> Global
+    MissionUpdate --> DroneUpdate --> Sensor --> Scan
+    Scan --> Dense --> Slam
+    Scan --> Cast --> Ray
+    Cast --> TerrainScan --> Sample --> Local --> Global
     Draw --> RenderCone
 ```
 
@@ -537,8 +581,9 @@ Important sensing types:
 
 - `DroneSensorController.update() -> None`
   - captures one coherent position/heading snapshot.
-  - casts rays, stores endpoints through `DroneRuntimeState`, updates local
-    SLAM from the captured origin, and triggers terrain sampling.
+  - builds one dense visibility scan, stores its sparse endpoints through
+    `DroneRuntimeState`, updates local SLAM from every visible cell, and
+    triggers independent terrain sampling.
 
 - `Drone.update_sensors() -> None`
   - delegates the simulation update to its sensor controller.
@@ -547,7 +592,14 @@ Important sensing types:
   - prepares ray count, field of view, step size, and max range.
 
 - `VisionSensor.cast_cone(origin, heading_deg) -> list[RayHit]`
-  - casts `num_rays` across the field of view.
+  - casts `num_rays` across the field of view for presentation and terrain.
+
+- `VisionSensor.scan_cone(origin, heading_deg) -> VisionScan`
+  - rasterizes every cell inside the collision-bounded cone.
+  - keeps free/occupied visibility separate from the sparse `ray_hits`.
+
+- `VisionScan`
+  - dataclass fields: `ray_hits`, `free_cells`, `occupied_cells`.
 
 - `RayHit`
   - dataclass fields: `end`, `hit`, `distance`, `angle_deg`, `points`.
@@ -557,8 +609,11 @@ Important sensing types:
     state.
 
 - `SlamMap.update_from_rays(origin, ray_hits) -> None`
-  - marks free cells along each ray.
-  - marks the endpoint occupied when the ray hit a wall.
+  - remains the compatibility boundary for explicit ray observations.
+
+- `SlamMap.update_from_observations(origin, free_cells, occupied_cells) -> bool`
+  - marks every visible free cell from the dense scan.
+  - marks every visible wall cell occupied and records wall points.
   - atomically advances the map version when owned state changes.
 
 - `SlamMap.snapshot(point_limit=None) -> SlamSnapshot`
@@ -568,13 +623,14 @@ Important sensing types:
 - `RoughnessSampler.__init__(terrain_roughness, map_matrix) -> None`
   - stores source roughness and map geometry.
 
-- `RoughnessSampler.sample_from_rays(origin, ray_hits, step=4) -> list[tuple[int, int, float, float]]`
+- `RoughnessSampler.sample_from_rays(origin, ray_hits, step=2) -> list[tuple[int, int, float, float]]`
   - samples roughness along visible floor cells.
   - returns `(x, y, roughness, confidence)` tuples.
 
 - `DroneSensorController.scan_terrain(ray_hits) -> None`
   - throttles scans using `slam_scan_interval`.
-  - calls `RoughnessSampler.sample_from_rays(...)`.
+  - calls `RoughnessSampler.sample_from_rays(..., step=2)`.
+  - never feeds terrain confidence or roughness into SLAM exploration gain.
   - calls `drone.terrain_knowledge.record_samples(...)` for local knowledge.
   - delegates mission-global fusion to `TerrainFusionService`.
 
@@ -587,8 +643,8 @@ Important sensing types:
 Distributed terrain follows four ownership rules:
 
 1. Drone decisions read that drone's local terrain and SLAM knowledge.
-2. Mission terrain is an aggregate for progress telemetry and combined UI
-   rendering, not an agent knowledge source.
+2. Mission terrain is an aggregate for rover routing and the optional terrain
+   heatmap, not exploration progress and not an agent knowledge source.
 3. Local knowledge moves between agents only through explicit sharing.
 4. Rover target and route logic is disabled while rover motion is disabled;
    it must be converted to rover-local received knowledge before activation.
@@ -603,15 +659,15 @@ flowchart TD
     ShareDrones["terrain_sharing.share_with_nearby_drones(drone_id)"]
     Cooldown["service-owned drone, pair, and rover cooldown state"]
     Proximity["distance and line of sight"]
-    Snapshot["TerrainKnowledge.snapshot()<br/>SlamMap.snapshot()"]
+    Snapshot["TerrainKnowledge.snapshot()<br/>SlamMap.snapshot()<br/>visible stable cluster IDs"]
     Diff["maps differ enough?<br/>roughness or SLAM"]
     MergeTerrain["TerrainKnowledge.merge_from(snapshot)"]
-    MergeBorder["Drone.merge_frontiers(other_border)"]
+    ShareClusters["FrontierClusterRegistry.share(source, target)"]
     MergeSlam["SlamMap.merge_from(snapshot)"]
     Dirty["presentation.terrain_heatmap_dirty = True"]
 
     DroneThread --> ShareDrones --> Cooldown --> Proximity --> Snapshot --> Diff
-    Diff --> MergeTerrain --> MergeBorder --> Dirty
+    Diff --> MergeTerrain --> ShareClusters --> Dirty
     Diff --> MergeSlam --> Dirty
 ```
 
@@ -626,8 +682,10 @@ Key sharing methods:
   - compares local roughness/confidence via `maps_differ_enough(...)`.
   - compares SLAM occupancy/confidence via `slam_maps_differ_enough(...)`.
   - exchanges `TerrainSnapshot` values through `TerrainKnowledge.merge_from(...)`.
-  - uses `Drone.merge_frontiers(...)` and `SlamMap.merge_from(...)`
-    for frontier and occupancy state.
+  - transfers stable cluster knowledge explicitly through
+    `Drone.share_frontier_clusters_with(...)` / `FrontierClusterRegistry.share(...)`.
+    It never merges raw frontier-coordinate lists.
+  - exchanges occupancy belief through `SlamMap.merge_from(...)`.
 
 - `TerrainSharingService.maps_differ_enough(source_roughness, source_confidence, target_roughness, target_confidence) -> bool`
   - samples maps using `share_compare_stride`.
@@ -643,27 +701,43 @@ Key sharing methods:
 
 - `TerrainFusionService.record_scan(samples) -> None`
   - records samples through mission-global `TerrainKnowledge`.
-  - updates `control_center.explored_percent`.
   - marks the heatmap dirty.
+- `mapping.wall_mapping.wall_mapping_snapshot(...)`
+  - combines occupied local SLAM evidence for telemetry only.
+  - counts exposed wall pixels (outer cave, pillars, internal walls), excluding
+    buried solid rock.
+  - supplies `control_center.explored_percent`; it never enters a planner.
 
 Merge rule summary:
 
 - Roughness maps are confidence-weighted averages.
 - Confidence values are capped at `1.0`.
 - SLAM occupancy uses confidence dominance: higher-confidence source cells overwrite lower-confidence target cells.
-- Frontier lists are merged, then rebuilt from current SLAM state.
+- Cluster IDs are shared explicitly; each receiving drone still refreshes its
+  component view from its own current SLAM state.
 
-## 10. Pathfinding
+## 10. Strategic Routing and Physical Pathfinding Boundaries
 
-`PathfindingService` owns pathfinding resource lifecycle and dispatch. Drone
-pathfinding uses its shared-memory process pool, while rover pathfinding is
-terrain-aware and computed in-process through the same service API.
+Production drone planning uses `WaypointGraph` and requester-local SLAM, not
+the cave-map-backed `PathfindingService`. Normal movement consumes the exact
+stored route polyline at its persistent cursor. A bounded belief-only search
+may be used when attaching the current pose or a required frontier corridor to
+the strategic graph, or for a close non-LOS target during route construction;
+persistent-edge and stored-connector prefixes perform zero A* calls.
+
+`PathfindingService` still owns the lifecycle of the shared-memory physical
+pathfinding resource and exposes a standalone cave-map algorithm API. The
+disabled rover flow uses its terrain-weighted in-process route API. These are
+simulator/rover boundaries and are not injected into `DroneMovementDependencies`.
 
 ```mermaid
 flowchart TD
-    Drone["DroneMovementController<br/>explore/reach_border/reach_start_point"]
-    Compute["MissionControl.compute_path(start, goal)"]
-    Service["PathfindingService.compute_path(start, goal)"]
+    Drone["DroneMovementController"]
+    Belief["requester SlamSnapshot<br/>known-free mask"]
+    Strategic["WaypointGraph.find_route()<br/>cached reverse tree"]
+    Intent["NavigationIntent<br/>exact route paths and cursors"]
+    Prefix["bounded stored-polyline prefix<br/>zero persistent-edge A*"]
+    Standalone["PathfindingService.compute_path(start, goal)<br/>standalone physical boundary"]
     Pool["bounded ProcessPoolExecutor.submit(...)"]
     Shared["astar_pathfinder.compute_path(shm_name, shape, start, goal, max_iters=200000)"]
     Weighted["astar_pathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, ...)"]
@@ -671,14 +745,16 @@ flowchart TD
     RoverControl["MissionControl.compute_rover_path(start, goal)"]
     RoverService["PathfindingService.compute_weighted_path(...)"]
 
-    Drone --> Compute --> Service --> Pool --> Shared
+    Drone --> Belief --> Strategic --> Intent --> Prefix
+    Standalone --> Pool --> Shared
     Rover --> RoverControl --> RoverService --> Weighted
 ```
 
 `PathfindingService(cave_map, agent_count)`
 
 - `start()` copies the cave map into shared memory and creates a bounded worker pool.
-- `compute_path(start, goal)` submits drone A* and blocks for its result.
+- `compute_path(start, goal)` submits the standalone physical A* and blocks for
+  its result; mission drone control has no forwarding method to it.
 - `compute_weighted_path(roughness_map, confidence_map, start, goal)` delegates rover routing to the weighted algorithm.
 - `shutdown()` idempotently closes the pool and closes/unlinks shared memory.
 - Construction is allocation-free so `MissionControl.__init__()` remains setup-only.
@@ -691,6 +767,8 @@ flowchart TD
 - Uses an octile-distance heuristic.
 - Prevents tight diagonal corner cutting when both adjacent orthogonal cells are walls.
 - Returns a path from start to goal, inclusive, or `[]`.
+- Is covered as a physical grid algorithm, not used as a planner knowledge
+  source by drones.
 
 `navigation.astar_pathfinder.compute_weighted_path(cave_map, roughness_map, confidence_map, start, goal, max_iters=200000, roughness_weight=4.0, unknown_penalty=2.5, low_confidence_penalty=1.5) -> list[tuple[int, int]]`
 
@@ -1026,7 +1104,6 @@ flowchart LR
   - `_initialize_runtime()`: window, control center, agents, resources, and first frame.
   - `set_start_point()`: picks a floor cell from worm starts.
   - `drone_thread(drone_id)`: moves one drone and triggers nearby sharing.
-  - `compute_path(start, goal)`: delegates drone routing to `PathfindingService`.
   - `compute_rover_path(start, goal)`: copies terrain state and delegates weighted routing.
   - `rover_thread(rover_id)`.
   - `update_sensors()`.
@@ -1312,12 +1389,14 @@ flowchart LR
 
 ### `mapping/vision_sensor.py`
 
-- Libraries: `dataclasses.dataclass`, `typing`, `math`.
+- Libraries: `dataclasses.dataclass`, `typing`, `math`, `numpy`.
 - Internal import: `wall_hit`.
 - Classes:
   - `RayHit(end, hit, distance, angle_deg, points)`
+  - `VisionScan(ray_hits, free_cells, occupied_cells)`
   - `VisionSensor(map_matrix, fov_deg=60.0, num_rays=60, step=2)`
 - Methods:
+  - `scan_cone(origin, heading_deg)`
   - `cast_cone(origin, heading_deg)`
   - `_cast_single_ray(origin, angle_deg)`
 
@@ -1332,6 +1411,7 @@ flowchart LR
   - `snapshot(point_limit=None)`
   - `has_changed_since(version)`
   - `update_from_rays(origin, ray_hits)`
+  - `update_from_observations(origin, free_cells, occupied_cells)`
   - `merge_from(snapshot)`
 - Owns synchronization, private arrays, bounded point storage,
   confidence-dominant merging, detached snapshots, and version advancement.
@@ -1349,8 +1429,7 @@ flowchart LR
 - Libraries: `typing`, `math`, `numpy`.
 - Class: `RoughnessSampler`
   - `__init__(terrain_roughness, map_matrix)`
-  - `sample_from_rays(origin, ray_hits, step=4)`
-  - `_line_points(x0, y0, x1, y1, step)`
+  - `sample_from_rays(origin, ray_hits, step=2)`
 
 ### `mission/presentation_adapter.py`
 
@@ -1447,8 +1526,9 @@ flowchart LR
 - `DroneRuntimeState` owns all mutable drone position, path, frontier,
   lifecycle, sensor-ray, battery, and overlay state that crosses thread
   boundaries. Callers consume detached `DroneSnapshot` values.
-- `PathfindingService` owns pathfinding shared memory, the process pool, and
-  its semaphore; inspect those resources on the service itself.
+- `PathfindingService` owns standalone/disabled-rover pathfinding shared
+  memory, the process pool, and its semaphore. It is not a drone movement
+  dependency; inspect those resources on the service itself.
 - `TerrainKnowledge` owns roughness/confidence arrays, synchronization,
   snapshots, and merging for missions, drones, and rovers.
 - `SlamMap` owns its lock, occupancy/confidence arrays, point cloud, snapshots,
@@ -1466,6 +1546,8 @@ flowchart LR
 - Positions are `(x, y)`, but NumPy arrays are indexed `[y, x]`.
 - Shared memory exists in two places:
   - map generation workers mutate a shared cave buffer in `generation.mapgen_helpers`.
-  - `PathfindingService` owns the shared cave map read by mission workers in `navigation.astar_pathfinder.compute_path`.
+  - `PathfindingService` owns the cave buffer used by its explicit standalone
+    physical A* API and disabled rover scaffolding. Normal drone planning and
+    stored-route execution never call it.
 - `rover_motion_enabled` is currently `False`, so rovers are created and rendered, but rover movement threads do not run unless that flag changes.
 - The global cave image is not the authoritative runtime map. `bin_map`, local SLAM occupancy, roughness, and confidence arrays drive behavior.

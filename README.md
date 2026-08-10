@@ -10,8 +10,19 @@ The codebase is organized around a simple control chain: `main.py` creates the g
 - `agents/drone.py` models local exploration, vision, and terrain knowledge.
 - `agents/rover.py` acts as a mobile or stationary support agent depending on mission setup.
 - `mapping/terrain_knowledge.py` owns terrain arrays, synchronization, snapshots, observation fusion, and merging.
-- `navigation/pathfinding.py` owns pathfinding workers, shared memory, and mission-facing route requests.
-- `navigation/astar_pathfinder.py` contains the drone and terrain-weighted A* algorithms.
+- `navigation/waypoint_graph.py` owns the shared strategic topology, stable
+  node/edge/route IDs, exact edge polylines, and revision-keyed route cache.
+- `navigation/frontier_clusters.py` owns stable frontier identity,
+  reservations, and belief-validated gateways.
+- `mission/exploration_coordination.py` reconciles canonical retirements into
+  every drone, confirms team-wide exhaustion, and starts coordinated homing.
+- `mapping/wall_mapping.py` measures exposed cave/pillar/internal-wall surface
+  coverage from combined occupied SLAM evidence.
+- `navigation/navigation_intent.py` and `agents/local_mcts_controller.py` own
+  persistent route execution state and bounded goal-conditioned local control.
+- `navigation/pathfinding.py` and `navigation/astar_pathfinder.py` remain
+  physical-simulator and disabled-rover infrastructure; drone planning does
+  not call their ground-truth cave-map A*.
 - `agents/graph.py` tracks valid movement and exploration connectivity.
 - `ui/control_center/facade.py` is the UI facade, `ui/control_center/controller.py` owns timer
   and input state, and `ui/control_center/renderer.py` owns Pygame layout and
@@ -50,7 +61,7 @@ Run the automated test suite:
 python -m unittest discover -s tests -v
 ```
 
-See [`TESTING.md`](TESTING.md) for the test matrix, placement rules, and manual
+See [`TESTING.md`](docs/TESTING.md) for the test matrix, placement rules, and manual
 smoke checklist.
 
 ## System Architecture
@@ -95,13 +106,32 @@ still blitted every frame.
 
 ### Agent Responsibilities
 
-`agents/drone.py` focuses on exploration. Each drone moves through the cave, scans its surroundings, records terrain observations locally, and uses pathfinding when it needs to reach a frontier or a chosen target. Long frontier journeys use a sparse mission waypoint graph learned from travelled paths and confident SLAM free space. Observed frontier regions are joined to that graph by bounded, sampled known-free corridors; drones execute and replan one short A* segment at a time.
+`agents/drone.py` composes each drone's local mapping, strategic policy,
+movement state machine, sensor, and renderer. Frontier extraction produces
+stable cluster IDs from that drone's SLAM belief. A shared assignment registry
+reserves a cluster, while each drone selects a requester-known-free waypoint
+from that stable cluster's cells. A gateway is protected only when a required
+belief corridor actually connects the cluster to the strategic graph. The
+selected goal and exact oriented route are latched in a stable-ID navigation
+intent. Normal movement advances the stored polyline cursor by one bounded
+prefix with no per-prefix A* or goal reselection; only route construction may
+run bounded known-free connector A*.
 
 `agents/rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
 
 ### Support Systems
 
-`navigation/pathfinding.py` owns the runtime resources used for route requests. It sends drone A* work to a bounded process pool backed by a shared cave map and computes rover terrain-weighted routes in-process. `navigation/astar_pathfinder.py` contains the grid algorithms, and `navigation/waypoint_graph.py` provides sparse, thread-safe highway routing without reading the ground-truth cave topology. `agents/graph.py` stores and validates local exploration connectivity, while `ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI concerns outside the simulation core.
+`navigation/waypoint_graph.py` provides the thread-safe strategic highway. Its
+monotonic IDs survive role changes, its travelled and requester-scoped
+belief-corridor edges retain complete physical polylines, and reverse route
+trees are cached by topology, requester, and requester-scoped belief-edge
+validity. Unrelated SLAM revisions can therefore reuse a valid tree.
+`navigation/pathfinding.py` still owns a cave-map-backed worker pool used at the
+physical simulator/standalone algorithm boundary, and terrain-weighted routing
+for the currently disabled rover flow. It is not injected into drone movement.
+`agents/graph.py` remains the physical collision/history boundary, while
+`ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI
+concerns outside the simulation core.
 
 ## Runtime and Data Flow
 
@@ -109,19 +139,38 @@ The simulation works as a feedback loop:
 
 1. The map is generated.
 2. Agents are placed into the world.
-3. Drones move and scan.
-4. Each drone updates its local terrain knowledge and the mission telemetry aggregate.
+3. Drones move and scan every visible cell in their current cone.
+4. Dense visibility updates local SLAM, while sparse sample rays update the
+   separate rover-oriented terrain knowledge.
 5. Nearby agents exchange data when the mission rules allow it.
-6. The UI aggregates that knowledge into a shared visualization.
-7. Mission completion is checked continuously through the selected objective policy.
+6. The UI reports exposed wall-surface coverage from combined occupied SLAM;
+   roughness remains an optional terrain heatmap.
+7. Belief-only frontier extraction prioritizes continuation of already
+   observed wall surfaces. Coherent open unknown regions are used only to find
+   another wall; the coherence threshold remains a defensive filter rather
+   than compensating for gaps in the visibility cone. A retained wall target
+   must offer a meaningfully displaced next viewpoint; unchanged pixel-scale
+   tips are locally suppressed, and valid continuations use a directed partial
+   sweep instead of another full rotation.
+8. Canonical frontier retirement is reconciled across the team. All drones
+   home together only after every drone confirms the shared registry is empty.
+9. Mission completion requires every drone to finish that coordinated return.
 
 That flow is important because the game does not use a single global terrain oracle. Instead, knowledge is built from observations and exchanged through explicit events. This makes the heatmap, the agent behavior, and the mission state all consistent with one another.
 
 ### Distributed Terrain Knowledge
 
-Terrain state is represented by `TerrainKnowledge`. Mission control, every drone, and every rover own separate instances containing roughness, confidence, a floor mask, and synchronization. Drones update their local instance while the same observations are separately recorded in the mission aggregate for telemetry and combined rendering.
+Terrain state is represented by `TerrainKnowledge`. Mission control, every
+drone, and every rover own separate instances containing roughness, confidence,
+a floor mask, and synchronization. Drones update their local instance while
+the same observations are separately recorded for rover routing and the
+optional terrain heatmap. Terrain coverage does not define exploration
+progress or completion.
 
-Snapshots provide detached data for rendering and path planning. Sharing decides when knowledge moves between agents, while `TerrainKnowledge.merge_from()` provides the single confidence-weighted merge rule.
+Snapshots provide detached data for rendering and belief-scoped value
+estimation. Sharing decides when knowledge moves between agents, while
+`TerrainKnowledge.merge_from()` provides the single confidence-weighted merge
+rule.
 
 Local occupancy mapping follows the same ownership pattern. Each `SlamMap`
 privately owns its occupancy grid, confidence grid, point cloud, lock, and
@@ -130,10 +179,22 @@ selection, and rendering consume detached `SlamSnapshot` values. Rendering
 tracks consumed versions so an update arriving during frame composition
 remains pending for the next refresh.
 
+Vision and terrain sampling deliberately have different resolutions.
+`VisionSensor.scan_cone()` produces a collision-bounded `VisionScan` covering
+every grid cell in the cone; those free and occupied observations are the only
+sensor inputs to SLAM exploration gain and mission completion. The fixed ray
+set remains available for the overlay and samples roughness every second ray
+cell. Terrain may therefore remain interpolably sparse without creating
+frontiers or delaying wall-mapping completion.
+
 The distributed-semantics contract is:
 
 - Agent-local knowledge drives active agent decisions.
 - Mission-global terrain is telemetry and UI aggregation only.
+- Exploration progress is occupied-SLAM coverage of exposed wall surfaces;
+  buried solid rock is excluded.
+- Exploration exhaustion is belief-only and team-coordinated through the
+  canonical frontier registry; the cave map is not exposed to planners.
 - Sharing is the only mechanism that transfers local knowledge between agents.
 - Rover movement remains disabled. Its existing target and route code is
   disabled until it uses rover-local received knowledge before activation.
@@ -164,23 +225,48 @@ The reason for this architecture is practical: cave generation is naturally para
 
 ## Exploration Behavior
 
-Drone movement is a mix of local perception, frontier selection, and path navigation.
+Drone movement separates strategic selection from bounded local execution.
 
 The agent typically does the following:
 
-- scan nearby terrain with vision-based sensing,
-- update its own local knowledge,
-- choose a new exploration target,
-- validate the move against the graph and cave geometry,
-- use pathfinding when the target is not reachable by direct local motion.
+- scan nearby terrain and update private SLAM/terrain knowledge,
+- refresh stable frontier clusters, prefer an unassigned wall-continuation
+  cluster, and use coherent unknown space only as a wall-discovery fallback,
+- select an informative locally known-free cell within the stable cluster,
+  batch retained wall progress by at least the configured continuation
+  distance, and construct a cached strategic route,
+- persist a gateway only when a required bounded belief corridor was actually
+  connected; retire its orphan corridor with the cluster,
+- persist cluster, gateway, assignment, route, and intent IDs plus exact route
+  cursors across movement ticks,
+- follow the stored oriented edge polyline deterministically during normal
+  travel, and use bounded goal-conditioned local MCTS only when local
+  deviations provide a real choice; single-choice scan and recovery modes use
+  deterministic stored-intent fast paths,
+- invalidate or change goals only for explicit reservation, topology, belief,
+  collision, scan, or watchdog reasons.
+- reconcile peer-retired IDs before selection and begin homing only after all
+  drones have reported a frontier-free team epoch.
 
-This is why the game feels like an exploration system rather than a simple sprite simulation. The drones are reacting to the cave structure, not just wandering randomly across a flat map.
+Planner-facing types contain SLAM belief and stable IDs, never the true cave
+map. The true map is still used where the simulator must enforce physical
+collision, generate sensor observations, test communication line of sight, or
+exercise the disabled rover/pathfinding scaffolding.
 
 ## Rendering and UI
 
 The rendering path is deliberately separated from mission logic.
 
-`rendering/mission_renderer.py` owns complete frame composition and the stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain view, `rendering/waypoint_renderer.py` caches the persistent highway overlay, and each agent renderer owns paths, vision, and icons. The control-center facade builds immutable frame data, its controller owns timer/tab/input state, and its renderer owns all Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps presentation state isolated so toggles do not contaminate the simulation model.
+`rendering/mission_renderer.py` owns complete frame composition and the
+stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain
+view. `rendering/waypoint_renderer.py` rebuilds one persistent overlay per
+committed topology revision and renders HOME, JUNCTION, CHOKEPOINT, TURN,
+FRONTIER_GATEWAY, and RECOVERY_ANCHOR roles distinctly. Each agent renderer
+owns paths, vision, and icons. The control-center facade builds immutable frame
+data, its controller owns timer/tab/input state, and its renderer owns all
+Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps
+presentation state isolated so toggles do not contaminate the simulation
+model.
 
 Rendering is layered so the visual output stays readable:
 
@@ -198,8 +284,12 @@ Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 The project keeps its runtime settings and visual assets in predictable locations.
 
 - `GameConfig/options.default.ini` and `GameConfig/simulation.default.ini`
-  store committed defaults, including waypoint spacing and bounded connector
-  controls.
+  store committed defaults. Strategic navigation settings use a 32 px spatial
+  hash, an 8 px merge radius, 64/192 px local/gateway connector bounds, a
+  64-entry route cache, a four-cell local unknown-coherence threshold, a 12 px
+  retained-wall displacement, a three-heading continuation sweep,
+  trail-promotion thresholds, and the bounded local MCTS budget. Retired
+  breadcrumb/frontier-fallback settings are neither typed nor persisted.
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
   user changes and are ignored by Git.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
@@ -233,9 +323,9 @@ Simulation settings available in-game:
 | Known map visualization | Implemented | Available in current simulation flow |
 | Distributed terrain sharing | Implemented | Drone-to-drone and rover terrain sharing are active |
 | POI and path sharing | Planned | POI model exists; runtime integration is deferred |
-| Waypoints for path segmentation | Implemented | Shared SLAM-safe highways, bounded frontier bridges, one-segment replanning, and a cached overlay are active |
+| Strategic navigation graph | Implemented | Stable IDs, exact stored edge polylines, belief-scoped connectors, persistent cursor execution, and a revision-batched role overlay are active |
 | Battery management | Planned | Not yet implemented |
-| Non-random exploration logic | Planned | Current behavior includes random exploration components |
+| Stable frontier exploration | Implemented | Stable clusters, reservations, persistent goals, deterministic route following, and bounded local MCTS are active |
 | Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |
 | Drift modeling | Planned | Not yet implemented |
 

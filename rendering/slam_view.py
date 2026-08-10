@@ -64,11 +64,13 @@ class SlamViewService:
         if not dependencies.get_drones():
             return
 
-        terrain_view_dirty = (
+        # This flag also represents a selected/combined view identity change.
+        # Occupancy views must therefore rebuild even when their underlying
+        # SLAM version was already cached while rendering another view.
+        view_dirty = (
             dependencies.presentation.terrain_heatmap_dirty
-            and dependencies.presentation.show_terrain_heatmap
+            or self._current_view_is_dirty()
         )
-        view_dirty = terrain_view_dirty or self._current_view_is_dirty()
 
         now = time.perf_counter()
         refresh_due = (

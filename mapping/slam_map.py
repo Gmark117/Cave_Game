@@ -25,6 +25,8 @@ class SlamSnapshot:
     confidence: np.ndarray
     point_cloud: Tuple[Point, ...] = ()
     version: int = 0
+    origin: Point = (0, 0)
+    full_shape: Tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         """Validate that occupancy and confidence describe the same grid."""
@@ -32,6 +34,52 @@ class SlamSnapshot:
             raise ValueError("SLAM snapshot arrays must be two-dimensional")
         if self.occupancy.shape != self.confidence.shape:
             raise ValueError("SLAM snapshot arrays must have the same shape")
+        if self.full_shape is not None and (
+            self.full_shape[0] < self.occupancy.shape[0]
+            or self.full_shape[1] < self.occupancy.shape[1]
+        ):
+            raise ValueError("full SLAM shape cannot be smaller than its window")
+
+
+@dataclass(frozen=True)
+class SlamProgressSnapshot:
+    """Detached cumulative progress counters for one local SLAM map."""
+
+    version: int = 0
+    completed_scan_sequence: int = 0
+    sensor_newly_known_cells: int = 0
+    sensor_confidence_gain: float = 0.0
+    shared_newly_known_cells: int = 0
+    shared_confidence_gain: float = 0.0
+    collision_observations: int = 0
+    collision_newly_known_cells: int = 0
+    collision_confidence_gain: float = 0.0
+
+    @property
+    def newly_known_cells(self) -> int:
+        """Return cumulative newly known cells from every evidence source."""
+        return (
+            self.sensor_newly_known_cells
+            + self.shared_newly_known_cells
+            + self.collision_newly_known_cells
+        )
+
+    @property
+    def confidence_gain(self) -> float:
+        """Return cumulative confidence gain from every evidence source."""
+        return (
+            self.sensor_confidence_gain
+            + self.shared_confidence_gain
+            + self.collision_confidence_gain
+        )
+
+
+@dataclass
+class _ProgressDelta:
+    """Mutable operation-local progress before it reaches public counters."""
+
+    newly_known_cells: int = 0
+    confidence_gain: float = 0.0
 
 
 class SlamMap:
@@ -52,6 +100,14 @@ class SlamMap:
         self._point_cloud: Deque[Point] = deque()
         self._point_set: set[Point] = set()
         self._version = 0
+        self._completed_scan_sequence = 0
+        self._sensor_newly_known_cells = 0
+        self._sensor_confidence_gain = 0.0
+        self._shared_newly_known_cells = 0
+        self._shared_confidence_gain = 0.0
+        self._collision_observations = 0
+        self._collision_newly_known_cells = 0
+        self._collision_confidence_gain = 0.0
 
         self.max_range = max(1.0, float(math.hypot(map_w, map_h)))
         self.max_points = max(0, int(max_points))
@@ -76,6 +132,63 @@ class SlamMap:
                 confidence=self._confidence.copy(),
                 point_cloud=points,
                 version=self._version,
+                full_shape=self._occupancy.shape,
+            )
+
+    def snapshot_window(
+        self,
+        bounds: tuple[int, int, int, int],
+    ) -> SlamSnapshot:
+        """Return one bounded detached belief window from an atomic version."""
+        with self._lock:
+            return self._snapshot_window_locked(bounds)
+
+    def try_snapshot_window(
+        self,
+        bounds: tuple[int, int, int, int],
+    ) -> SlamSnapshot | None:
+        """Return a bounded window immediately, or ``None`` if SLAM is busy."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._snapshot_window_locked(bounds)
+        finally:
+            self._lock.release()
+
+    def _snapshot_window_locked(
+        self,
+        bounds: tuple[int, int, int, int],
+    ) -> SlamSnapshot:
+        """Copy a normalized window while the caller owns ``_lock``."""
+        left, top, right, bottom = (int(value) for value in bounds)
+        height, width = self._occupancy.shape
+        left = min(width, max(0, left))
+        right = min(width, max(left, right))
+        top = min(height, max(0, top))
+        bottom = min(height, max(top, bottom))
+        return SlamSnapshot(
+            occupancy=self._occupancy[top:bottom, left:right].copy(),
+            confidence=self._confidence[top:bottom, left:right].copy(),
+            version=self._version,
+            origin=(left, top),
+            full_shape=self._occupancy.shape,
+        )
+
+    def progress_snapshot(self) -> SlamProgressSnapshot:
+        """Return an immutable, atomic view of cumulative mapping progress."""
+        with self._lock:
+            return SlamProgressSnapshot(
+                version=self._version,
+                completed_scan_sequence=self._completed_scan_sequence,
+                sensor_newly_known_cells=self._sensor_newly_known_cells,
+                sensor_confidence_gain=self._sensor_confidence_gain,
+                shared_newly_known_cells=self._shared_newly_known_cells,
+                shared_confidence_gain=self._shared_confidence_gain,
+                collision_observations=self._collision_observations,
+                collision_newly_known_cells=(
+                    self._collision_newly_known_cells
+                ),
+                collision_confidence_gain=self._collision_confidence_gain,
             )
 
     def has_changed_since(self, version: int) -> bool:
@@ -93,6 +206,7 @@ class SlamMap:
 
         with self._lock:
             updated = False
+            progress = _ProgressDelta()
             for hit in ray_hits:
                 ex, ey = int(hit.end[0]), int(hit.end[1])
                 if (
@@ -118,11 +232,13 @@ class SlamMap:
                         points[:-1],
                         FREE,
                         base_confidence,
+                        progress,
                     )
                     updated |= self._mark_points(
                         [points[-1]],
                         OCCUPIED,
                         min(1.0, base_confidence + 0.25),
+                        progress,
                     )
                     updated |= self._add_point(points[-1])
                 else:
@@ -130,10 +246,61 @@ class SlamMap:
                         points,
                         FREE,
                         base_confidence,
+                        progress,
                     )
 
             if updated:
                 self._version += 1
+            self._completed_scan_sequence += 1
+            self._sensor_newly_known_cells += progress.newly_known_cells
+            self._sensor_confidence_gain += progress.confidence_gain
+            return updated
+
+    def update_from_observations(
+        self,
+        origin: Tuple[float, float],
+        *,
+        free_cells: Iterable[Point],
+        occupied_cells: Iterable[Point],
+    ) -> bool:
+        """Update SLAM from one gap-free visibility observation."""
+        free = tuple(dict.fromkeys(
+            (int(point[0]), int(point[1])) for point in free_cells
+        ))
+        occupied = tuple(dict.fromkeys(
+            (int(point[0]), int(point[1])) for point in occupied_cells
+        ))
+        all_cells = (*free, *occupied)
+        farthest = max(
+            (math.dist(origin, point) for point in all_cells),
+            default=0.0,
+        )
+        base_confidence = max(
+            0.15,
+            1.0 - (farthest / self.max_range),
+        )
+
+        with self._lock:
+            progress = _ProgressDelta()
+            updated = self._mark_points(
+                free,
+                FREE,
+                base_confidence,
+                progress,
+            )
+            updated |= self._mark_points(
+                occupied,
+                OCCUPIED,
+                min(1.0, base_confidence + 0.25),
+                progress,
+            )
+            for point in occupied:
+                updated |= self._add_point(point)
+            if updated:
+                self._version += 1
+            self._completed_scan_sequence += 1
+            self._sensor_newly_known_cells += progress.newly_known_cells
+            self._sensor_confidence_gain += progress.confidence_gain
             return updated
 
     def merge_from(self, source: SlamSnapshot) -> bool:
@@ -167,12 +334,28 @@ class SlamMap:
                 )
                 replace_cells = higher_confidence | occupied_ties
                 if np.any(replace_cells):
-                    target_occupancy[replace_cells] = (
-                        incoming_occupancy[replace_cells]
-                    )
-                    target_confidence[replace_cells] = np.maximum(
-                        target_confidence[replace_cells],
+                    previous_occupancy = target_occupancy[replace_cells].copy()
+                    previous_confidence = target_confidence[replace_cells].copy()
+                    replacement_occupancy = incoming_occupancy[replace_cells]
+                    replacement_confidence = np.maximum(
+                        previous_confidence,
                         incoming_confidence[replace_cells],
+                    )
+                    target_occupancy[replace_cells] = (
+                        replacement_occupancy
+                    )
+                    target_confidence[replace_cells] = replacement_confidence
+                    self._shared_newly_known_cells += int(
+                        np.count_nonzero(
+                            (previous_occupancy == UNKNOWN)
+                            & (replacement_occupancy != UNKNOWN)
+                        )
+                    )
+                    self._shared_confidence_gain += float(
+                        np.sum(
+                            replacement_confidence - previous_confidence,
+                            dtype=np.float64,
+                        )
                     )
                     updated = True
 
@@ -191,14 +374,19 @@ class SlamMap:
         """Record a movement-confirmed obstacle in the local occupancy map."""
         normalized = (int(point[0]), int(point[1]))
         with self._lock:
+            progress = _ProgressDelta()
             updated = self._mark_points(
                 (normalized,),
                 OCCUPIED,
                 min(1.0, max(0.0, float(confidence))),
+                progress,
             )
             updated |= self._add_point(normalized)
             if updated:
                 self._version += 1
+            self._collision_observations += 1
+            self._collision_newly_known_cells += progress.newly_known_cells
+            self._collision_confidence_gain += progress.confidence_gain
             return updated
 
     def _snapshot_points(self, point_limit: Optional[int]) -> Tuple[Point, ...]:
@@ -217,6 +405,7 @@ class SlamMap:
         points: Iterable[Point],
         occupancy_value: int,
         confidence: float,
+        progress: _ProgressDelta | None = None,
     ) -> bool:
         """Apply one occupancy label to line points when confidence improves."""
         updated = False
@@ -230,6 +419,7 @@ class SlamMap:
                 continue
 
             previous_confidence = float(self._confidence[y, x])
+            previous_occupancy = int(self._occupancy[y, x])
             if confidence > previous_confidence + 1e-4:
                 self._occupancy[y, x] = occupancy_value
                 self._confidence[y, x] = min(1.0, confidence)
@@ -256,6 +446,18 @@ class SlamMap:
                 if boosted > previous_confidence + 1e-4:
                     self._confidence[y, x] = boosted
                     updated = True
+            if progress is not None:
+                current_occupancy = int(self._occupancy[y, x])
+                current_confidence = float(self._confidence[y, x])
+                if (
+                    previous_occupancy == UNKNOWN
+                    and current_occupancy != UNKNOWN
+                ):
+                    progress.newly_known_cells += 1
+                progress.confidence_gain += max(
+                    0.0,
+                    current_confidence - previous_confidence,
+                )
         return updated
 
     def _add_point(self, point: Point) -> bool:

@@ -37,7 +37,7 @@ they protect.
 |---|---|---|---|
 | Configuration, resource paths, simple models | `test_helpers_and_models.py` | Unit | Nested simulation sections are immutable and validated; shared resources are checked without constructing the game. |
 | Movement geometry | `test_graph.py`, `test_helpers_and_models.py` | Unit | Coordinate conventions and wall crossing are foundational to every agent. |
-| Vision and roughness sampling | `test_vision_sensor.py`, `test_roughness_sampler.py` | Unit | Ray endpoints, wall stopping, and confidence decay are deterministic sensor rules. |
+| Vision and roughness sampling | `test_vision_sensor.py`, `test_roughness_sampler.py` | Unit | Dense cone coverage, wall occlusion, sparse ray endpoints, two-cell terrain stride, and confidence decay are deterministic sensor rules. |
 | Local SLAM state | `test_slam_map.py` | Unit/concurrency | Private-state snapshots, versions, confidence dominance, point-cloud bounds, and concurrent reads/updates belong to `SlamMap`. |
 | SLAM visualization | `test_slam_renderer.py`, `test_slam_view.py` | Surface/service | Pixel data, local-versus-combined selection, version throttling, and updates racing with rendering can be tested without opening a window. |
 | Terrain knowledge model | `test_terrain_knowledge.py` | Unit | Shape validation, snapshots, floor masking, observation fusion, explored ratios, and merging belong to one domain object. |

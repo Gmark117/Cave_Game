@@ -39,7 +39,7 @@ class ControlCenter:
 
     @property
     def explored_percent(self) -> int:
-        """Latest mission explored percentage shown in the header."""
+        """Latest wall-mapping percentage shown in the header."""
         return self._controller.explored_percent
 
     @explored_percent.setter
@@ -74,7 +74,7 @@ class ControlCenter:
         return self._controller.format_timer()
 
     def set_explored_percent(self, value: int) -> None:
-        """Update mission progress without exposing controller internals."""
+        """Update wall-mapping progress without exposing internals."""
         self._controller.set_explored_percent(value)
 
     def draw_control_center(

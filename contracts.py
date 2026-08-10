@@ -28,20 +28,8 @@ class TerrainKnowledgeStore(Protocol):
         """Fuse visible terrain samples and report whether anything changed."""
         ...
 
-    def explored_ratio(self) -> float:
-        """Return the fraction of known floor cells for progress display."""
-        ...
-
     def snapshot(self) -> Any:
         """Return a detached terrain snapshot for sharing or rendering."""
-        ...
-
-
-class ProgressDisplay(Protocol):
-    """Control-center progress display boundary."""
-
-    def set_explored_percent(self, value: int) -> None:
-        """Update the displayed explored percentage."""
         ...
 
 
@@ -70,16 +58,10 @@ class SlamRendererLike(Protocol):
 
 @dataclass
 class TerrainFusionDependencies:
-    """Inputs required to update mission terrain telemetry."""
+    """Inputs required to fuse rover terrain and invalidate its heatmap."""
 
     terrain_knowledge: TerrainKnowledgeStore
-    get_control_center: Callable[[], ProgressDisplay]
     presentation: PresentationInvalidator
-    simulation_time: Callable[[], float]
-    explored_update_interval: float
-    # Stored here so the fusion service can throttle UI updates without owning
-    # the whole MissionControl object.
-    last_explored_update: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +77,7 @@ class TerrainSharingDependencies:
     get_rovers: Callable[[], Sequence[Any]]
     presentation: PresentationInvalidator
     simulation_time: Callable[[], float]
+    runtime_trace: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +137,6 @@ class MissionRendererDependencies:
 class DroneMovementDependencies:
     """Callbacks used by drone movement without retaining mission control."""
 
-    compute_path: Callable[[Position, Position], list[Position]]
     simulation_time: Callable[[], float]
     pause_checkpoint: Callable[[], bool]
     wait_simulation_delay: Callable[[float], bool]

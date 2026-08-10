@@ -135,36 +135,67 @@ class MenuSettingsRepository:
             ),
         }
         config["FRONTIER"] = {
-            "stride": str(settings.frontier.stride),
             "confidence_threshold": str(
                 settings.frontier.confidence_threshold
             ),
+            "minimum_unknown_support": str(
+                settings.frontier.minimum_unknown_support
+            ),
+            "continuation_min_distance": str(
+                settings.frontier.continuation_min_distance
+            ),
+            "continuation_scan_headings": str(
+                settings.frontier.continuation_scan_headings
+            ),
             "rebuild_cooldown": str(settings.frontier.rebuild_cooldown),
+            "cluster_match_distance": str(
+                settings.frontier.cluster_match_distance
+            ),
+            "missing_refresh_limit": str(
+                settings.frontier.missing_refresh_limit
+            ),
+            "gateway_min_separation": str(
+                settings.frontier.gateway_min_separation
+            ),
         }
         config["WAYPOINTS"] = {
             "enabled": str(settings.waypoints.enabled),
-            "spacing": str(settings.waypoints.spacing),
+            "spatial_hash_cell": str(
+                settings.waypoints.spatial_hash_cell
+            ),
             "merge_radius": str(settings.waypoints.merge_radius),
-            "direct_path_limit": str(settings.waypoints.direct_path_limit),
             "connector_distance": str(settings.waypoints.connector_distance),
+            "gateway_connector_distance": str(
+                settings.waypoints.gateway_connector_distance
+            ),
+            "route_cache_capacity": str(
+                settings.waypoints.route_cache_capacity
+            ),
             "connector_limit": str(settings.waypoints.connector_limit),
+            "turn_threshold_degrees": str(
+                settings.waypoints.turn_threshold_degrees
+            ),
+            "minimum_turn_leg": str(settings.waypoints.minimum_turn_leg),
+            "chokepoint_narrow_clearance": str(
+                settings.waypoints.chokepoint_narrow_clearance
+            ),
+            "chokepoint_shoulder_clearance": str(
+                settings.waypoints.chokepoint_shoulder_clearance
+            ),
+            "chokepoint_shoulder_length": str(
+                settings.waypoints.chokepoint_shoulder_length
+            ),
+            "recovery_anchor_interval": str(
+                settings.waypoints.recovery_anchor_interval
+            ),
         }
         config["EXPLORATION"] = {
             "policy": settings.exploration.policy,
             "iterations": str(settings.exploration.iterations),
             "horizon": str(settings.exploration.horizon),
-            "branching_factor": str(
-                settings.exploration.branching_factor
-            ),
-            "frontier_cluster_limit": str(
-                settings.exploration.frontier_cluster_limit
-            ),
             "planning_rays": str(settings.exploration.planning_rays),
             "uct_exploration": str(settings.exploration.uct_exploration),
             "discount": str(settings.exploration.discount),
-            "rollout_temperature": str(
-                settings.exploration.rollout_temperature
-            ),
             "decision_time_budget_ms": str(
                 settings.exploration.decision_time_budget_ms
             ),
@@ -346,17 +377,52 @@ class MenuSettingsRepository:
     ) -> FrontierConfig:
         """Parse frontier detection settings."""
         return FrontierConfig(
-            stride=int(section.get("stride", defaults.stride)),
             confidence_threshold=float(
                 section.get(
                     "confidence_threshold",
                     defaults.confidence_threshold,
                 )
             ),
+            minimum_unknown_support=int(
+                section.get(
+                    "minimum_unknown_support",
+                    defaults.minimum_unknown_support,
+                )
+            ),
+            continuation_min_distance=float(
+                section.get(
+                    "continuation_min_distance",
+                    defaults.continuation_min_distance,
+                )
+            ),
+            continuation_scan_headings=int(
+                section.get(
+                    "continuation_scan_headings",
+                    defaults.continuation_scan_headings,
+                )
+            ),
             rebuild_cooldown=float(
                 section.get(
                     "rebuild_cooldown",
                     defaults.rebuild_cooldown,
+                )
+            ),
+            cluster_match_distance=float(
+                section.get(
+                    "cluster_match_distance",
+                    defaults.cluster_match_distance,
+                )
+            ),
+            missing_refresh_limit=int(
+                section.get(
+                    "missing_refresh_limit",
+                    defaults.missing_refresh_limit,
+                )
+            ),
+            gateway_min_separation=float(
+                section.get(
+                    "gateway_min_separation",
+                    defaults.gateway_min_separation,
                 )
             ),
         )
@@ -371,15 +437,14 @@ class MenuSettingsRepository:
         enabled = enabled_value.casefold() in {"1", "true", "yes", "on"}
         return WaypointConfig(
             enabled=enabled,
-            spacing=float(section.get("spacing", defaults.spacing)),
+            spatial_hash_cell=int(
+                section.get(
+                    "spatial_hash_cell",
+                    defaults.spatial_hash_cell,
+                )
+            ),
             merge_radius=float(
                 section.get("merge_radius", defaults.merge_radius)
-            ),
-            direct_path_limit=float(
-                section.get(
-                    "direct_path_limit",
-                    defaults.direct_path_limit,
-                )
             ),
             connector_distance=float(
                 section.get(
@@ -387,8 +452,56 @@ class MenuSettingsRepository:
                     defaults.connector_distance,
                 )
             ),
+            gateway_connector_distance=float(
+                section.get(
+                    "gateway_connector_distance",
+                    defaults.gateway_connector_distance,
+                )
+            ),
+            route_cache_capacity=int(
+                section.get(
+                    "route_cache_capacity",
+                    defaults.route_cache_capacity,
+                )
+            ),
             connector_limit=int(
                 section.get("connector_limit", defaults.connector_limit)
+            ),
+            turn_threshold_degrees=float(
+                section.get(
+                    "turn_threshold_degrees",
+                    defaults.turn_threshold_degrees,
+                )
+            ),
+            minimum_turn_leg=float(
+                section.get(
+                    "minimum_turn_leg",
+                    defaults.minimum_turn_leg,
+                )
+            ),
+            chokepoint_narrow_clearance=float(
+                section.get(
+                    "chokepoint_narrow_clearance",
+                    defaults.chokepoint_narrow_clearance,
+                )
+            ),
+            chokepoint_shoulder_clearance=float(
+                section.get(
+                    "chokepoint_shoulder_clearance",
+                    defaults.chokepoint_shoulder_clearance,
+                )
+            ),
+            chokepoint_shoulder_length=float(
+                section.get(
+                    "chokepoint_shoulder_length",
+                    defaults.chokepoint_shoulder_length,
+                )
+            ),
+            recovery_anchor_interval=float(
+                section.get(
+                    "recovery_anchor_interval",
+                    defaults.recovery_anchor_interval,
+                )
             ),
         )
 
@@ -402,18 +515,6 @@ class MenuSettingsRepository:
             policy=str(section.get("policy", defaults.policy)),
             iterations=int(section.get("iterations", defaults.iterations)),
             horizon=int(section.get("horizon", defaults.horizon)),
-            branching_factor=int(
-                section.get(
-                    "branching_factor",
-                    defaults.branching_factor,
-                )
-            ),
-            frontier_cluster_limit=int(
-                section.get(
-                    "frontier_cluster_limit",
-                    defaults.frontier_cluster_limit,
-                )
-            ),
             planning_rays=int(
                 section.get("planning_rays", defaults.planning_rays)
             ),
@@ -424,12 +525,6 @@ class MenuSettingsRepository:
                 )
             ),
             discount=float(section.get("discount", defaults.discount)),
-            rollout_temperature=float(
-                section.get(
-                    "rollout_temperature",
-                    defaults.rollout_temperature,
-                )
-            ),
             decision_time_budget_ms=float(
                 section.get(
                     "decision_time_budget_ms",

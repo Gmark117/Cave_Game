@@ -13,6 +13,7 @@ from mapping.roughness_sampler import RoughnessSampler
 from mapping.vision_sensor import RayHit, VisionSensor
 from mapping.terrain_knowledge import TerrainSample
 from contracts import DroneSensorDependencies
+from navigation.navigation_intent import MovementMode
 
 
 LIDAR_RANGE_RADIUS_MULTIPLIER = 4
@@ -61,42 +62,85 @@ class DroneSensorController:
         )
         self.latest_pose_estimate = pose_estimate
         pose_signature = self._pose_signature(pose_estimate)
+        progress_before = drone.slam_map.progress_snapshot()
+        intent = snapshot.navigation_intent
+        requested_repeat_scan = bool(
+            intent is not None
+            and (
+                intent.mode == MovementMode.SCAN
+                or intent.local_scan_pending
+            )
+            and progress_before.completed_scan_sequence
+            <= intent.scan_sequence
+        )
         if pose_signature == self._last_scan_pose:
-            if self._last_skip_pose_logged != pose_signature:
+            if requested_repeat_scan:
+                self._last_skip_pose_logged = None
+            elif self._last_skip_pose_logged != pose_signature:
                 self._trace(
                     "sensor_pose_static_skip",
                     pose=pose_signature,
                     slam_version=drone.slam_map.version,
                 )
                 self._last_skip_pose_logged = pose_signature
-            return
+                return
+            else:
+                return
 
         origin = pose_estimate.position
-        previous_slam_version = drone.slam_map.version
-        ray_hits = self.vision_sensor.cast_cone(
+        vision_scan = self.vision_sensor.scan_cone(
             origin,
             pose_estimate.heading_deg,
         )
+        ray_hits = vision_scan.ray_hits
         self._last_scan_pose = pose_signature
         self._last_skip_pose_logged = None
-        # The renderer consumes endpoints only; the SLAM map consumes full hit
-        # records so it knows whether each ray ended at a wall.
+        # The renderer and terrain sampler consume sparse rays. SLAM consumes
+        # the independent dense free/occupied visibility result below.
         drone.runtime_state.set_ray_points(hit.end for hit in ray_hits)
 
-        slam_updated = drone.slam_map.update_from_rays(origin, ray_hits)
+        slam_updated = drone.slam_map.update_from_observations(
+            origin,
+            free_cells=vision_scan.free_cells,
+            occupied_cells=vision_scan.occupied_cells,
+        )
 
         terrain_samples = self.scan_terrain(
             ray_hits,
             origin=origin,
             now=now,
         )
+        progress_after = drone.slam_map.progress_snapshot()
         self._trace(
             "sensor_scan",
             pose=pose_signature,
             ray_count=len(ray_hits),
+            visible_cell_count=(
+                len(vision_scan.free_cells) + len(vision_scan.occupied_cells)
+            ),
+            visible_free_cells=len(vision_scan.free_cells),
+            visible_occupied_cells=len(vision_scan.occupied_cells),
             slam_updated=slam_updated,
-            slam_version_before=previous_slam_version,
-            slam_version_after=drone.slam_map.version,
+            slam_version_before=progress_before.version,
+            slam_version_after=progress_after.version,
+            completed_scan_sequence=(
+                progress_after.completed_scan_sequence
+            ),
+            newly_known_cells=(
+                progress_after.sensor_newly_known_cells
+                - progress_before.sensor_newly_known_cells
+            ),
+            confidence_gain=(
+                progress_after.sensor_confidence_gain
+                - progress_before.sensor_confidence_gain
+            ),
+            cumulative_sensor_newly_known_cells=(
+                progress_after.sensor_newly_known_cells
+            ),
+            cumulative_sensor_confidence_gain=(
+                progress_after.sensor_confidence_gain
+            ),
+            requested_repeat_scan=requested_repeat_scan,
             terrain_samples=terrain_samples,
         )
 
@@ -126,6 +170,7 @@ class DroneSensorController:
         samples = self.roughness_sampler.sample_from_rays(
             origin,
             ray_hits,
+            step=2,
         )
         self.record_local_scan(samples)
         self.dependencies.record_terrain_scan(samples)

@@ -14,14 +14,10 @@ from contracts import TerrainFusionDependencies
 
 class TerrainFusionTests(unittest.TestCase):
     @staticmethod
-    def make_service(control, now: float = 1.0) -> TerrainFusionService:
+    def make_service(control) -> TerrainFusionService:
         dependencies = TerrainFusionDependencies(
             terrain_knowledge=control.terrain_knowledge,
-            get_control_center=lambda: control.control_center,
             presentation=control.presentation,
-            simulation_time=lambda: now,
-            explored_update_interval=control.explored_update_interval,
-            last_explored_update=control.last_explored_update,
         )
         control.dependencies = dependencies
         return TerrainFusionService(dependencies)
@@ -47,7 +43,7 @@ class TerrainFusionTests(unittest.TestCase):
         self.assertEqual(float(confidence[0, 0]), 1.0)
         self.assertEqual(float(confidence[0, 1]), 0.0)
 
-    def test_service_updates_progress_and_marks_heatmap_dirty(self) -> None:
+    def test_service_marks_heatmap_dirty_without_defining_exploration_progress(self) -> None:
         cave = np.zeros((2, 2), dtype=np.uint8)
         control = SimpleNamespace(
             terrain_knowledge=TerrainKnowledge(cave),
@@ -65,10 +61,7 @@ class TerrainFusionTests(unittest.TestCase):
             [(0, 0, 0.5, 0.5), (1, 0, 0.8, 0.5)]
         )
 
-        control.control_center.set_explored_percent.assert_called_once_with(
-            50
-        )
-        self.assertEqual(control.dependencies.last_explored_update, 1.0)
+        control.control_center.set_explored_percent.assert_not_called()
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
 
     def test_telemetry_fusion_does_not_mutate_agent_local_knowledge(self) -> None:

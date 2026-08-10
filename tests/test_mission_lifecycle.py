@@ -12,8 +12,14 @@ import pygame
 
 from game import Game
 from mission.control import MissionControl
-from config.simulation_config import MissionConfig, SimulationConfig
+from config.simulation_config import (
+    ExplorationConfig,
+    MissionConfig,
+    SimulationConfig,
+)
 from mapping.terrain_knowledge import TerrainKnowledge
+from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
+from mapping.wall_mapping import exposed_wall_mask
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
 from rendering.waypoint_renderer import WaypointRenderer
@@ -54,6 +60,61 @@ class FakeGame:
 
 
 class MissionLifecycleTests(unittest.TestCase):
+    def test_sensor_update_publishes_wall_mapping_not_terrain_coverage(self) -> None:
+        mission = MissionControl(FakeGame())
+        cave = np.ones((8, 8), dtype=np.uint8)
+        cave[1:7, 1:7] = 0
+        mission.map_matrix = cave
+        target = exposed_wall_mask(cave)
+        occupancy = np.full(cave.shape, UNKNOWN, dtype=np.int8)
+        confidence = np.zeros(cave.shape, dtype=np.float32)
+        points = tuple(zip(*np.where(target)))
+        for y, x in points[: len(points) // 2]:
+            occupancy[y, x] = OCCUPIED
+            confidence[y, x] = 1.0
+        slam = SlamSnapshot(occupancy, confidence, version=3)
+        drone = SimpleNamespace(
+            update_sensors=Mock(),
+            slam_map=SimpleNamespace(
+                version=3,
+                snapshot=Mock(return_value=slam),
+            ),
+        )
+        mission.drones = [drone]
+        mission.control_center = SimpleNamespace(
+            set_explored_percent=Mock(),
+        )
+        mission.simulation_time = Mock(return_value=1.0)
+        mission.terrain_knowledge.confidence[:] = 1.0
+
+        mission.update_sensors()
+
+        drone.update_sensors.assert_called_once_with()
+        mission.control_center.set_explored_percent.assert_called_once_with(50)
+        self.assertAlmostEqual(mission.wall_mapping_progress.ratio, 0.5)
+
+    def test_mission_trace_records_configured_planning_budget(self) -> None:
+        game = FakeGame()
+        game.sim_settings = SimulationConfig(
+            mission_config=game.sim_settings.mission_config,
+            exploration=ExplorationConfig(
+                decision_time_budget_ms=17.5,
+            ),
+        )
+
+        with patch("mission.control.RuntimeTraceLogger") as trace_logger:
+            MissionControl(game)
+
+        constructed = next(
+            call
+            for call in trace_logger.return_value.record.call_args_list
+            if call.args == ("mission_constructed",)
+        )
+        self.assertEqual(
+            constructed.kwargs["mcts_decision_time_budget_ms"],
+            17.5,
+        )
+
     def test_construction_does_not_allocate_runtime_resources(self) -> None:
         game = FakeGame()
 
@@ -103,7 +164,7 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.rover_motion_enabled)
         self.assertFalse(mission._runtime_initialized)
         self.assertFalse(mission._has_run)
-        self.assertEqual(mission.compute_path((0, 0), (1, 1)), [])
+        self.assertFalse(hasattr(mission, "compute_path"))
         self.assertFalse(mission.is_mission_over())
 
         mission.pathfinding.shutdown = Mock()
@@ -111,7 +172,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.pathfinding.shutdown.assert_called_once_with()
         self.assertTrue(mission.mission_event.is_set())
 
-    def test_pathfinding_methods_delegate_to_owned_service(self) -> None:
+    def test_only_rover_pathfinding_delegates_to_owned_service(self) -> None:
         mission = MissionControl(FakeGame())
         mission.pathfinding.compute_path = Mock(
             return_value=[(0, 0), (1, 1)],
@@ -120,15 +181,10 @@ class MissionLifecycleTests(unittest.TestCase):
             return_value=[(0, 0), (0, 1)],
         )
 
-        drone_path = mission.compute_path((0, 0), (1, 1))
         rover_path = mission.compute_rover_path((0, 0), (0, 1))
 
-        self.assertEqual(drone_path, [(0, 0), (1, 1)])
         self.assertEqual(rover_path, [(0, 0), (0, 1)])
-        mission.pathfinding.compute_path.assert_called_once_with(
-            (0, 0),
-            (1, 1),
-        )
+        mission.pathfinding.compute_path.assert_not_called()
         weighted_args = (
             mission.pathfinding.compute_weighted_path.call_args.args
         )

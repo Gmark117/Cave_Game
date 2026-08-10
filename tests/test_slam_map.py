@@ -8,6 +8,7 @@ from mapping.slam_map import (
     OCCUPIED,
     UNKNOWN,
     SlamMap,
+    SlamProgressSnapshot,
     SlamSnapshot,
 )
 from mapping.vision_sensor import RayHit
@@ -31,6 +32,114 @@ def make_snapshot(
 
 
 class SlamMapTests(unittest.TestCase):
+    def test_snapshot_window_is_bounded_detached_and_keeps_global_coordinates(
+        self,
+    ) -> None:
+        slam = SlamMap(20, 30)
+        slam.merge_from(make_snapshot(
+            (20, 30),
+            cells=[(8, 7, FREE, 0.8), (11, 9, OCCUPIED, 0.9)],
+        ))
+
+        window = slam.snapshot_window((7, 6, 12, 10))
+
+        self.assertEqual(window.origin, (7, 6))
+        self.assertEqual(window.full_shape, (20, 30))
+        self.assertEqual(window.occupancy.shape, (4, 5))
+        self.assertEqual(int(window.occupancy[1, 1]), FREE)
+        self.assertEqual(int(window.occupancy[3, 4]), OCCUPIED)
+        version = window.version
+        window.occupancy[:, :] = UNKNOWN
+        current = slam.snapshot_window((7, 6, 12, 10))
+        self.assertEqual(current.version, version)
+        self.assertEqual(int(current.occupancy[1, 1]), FREE)
+
+    def test_try_snapshot_window_never_waits_for_busy_writer(self) -> None:
+        slam = SlamMap(20, 30)
+        locked = threading.Event()
+        release = threading.Event()
+
+        def hold_writer_lock() -> None:
+            with slam._lock:
+                locked.set()
+                release.wait(timeout=1.0)
+
+        worker = threading.Thread(target=hold_writer_lock)
+        worker.start()
+        self.assertTrue(locked.wait(timeout=1.0))
+        try:
+            self.assertIsNone(slam.try_snapshot_window((7, 6, 12, 10)))
+        finally:
+            release.set()
+            worker.join(timeout=1.0)
+
+        self.assertIsNotNone(slam.try_snapshot_window((7, 6, 12, 10)))
+
+    def test_progress_snapshot_tracks_sensor_gain_and_completed_scans(
+        self,
+    ) -> None:
+        slam = SlamMap(5, 5)
+        ray = RayHit(
+            end=(4, 2),
+            hit=True,
+            distance=4.0,
+            angle_deg=90.0,
+            points=((0, 2), (1, 2), (2, 2), (3, 2), (4, 2)),
+        )
+
+        self.assertTrue(slam.update_from_rays((0, 2), [ray]))
+        progress = slam.progress_snapshot()
+
+        self.assertIsInstance(progress, SlamProgressSnapshot)
+        self.assertEqual(progress.version, 1)
+        self.assertEqual(progress.completed_scan_sequence, 1)
+        self.assertEqual(progress.sensor_newly_known_cells, 5)
+        self.assertGreater(progress.sensor_confidence_gain, 0.0)
+        self.assertEqual(progress.shared_newly_known_cells, 0)
+        self.assertEqual(progress.collision_observations, 0)
+        self.assertEqual(progress.newly_known_cells, 5)
+        self.assertAlmostEqual(
+            progress.confidence_gain,
+            progress.sensor_confidence_gain,
+        )
+
+    def test_zero_gain_scan_advances_completed_scan_sequence(self) -> None:
+        slam = SlamMap(3, 3)
+
+        self.assertFalse(slam.update_from_rays((1, 1), []))
+        first = slam.progress_snapshot()
+        self.assertFalse(slam.update_from_rays((1, 1), []))
+        second = slam.progress_snapshot()
+
+        self.assertEqual(first.completed_scan_sequence, 1)
+        self.assertEqual(second.completed_scan_sequence, 2)
+        self.assertEqual(second.version, 0)
+        self.assertEqual(second.sensor_newly_known_cells, 0)
+        self.assertEqual(second.sensor_confidence_gain, 0.0)
+
+    def test_progress_snapshot_separates_shared_and_collision_gain(self) -> None:
+        slam = SlamMap(3, 3)
+
+        self.assertTrue(
+            slam.merge_from(
+                make_snapshot(
+                    (3, 3),
+                    cells=[(0, 0, FREE, 0.4), (1, 0, OCCUPIED, 0.8)],
+                )
+            )
+        )
+        self.assertTrue(slam.record_collision((2, 2), confidence=0.9))
+        progress = slam.progress_snapshot()
+
+        self.assertEqual(progress.completed_scan_sequence, 0)
+        self.assertEqual(progress.sensor_newly_known_cells, 0)
+        self.assertEqual(progress.shared_newly_known_cells, 2)
+        self.assertAlmostEqual(progress.shared_confidence_gain, 1.2)
+        self.assertEqual(progress.collision_observations, 1)
+        self.assertEqual(progress.collision_newly_known_cells, 1)
+        self.assertAlmostEqual(progress.collision_confidence_gain, 0.9)
+        self.assertEqual(progress.newly_known_cells, 3)
+
     def test_ray_hit_marks_free_route_and_occupied_endpoint(self) -> None:
         slam = SlamMap(5, 5)
 
@@ -54,6 +163,24 @@ class SlamMapTests(unittest.TestCase):
         self.assertEqual(int(snapshot.occupancy[2, 4]), OCCUPIED)
         self.assertGreater(float(snapshot.confidence[2, 4]), 0.0)
         self.assertIn((4, 2), snapshot.point_cloud)
+
+    def test_dense_observations_mark_all_seen_cells_in_one_scan(self) -> None:
+        slam = SlamMap(5, 5)
+
+        changed = slam.update_from_observations(
+            (2, 4),
+            free_cells=((1, 4), (2, 4), (3, 4), (2, 3), (1, 3)),
+            occupied_cells=((2, 2),),
+        )
+        snapshot = slam.snapshot()
+        progress = slam.progress_snapshot()
+
+        self.assertTrue(changed)
+        self.assertEqual(progress.completed_scan_sequence, 1)
+        self.assertEqual(progress.sensor_newly_known_cells, 6)
+        self.assertTrue(np.all(snapshot.occupancy[3, 1:3] == FREE))
+        self.assertEqual(int(snapshot.occupancy[2, 2]), OCCUPIED)
+        self.assertIn((2, 2), snapshot.point_cloud)
 
     def test_ray_hit_uses_supplied_points(self) -> None:
         slam = SlamMap(5, 5)

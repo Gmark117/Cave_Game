@@ -20,8 +20,10 @@ from mapping.rover_targets import RoverTargetService
 from mapping.terrain_fusion import TerrainFusionService
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.terrain_sharing import TerrainSharingService
+from mapping.wall_mapping import WallMappingSnapshot, wall_mapping_snapshot
 from mission.debug_info import MissionDebugInfo
 from mission.frame_timing import FrameProfiler
+from mission.exploration_coordination import TeamExplorationCoordinator
 from mission.objectives import build_mission_objective
 from mission.pause_control import PauseCoordinator, SimulationClock
 from mission.runtime_trace import RuntimeTraceLogger
@@ -35,6 +37,11 @@ from contracts import (
 )
 from navigation.pathfinding import PathfindingService
 from navigation.waypoint_graph import WaypointGraph
+from navigation.frontier_clusters import (
+    AssignmentRegistry,
+    FrontierClusterRegistry,
+    FrontierGatewayManager,
+)
 from mission.presentation_adapter import PresentationAdapter
 from rendering.slam_renderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
@@ -100,13 +107,28 @@ class MissionControl(MissionControlLifecycleMixin):
         waypoint_settings = self.settings.waypoints
         self.waypoint_graph = (
             WaypointGraph(
-                spacing=waypoint_settings.spacing,
                 merge_radius=waypoint_settings.merge_radius,
                 connector_distance=waypoint_settings.connector_distance,
                 connector_limit=waypoint_settings.connector_limit,
+                spatial_hash_cell=waypoint_settings.spatial_hash_cell,
+                route_cache_capacity=waypoint_settings.route_cache_capacity,
             )
             if waypoint_settings.enabled
             else None
+        )
+        frontier_settings = self.settings.frontier
+        self.frontier_registry = FrontierClusterRegistry(
+            match_distance=frontier_settings.cluster_match_distance,
+            missing_refresh_limit=frontier_settings.missing_refresh_limit,
+        )
+        self.frontier_assignments = AssignmentRegistry()
+        self.frontier_gateway_manager = (
+            FrontierGatewayManager(
+                self.frontier_registry,
+                self.waypoint_graph,
+                minimum_separation=frontier_settings.gateway_min_separation,
+            )
+            if self.waypoint_graph is not None else None
         )
         self.mission_event = threading.Event()
         self.simulation_clock = SimulationClock()
@@ -138,15 +160,48 @@ class MissionControl(MissionControlLifecycleMixin):
             map_width=self.map_w,
             map_height=self.map_h,
             exploration_policy=self.settings.exploration.policy,
+            exploration_completion="team_frontier_exhaustion_and_home",
+            exploration_progress="exposed_wall_slam_coverage",
+            terrain_role="rover_navigation_only",
+            frontier_policy="wall_continuation_then_coherent_discovery",
+            frontier_minimum_unknown_support=(
+                self.settings.frontier.minimum_unknown_support
+            ),
+            mcts_decision_time_budget_ms=(
+                self.settings.exploration.decision_time_budget_ms
+            ),
             waypoint_routing=self.settings.waypoints.enabled,
-            waypoint_spacing=self.settings.waypoints.spacing,
+            waypoint_spatial_hash_cell=(
+                self.settings.waypoints.spatial_hash_cell
+            ),
+            waypoint_merge_radius=self.settings.waypoints.merge_radius,
+            waypoint_connector_distance=(
+                self.settings.waypoints.connector_distance
+            ),
+            waypoint_gateway_connector_distance=(
+                self.settings.waypoints.gateway_connector_distance
+            ),
+            waypoint_route_cache_capacity=(
+                self.settings.waypoints.route_cache_capacity
+            ),
+            # Phase 6 deliberately dual-writes legacy trace aliases until a
+            # live replacement-schema trace is accepted.
+            waypoint_spacing=self.settings.waypoints.spatial_hash_cell,
             waypoint_direct_path_limit=(
-                self.settings.waypoints.direct_path_limit
+                self.settings.waypoints.gateway_connector_distance
+                - self.settings.waypoints.connector_distance
             ),
             waypoint_bridge_distance=(
-                self.settings.waypoints.direct_path_limit
-                + self.settings.waypoints.connector_distance
+                self.settings.waypoints.gateway_connector_distance
             ),
+        )
+        self.exploration_coordinator = TeamExplorationCoordinator(
+            registry=self.frontier_registry,
+            assignments=self.frontier_assignments,
+            get_drones=lambda: self.drones,
+            gateway_manager=self.frontier_gateway_manager,
+            waypoint_graph=self.waypoint_graph,
+            runtime_trace=self.runtime_trace,
         )
         
         self.delay = 1/15 # Set a delay for frame updates
@@ -163,16 +218,13 @@ class MissionControl(MissionControlLifecycleMixin):
             else None
         )
         self.last_explored_update = 0.0
+        self.wall_mapping_progress = WallMappingSnapshot(0, 0, 0.0, False)
         self.explored_update_interval = 0.5
         # Dependency bundles keep services decoupled from the large
         # MissionControl object while still giving them the callbacks they need.
         self.terrain_fusion_dependencies = TerrainFusionDependencies(
             terrain_knowledge=self.terrain_knowledge,
-            get_control_center=lambda: self.control_center,
             presentation=self.presentation,
-            simulation_time=self.simulation_time,
-            explored_update_interval=self.explored_update_interval,
-            last_explored_update=self.last_explored_update,
         )
         self.terrain_fusion = TerrainFusionService(
             self.terrain_fusion_dependencies
@@ -188,6 +240,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 get_rovers=lambda: self.rovers,
                 presentation=self.presentation,
                 simulation_time=self.simulation_time,
+                runtime_trace=self.runtime_trace,
             )
         )
         self.rover_targets = RoverTargetService(
@@ -320,11 +373,6 @@ class MissionControl(MissionControlLifecycleMixin):
             self.pause_coordinator.unregister_current_worker()
 
 
-    def compute_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Compute a drone path through the pathfinding service."""
-        return self.pathfinding.compute_path(start, goal)
-
-
     def compute_rover_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
         """Compute the disabled rover path using mission terrain telemetry.
 
@@ -399,6 +447,34 @@ class MissionControl(MissionControlLifecycleMixin):
             menu.toggle_music()
 
     def update_sensors(self) -> None:
-        """Update every drone's SLAM and terrain knowledge."""
+        """Update local sensing and wall-based exploration progress."""
         for drone in self.drones:
             drone.update_sensors()
+        self._update_wall_mapping_progress()
+
+    def _update_wall_mapping_progress(self) -> WallMappingSnapshot:
+        """Publish throttled wall-surface coverage without steering agents."""
+        versions = tuple(drone.slam_map.version for drone in self.drones)
+        if versions == self.wall_mapping_progress.slam_versions:
+            progress = self.wall_mapping_progress
+        else:
+            progress = wall_mapping_snapshot(
+                np.asarray(self.map_matrix),
+                tuple(self.drones),
+                confidence_threshold=(
+                    self.settings.frontier.confidence_threshold
+                ),
+            )
+        self.wall_mapping_progress = progress
+        now = self.simulation_time()
+        if (
+            self.control_center is not None
+            and (
+                self.last_explored_update == 0.0
+                or now - self.last_explored_update
+                >= self.explored_update_interval
+            )
+        ):
+            self.control_center.set_explored_percent(round(progress.ratio * 100))
+            self.last_explored_update = now
+        return progress

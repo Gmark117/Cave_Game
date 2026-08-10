@@ -185,7 +185,7 @@ class SlamViewServiceTests(unittest.TestCase):
             (0, 0),
         )
 
-    def test_draw_ignores_terrain_dirty_when_heatmap_hidden(self) -> None:
+    def test_draw_refreshes_selected_occupancy_when_view_identity_changes(self) -> None:
         control = self.make_control()
         drone = make_drone()
         control.drones = [drone]
@@ -198,7 +198,7 @@ class SlamViewServiceTests(unittest.TestCase):
 
         service.draw()
 
-        service.refresh.assert_not_called()
+        service.refresh.assert_called_once_with()
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
         control.game.window.blit.assert_called_once_with(
             control.slam_renderer.surface,
