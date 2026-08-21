@@ -42,7 +42,10 @@ def make_agent(
         runtime_state=runtime_state,
         snapshot=runtime_state.snapshot,
         slam_map=SlamMap(*shape),
-        share_frontier_clusters_with=Mock(return_value=()),
+        merge_frontiers=runtime_state.merge_frontiers,
+        movement_controller=SimpleNamespace(
+            mark_shared_slam_changed=Mock()
+        ),
     )
 
 
@@ -108,20 +111,24 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertFalse(service.has_line_of_sight((0, 0), (8, 8)))
         self.assertTrue(service.has_line_of_sight((2, 0), (3, 0)))
 
-    def test_nearby_drone_receives_new_terrain_and_stable_clusters(self) -> None:
+    def test_nearby_drone_receives_slam_and_invalidates_derived_borders(
+        self,
+    ) -> None:
         control = make_control()
         source = make_agent(0, (1, 1))
         target = make_agent(1, (2, 1))
         source.terrain_knowledge.roughness[1, 1] = 0.8
         source.terrain_knowledge.confidence[1, 1] = 1.0
+        source.runtime_state.replace_frontiers(((3, 3),))
         self.seed_slam(source, 2, 2, 1, 0.9)
         control.drones = [source, target]
         service = TerrainSharingService(control.dependencies)
 
         service.share_with_nearby_drones(0)
 
-        source.share_frontier_clusters_with.assert_called_once_with(target)
-        target.share_frontier_clusters_with.assert_called_once_with(source)
+        self.assertNotIn((3, 3), target.snapshot().frontiers)
+        target.movement_controller.mark_shared_slam_changed.assert_called_once()
+        source.movement_controller.mark_shared_slam_changed.assert_not_called()
         self.assertAlmostEqual(
             float(target.terrain_knowledge.roughness[1, 1]),
             0.8,

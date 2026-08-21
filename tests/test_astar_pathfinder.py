@@ -25,6 +25,22 @@ class AStarPathfinderTests(unittest.TestCase):
             shm.close()
             shm.unlink()
 
+    def _compute_shared_result(self, cave, start, goal, max_iters):
+        shm = shared_memory.SharedMemory(create=True, size=cave.nbytes)
+        try:
+            shared_map = np.ndarray(cave.shape, dtype=np.uint8, buffer=shm.buf)
+            shared_map[:] = cave
+            return astar_pathfinder.compute_path_segment(
+                shm.name,
+                cave.shape,
+                start,
+                goal,
+                max_iters=max_iters,
+            )
+        finally:
+            shm.close()
+            shm.unlink()
+
     def test_shared_memory_astar_finds_wall_avoiding_path(self) -> None:
         cave = np.zeros((5, 5), dtype=np.uint8)
         cave[2, :4] = 1
@@ -35,6 +51,44 @@ class AStarPathfinderTests(unittest.TestCase):
         self.assertEqual(path[0], (0, 0))
         self.assertEqual(path[-1], (4, 4))
         self.assertTrue(all(cave[y, x] == 0 for x, y in path))
+
+    def test_capped_astar_returns_a_goal_directed_partial_segment(self) -> None:
+        cave = np.zeros((20, 20), dtype=np.uint8)
+
+        result = self._compute_shared_result(
+            cave,
+            (0, 0),
+            (19, 19),
+            max_iters=3,
+        )
+
+        self.assertEqual(result.status, astar_pathfinder.PATH_PARTIAL_LIMIT)
+        self.assertEqual(result.path[0], (0, 0))
+        self.assertNotEqual(result.path[-1], (19, 19))
+        self.assertLess(
+            result.remaining_distance,
+            astar_pathfinder.DIAG_COST * 19,
+        )
+        self.assertEqual(result.iterations, 3)
+
+    def test_legacy_astar_api_does_not_expose_a_partial_as_complete(self) -> None:
+        cave = np.zeros((20, 20), dtype=np.uint8)
+        shm = shared_memory.SharedMemory(create=True, size=cave.nbytes)
+        try:
+            shared_map = np.ndarray(cave.shape, dtype=np.uint8, buffer=shm.buf)
+            shared_map[:] = cave
+            path = astar_pathfinder.compute_path(
+                shm.name,
+                cave.shape,
+                (0, 0),
+                (19, 19),
+                max_iters=3,
+            )
+        finally:
+            shm.close()
+            shm.unlink()
+
+        self.assertEqual(path, [])
 
     def test_shared_memory_astar_rejects_blocked_or_out_of_bounds_goal(self) -> None:
         cave = np.zeros((2, 2), dtype=np.uint8)
@@ -62,6 +116,34 @@ class AStarPathfinderTests(unittest.TestCase):
 
         self.assertEqual(blocked, [])
         self.assertEqual(outside, [])
+
+    def test_structured_astar_distinguishes_invalid_and_unreachable(self) -> None:
+        blocked_goal = np.zeros((3, 3), dtype=np.uint8)
+        blocked_goal[2, 2] = 1
+        disconnected = np.zeros((3, 3), dtype=np.uint8)
+        disconnected[1, :] = 1
+
+        invalid = self._compute_shared_result(
+            blocked_goal,
+            (0, 0),
+            (2, 2),
+            max_iters=100,
+        )
+        unreachable = self._compute_shared_result(
+            disconnected,
+            (0, 0),
+            (2, 2),
+            max_iters=100,
+        )
+
+        self.assertEqual(
+            invalid.status,
+            astar_pathfinder.PATH_INVALID_ENDPOINT,
+        )
+        self.assertEqual(
+            unreachable.status,
+            astar_pathfinder.PATH_UNREACHABLE,
+        )
 
     def test_shared_memory_astar_applies_diagonal_corner_rule(self) -> None:
         tight_corner = np.array(

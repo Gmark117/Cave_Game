@@ -24,6 +24,10 @@ class PathfindingServiceTests(unittest.TestCase):
         process_pool.assert_not_called()
         self.assertFalse(service.ready)
         self.assertEqual(service.compute_path((0, 0), (1, 1)), [])
+        self.assertEqual(
+            service.compute_path_segment((0, 0), (1, 1)).status,
+            astar_pathfinder.PATH_RESOURCE_UNAVAILABLE,
+        )
 
     def test_start_submit_and_shutdown_own_runtime_resources(self) -> None:
         cave_map = np.array(
@@ -118,6 +122,38 @@ class PathfindingServiceTests(unittest.TestCase):
         process_pool.assert_not_called()
         self.assertFalse(service.ready)
         self.assertEqual(service.compute_path((0, 0), (1, 1)), [])
+
+    def test_segment_request_preserves_capped_progress_status(self) -> None:
+        service = PathfindingService(
+            np.zeros((4, 4), dtype=np.uint8),
+            agent_count=1,
+        )
+        expected = astar_pathfinder.PathResult(
+            ((0, 0), (1, 1)),
+            astar_pathfinder.PATH_PARTIAL_LIMIT,
+            200000,
+            2.0,
+        )
+        future = SimpleNamespace(result=Mock(return_value=expected))
+        pool = SimpleNamespace(submit=Mock(return_value=future))
+        semaphore = Mock()
+        service.map_shm = SimpleNamespace(name="mission-map")
+        service.map_shape = (4, 4)
+        service.pool = pool
+        service.pool_sem = semaphore
+
+        result = service.compute_path_segment((0, 0), (3, 3))
+
+        self.assertEqual(result, expected)
+        pool.submit.assert_called_once_with(
+            astar_pathfinder.compute_path_segment,
+            "mission-map",
+            (4, 4),
+            (0, 0),
+            (3, 3),
+        )
+        semaphore.acquire.assert_called_once_with()
+        semaphore.release.assert_called_once_with()
 
     def test_weighted_path_delegates_with_service_cave_map(self) -> None:
         cave_map = np.zeros((3, 3), dtype=np.uint8)

@@ -35,15 +35,8 @@ class MissionRenderer:
             window.fill(Colors.BLACK.value)
         dependencies.slam_view.draw()
 
-        waypoint_renderer = dependencies.waypoint_renderer
-        if (
-            waypoint_renderer is not None
-            and dependencies.presentation.selected_drone_heatmap_id is None
-        ):
-            waypoint_renderer.draw(window)
-
-        # Layer order: waypoint highways, historical paths, translucent vision
-        # cones, icons, then the control center.
+        # Layer order: historical paths, translucent vision cones, icons, then
+        # the control center.
         for drone, snapshot in zip(drones, drone_snapshots):
             drone.renderer.draw_path(snapshot)
         for rover in rovers:

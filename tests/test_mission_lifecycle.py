@@ -19,10 +19,9 @@ from config.simulation_config import (
 )
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
-from mapping.wall_mapping import exposed_wall_mask
+from mapping.wall_mapping import WallMappingSnapshot, exposed_wall_mask
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
-from rendering.waypoint_renderer import WaypointRenderer
 
 
 class FakeGame:
@@ -93,13 +92,70 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.control_center.set_explored_percent.assert_called_once_with(50)
         self.assertAlmostEqual(mission.wall_mapping_progress.ratio, 0.5)
 
-    def test_mission_trace_records_configured_planning_budget(self) -> None:
+    def test_incomplete_wall_mapping_never_displays_one_hundred(self) -> None:
+        mission = MissionControl(FakeGame())
+        runtime_state = SimpleNamespace(start_returning_home=Mock())
+        drone = SimpleNamespace(
+            slam_map=SimpleNamespace(version=1),
+            runtime_state=runtime_state,
+        )
+        mission.drones = [drone]
+        mission.control_center = SimpleNamespace(
+            set_explored_percent=Mock(),
+        )
+        mission.simulation_time = Mock(return_value=1.0)
+        incomplete = WallMappingSnapshot(
+            999,
+            1000,
+            0.999,
+            False,
+            (1,),
+        )
+
+        with patch(
+            "mission.control.wall_mapping_snapshot",
+            return_value=incomplete,
+        ):
+            mission._update_wall_mapping_progress()
+
+        mission.control_center.set_explored_percent.assert_called_once_with(99)
+        runtime_state.start_returning_home.assert_not_called()
+
+    def test_exact_team_wall_completion_starts_coordinated_homing(self) -> None:
+        mission = MissionControl(FakeGame())
+        states = [
+            SimpleNamespace(start_returning_home=Mock())
+            for _index in range(3)
+        ]
+        mission.drones = [
+            SimpleNamespace(
+                slam_map=SimpleNamespace(version=1),
+                runtime_state=state,
+            )
+            for state in states
+        ]
+        mission.control_center = SimpleNamespace(
+            set_explored_percent=Mock(),
+        )
+        mission.simulation_time = Mock(return_value=1.0)
+        complete = WallMappingSnapshot(1000, 1000, 1.0, True, (1, 1, 1))
+
+        with patch(
+            "mission.control.wall_mapping_snapshot",
+            return_value=complete,
+        ):
+            mission._update_wall_mapping_progress()
+            mission._update_wall_mapping_progress()
+
+        for state in states:
+            state.start_returning_home.assert_called_once_with()
+        mission.control_center.set_explored_percent.assert_called_once_with(100)
+
+    def test_mission_trace_records_deterministic_exploration_policy(self) -> None:
         game = FakeGame()
         game.sim_settings = SimulationConfig(
             mission_config=game.sim_settings.mission_config,
-            exploration=ExplorationConfig(
-                decision_time_budget_ms=17.5,
-            ),
+            exploration=ExplorationConfig(policy="mcts"),
         )
 
         with patch("mission.control.RuntimeTraceLogger") as trace_logger:
@@ -110,10 +166,43 @@ class MissionLifecycleTests(unittest.TestCase):
             for call in trace_logger.return_value.record.call_args_list
             if call.args == ("mission_constructed",)
         )
+        self.assertEqual(constructed.kwargs["exploration_policy"], "random")
         self.assertEqual(
-            constructed.kwargs["mcts_decision_time_budget_ms"],
-            17.5,
+            constructed.kwargs["frontier_policy"],
+            "cached_global_wall_then_region_guidance_with_astar_escape",
         )
+        self.assertEqual(
+            constructed.kwargs["frontier_minimum_cluster_cells"],
+            12,
+        )
+        self.assertEqual(constructed.kwargs["frontier_distance_band"], 16.0)
+        self.assertEqual(
+            constructed.kwargs["frontier_wall_continuation_weight"],
+            2.0,
+        )
+        self.assertEqual(
+            constructed.kwargs["frontier_cluster_size_weight"],
+            2.0,
+        )
+        self.assertEqual(
+            constructed.kwargs["frontier_cluster_proximity_weight"],
+            1.0,
+        )
+        self.assertEqual(constructed.kwargs["frontier_global_cell_size"], 32)
+        self.assertEqual(
+            constructed.kwargs["frontier_global_refresh_interval"],
+            2.0,
+        )
+        self.assertEqual(constructed.kwargs["wall_direction_bias"], 4.0)
+        self.assertEqual(
+            constructed.kwargs["unexplored_direction_bias"],
+            2.0,
+        )
+        self.assertEqual(
+            constructed.kwargs["separation_direction_bias"],
+            1.5,
+        )
+        self.assertNotIn("mcts_decision_time_budget_ms", constructed.kwargs)
 
     def test_construction_does_not_allocate_runtime_resources(self) -> None:
         game = FakeGame()
@@ -147,15 +236,8 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(hasattr(mission, "known_roughness"))
         self.assertIsInstance(mission.pathfinding, PathfindingService)
         self.assertIsInstance(mission.renderer, MissionRenderer)
-        self.assertIsInstance(mission.waypoint_renderer, WaypointRenderer)
-        self.assertIs(
-            mission.waypoint_renderer.graph,
-            mission.waypoint_graph,
-        )
-        self.assertIs(
-            mission.renderer.dependencies.waypoint_renderer,
-            mission.waypoint_renderer,
-        )
+        self.assertFalse(hasattr(mission, "waypoint_renderer"))
+        self.assertFalse(hasattr(mission, "waypoint_graph"))
         self.assertFalse(hasattr(mission.renderer, "stop_button_rect"))
         self.assertFalse(mission.restart_requested)
         self.assertFalse(mission.exit_requested)
@@ -164,7 +246,7 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.rover_motion_enabled)
         self.assertFalse(mission._runtime_initialized)
         self.assertFalse(mission._has_run)
-        self.assertFalse(hasattr(mission, "compute_path"))
+        self.assertTrue(hasattr(mission, "compute_path"))
         self.assertFalse(mission.is_mission_over())
 
         mission.pathfinding.shutdown = Mock()
@@ -172,7 +254,7 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.pathfinding.shutdown.assert_called_once_with()
         self.assertTrue(mission.mission_event.is_set())
 
-    def test_only_rover_pathfinding_delegates_to_owned_service(self) -> None:
+    def test_drone_and_rover_pathfinding_delegate_to_owned_service(self) -> None:
         mission = MissionControl(FakeGame())
         mission.pathfinding.compute_path = Mock(
             return_value=[(0, 0), (1, 1)],
@@ -181,10 +263,15 @@ class MissionLifecycleTests(unittest.TestCase):
             return_value=[(0, 0), (0, 1)],
         )
 
+        drone_path = mission.compute_path((0, 0), (1, 1))
         rover_path = mission.compute_rover_path((0, 0), (0, 1))
 
+        self.assertEqual(drone_path, [(0, 0), (1, 1)])
         self.assertEqual(rover_path, [(0, 0), (0, 1)])
-        mission.pathfinding.compute_path.assert_not_called()
+        mission.pathfinding.compute_path.assert_called_once_with(
+            (0, 0),
+            (1, 1),
+        )
         weighted_args = (
             mission.pathfinding.compute_weighted_path.call_args.args
         )

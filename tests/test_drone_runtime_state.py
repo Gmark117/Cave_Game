@@ -5,22 +5,6 @@ from dataclasses import FrozenInstanceError
 import numpy as np
 
 from agents.drone_runtime_state import DroneRuntimeState
-from navigation.frontier_clusters import FrontierCluster
-
-
-def make_cluster(cluster_id: int, representative: tuple[int, int]):
-    x, y = representative
-    return FrontierCluster(
-        id=cluster_id,
-        cells=frozenset({representative}),
-        bounds=(x, y, x + 1, y + 1),
-        representative=representative,
-        expected_gain=1,
-        known_by=frozenset({0}),
-        lifecycle="active",
-        first_seen_revision=1,
-        last_seen_revision=1,
-    )
 
 
 class DroneRuntimeStateTests(unittest.TestCase):
@@ -33,78 +17,48 @@ class DroneRuntimeStateTests(unittest.TestCase):
         )
 
     def test_snapshot_is_immutable_and_detached(self) -> None:
-        self.state.replace_frontier_clusters((
-            make_cluster(4, (4, 4)),
-            make_cluster(5, (5, 5)),
-        ))
-        self.state.begin_exploration(direction=45)
-        self.state.set_ray_points([(6, 6), (7, 7)])
+        self.state.begin_exploration(45, ((4, 4), (5, 5)))
+        self.state.set_ray_points(((6, 6), (7, 7)))
         initial = self.state.snapshot()
 
-        self.state.replace_frontier_clusters((make_cluster(8, (8, 8)),))
-        self.state.set_ray_points([(9, 9)])
+        self.state.replace_frontiers(((8, 8),))
+        self.state.set_ray_points(((9, 9),))
         self.state.toggle_path()
 
         self.assertEqual(initial.frontiers, ((4, 4), (5, 5)))
-        self.assertEqual(initial.frontier_cluster_ids, (4, 5))
         self.assertEqual(initial.ray_points, ((6, 6), (7, 7)))
         self.assertTrue(initial.show_path)
         with self.assertRaises(FrozenInstanceError):
             initial.position = (0, 0)
 
-    def test_cluster_replacement_is_authoritative_and_id_aligned(self) -> None:
-        self.state.replace_frontier_clusters((
-            make_cluster(8, (8, 8)),
-            make_cluster(3, (3, 4)),
-        ))
+    def test_frontier_merge_replacement_and_removal(self) -> None:
+        self.state.replace_frontiers(((8, 8), (3, 4)))
+        self.state.merge_frontiers(((9, 1), (3, 4)))
+        self.state.remove_frontier((8, 8))
 
-        first = self.state.snapshot()
+        self.assertEqual(self.state.snapshot().frontiers, ((3, 4), (9, 1)))
 
-        self.assertEqual(first.frontier_cluster_ids, (3, 8))
-        self.assertEqual(first.frontiers, ((3, 4), (8, 8)))
-
-        self.state.replace_frontier_clusters((make_cluster(12, (9, 1)),))
-        replaced = self.state.snapshot()
-
-        self.assertEqual(replaced.frontier_cluster_ids, (12,))
-        self.assertEqual(replaced.frontiers, ((9, 1),))
-
-    def test_reconciliation_reports_registry_retirements_and_clears_snapshot(self) -> None:
-        self.state.replace_frontier_clusters((
-            make_cluster(3, (3, 4)),
-            make_cluster(8, (8, 8)),
-        ))
-
-        retired = self.state.reconcile_frontier_clusters((
-            make_cluster(8, (9, 8)),
-        ))
-
-        self.assertEqual(retired, (3,))
-        self.assertEqual(self.state.snapshot().frontier_cluster_ids, (8,))
-        self.assertEqual(self.state.snapshot().frontiers, ((9, 8),))
-
-    def test_begin_exploration_does_not_mutate_authoritative_clusters(self) -> None:
-        self.state.replace_frontier_clusters((make_cluster(7, (6, 6)),))
-
-        self.state.begin_exploration(direction=45)
-        snapshot = self.state.snapshot()
-
-        self.assertTrue(snapshot.explored)
-        self.assertEqual(snapshot.direction, 45)
-        self.assertEqual(snapshot.direction_history, (45,))
-        self.assertEqual(snapshot.frontier_cluster_ids, (7,))
-        self.assertEqual(snapshot.frontiers, ((6, 6),))
-
-    def test_move_updates_position_heading_and_path_atomically(self) -> None:
+    def test_move_updates_position_heading_and_rendered_path(self) -> None:
         self.state.move_to((4, 2))
-
         snapshot = self.state.snapshot()
 
         self.assertEqual(snapshot.position, (4, 2))
         self.assertEqual(snapshot.path_history[-1], (4, 2))
         self.assertAlmostEqual(snapshot.heading_deg, 90.0)
 
-    def test_concurrent_snapshots_never_observe_torn_movement_state(self) -> None:
+    def test_reorient_updates_heading_without_moving(self) -> None:
+        before = self.state.snapshot()
+
+        self.state.reorient(450)
+        after = self.state.snapshot()
+
+        self.assertEqual(after.position, before.position)
+        self.assertEqual(after.path_history, before.path_history)
+        self.assertEqual(after.direction, 90)
+        self.assertEqual(after.heading_deg, 90.0)
+        self.assertEqual(after.direction_history, (90,))
+
+    def test_concurrent_snapshots_never_observe_torn_movement(self) -> None:
         start = threading.Barrier(2)
         writer_done = threading.Event()
         errors = []
@@ -139,15 +93,9 @@ class DroneRuntimeStateTests(unittest.TestCase):
         self.assertFalse(self.state.reserve_frontier_rebuild(1.1))
         self.assertTrue(self.state.reserve_frontier_rebuild(1.25))
 
-    def test_empty_frontiers_do_not_implicitly_start_homing(self) -> None:
-        self.state.begin_exploration(direction=45)
+    def test_exhausted_exploration_starts_homing(self) -> None:
+        self.state.begin_exploration(45)
 
-        done, homing = self.state.evaluate_mission_state()
-
-        self.assertFalse(done)
-        self.assertFalse(homing)
-
-        self.state.start_returning_home()
         done, homing = self.state.evaluate_mission_state()
 
         self.assertFalse(done)

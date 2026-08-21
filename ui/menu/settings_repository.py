@@ -16,7 +16,6 @@ from config.simulation_config import (
     SimulationConfig,
     SlamConfig,
     TraceConfig,
-    WaypointConfig,
 )
 from asset_config.gameplay import GameOptions
 
@@ -138,66 +137,44 @@ class MenuSettingsRepository:
             "confidence_threshold": str(
                 settings.frontier.confidence_threshold
             ),
-            "minimum_unknown_support": str(
-                settings.frontier.minimum_unknown_support
-            ),
-            "continuation_min_distance": str(
-                settings.frontier.continuation_min_distance
-            ),
-            "continuation_scan_headings": str(
-                settings.frontier.continuation_scan_headings
-            ),
+            "stride": str(settings.frontier.stride),
             "rebuild_cooldown": str(settings.frontier.rebuild_cooldown),
-            "cluster_match_distance": str(
-                settings.frontier.cluster_match_distance
+            "minimum_cluster_cells": str(
+                settings.frontier.minimum_cluster_cells
             ),
-            "missing_refresh_limit": str(
-                settings.frontier.missing_refresh_limit
+            "distance_band": str(settings.frontier.distance_band),
+            "wall_continuation_weight": str(
+                settings.frontier.wall_continuation_weight
             ),
-            "gateway_min_separation": str(
-                settings.frontier.gateway_min_separation
+            "cluster_size_weight": str(
+                settings.frontier.cluster_size_weight
             ),
-        }
-        config["WAYPOINTS"] = {
-            "enabled": str(settings.waypoints.enabled),
-            "spatial_hash_cell": str(
-                settings.waypoints.spatial_hash_cell
+            "cluster_proximity_weight": str(
+                settings.frontier.cluster_proximity_weight
             ),
-            "merge_radius": str(settings.waypoints.merge_radius),
-            "connector_distance": str(settings.waypoints.connector_distance),
-            "gateway_connector_distance": str(
-                settings.waypoints.gateway_connector_distance
+            "global_cell_size": str(
+                settings.frontier.global_cell_size
             ),
-            "route_cache_capacity": str(
-                settings.waypoints.route_cache_capacity
-            ),
-            "connector_limit": str(settings.waypoints.connector_limit),
-            "turn_threshold_degrees": str(
-                settings.waypoints.turn_threshold_degrees
-            ),
-            "minimum_turn_leg": str(settings.waypoints.minimum_turn_leg),
-            "chokepoint_narrow_clearance": str(
-                settings.waypoints.chokepoint_narrow_clearance
-            ),
-            "chokepoint_shoulder_clearance": str(
-                settings.waypoints.chokepoint_shoulder_clearance
-            ),
-            "chokepoint_shoulder_length": str(
-                settings.waypoints.chokepoint_shoulder_length
-            ),
-            "recovery_anchor_interval": str(
-                settings.waypoints.recovery_anchor_interval
+            "global_refresh_interval": str(
+                settings.frontier.global_refresh_interval
             ),
         }
         config["EXPLORATION"] = {
             "policy": settings.exploration.policy,
-            "iterations": str(settings.exploration.iterations),
-            "horizon": str(settings.exploration.horizon),
-            "planning_rays": str(settings.exploration.planning_rays),
-            "uct_exploration": str(settings.exploration.uct_exploration),
-            "discount": str(settings.exploration.discount),
-            "decision_time_budget_ms": str(
-                settings.exploration.decision_time_budget_ms
+            "stagnation_distance": str(
+                settings.exploration.stagnation_distance
+            ),
+            "stagnation_min_sensor_cells_per_px": str(
+                settings.exploration.stagnation_min_sensor_cells_per_px
+            ),
+            "wall_direction_bias": str(
+                settings.exploration.wall_direction_bias
+            ),
+            "unexplored_direction_bias": str(
+                settings.exploration.unexplored_direction_bias
+            ),
+            "separation_direction_bias": str(
+                settings.exploration.separation_direction_bias
             ),
         }
         config["RENDERING"] = {
@@ -209,7 +186,6 @@ class MenuSettingsRepository:
         config["TRACE"] = {
             "enabled": str(settings.trace.enabled),
             "directory": settings.trace.directory,
-            "mcts_root_visits": str(settings.trace.mcts_root_visits),
             "frame_interval": str(settings.trace.frame_interval),
         }
         self.simulation_path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,15 +230,6 @@ class MenuSettingsRepository:
                     defaults.frontier,
                 ),
                 defaults.frontier,
-            ),
-            waypoints=self._section_or_default(
-                lambda: self._read_waypoints(
-                    config["WAYPOINTS"]
-                    if config.has_section("WAYPOINTS")
-                    else {},
-                    defaults.waypoints,
-                ),
-                defaults.waypoints,
             ),
             exploration=self._section_or_default(
                 lambda: self._read_exploration(
@@ -383,126 +350,41 @@ class MenuSettingsRepository:
                     defaults.confidence_threshold,
                 )
             ),
-            minimum_unknown_support=int(
-                section.get(
-                    "minimum_unknown_support",
-                    defaults.minimum_unknown_support,
-                )
-            ),
-            continuation_min_distance=float(
-                section.get(
-                    "continuation_min_distance",
-                    defaults.continuation_min_distance,
-                )
-            ),
-            continuation_scan_headings=int(
-                section.get(
-                    "continuation_scan_headings",
-                    defaults.continuation_scan_headings,
-                )
-            ),
+            stride=int(section.get("stride", defaults.stride)),
             rebuild_cooldown=float(
                 section.get(
                     "rebuild_cooldown",
                     defaults.rebuild_cooldown,
                 )
             ),
-            cluster_match_distance=float(
-                section.get(
-                    "cluster_match_distance",
-                    defaults.cluster_match_distance,
-                )
-            ),
-            missing_refresh_limit=int(
-                section.get(
-                    "missing_refresh_limit",
-                    defaults.missing_refresh_limit,
-                )
-            ),
-            gateway_min_separation=float(
-                section.get(
-                    "gateway_min_separation",
-                    defaults.gateway_min_separation,
-                )
-            ),
-        )
-
-    @staticmethod
-    def _read_waypoints(
-        section: object,
-        defaults: WaypointConfig,
-    ) -> WaypointConfig:
-        """Parse sparse waypoint/highway routing settings."""
-        enabled_value = str(section.get("enabled", defaults.enabled))
-        enabled = enabled_value.casefold() in {"1", "true", "yes", "on"}
-        return WaypointConfig(
-            enabled=enabled,
-            spatial_hash_cell=int(
-                section.get(
-                    "spatial_hash_cell",
-                    defaults.spatial_hash_cell,
-                )
-            ),
-            merge_radius=float(
-                section.get("merge_radius", defaults.merge_radius)
-            ),
-            connector_distance=float(
-                section.get(
-                    "connector_distance",
-                    defaults.connector_distance,
-                )
-            ),
-            gateway_connector_distance=float(
-                section.get(
-                    "gateway_connector_distance",
-                    defaults.gateway_connector_distance,
-                )
-            ),
-            route_cache_capacity=int(
-                section.get(
-                    "route_cache_capacity",
-                    defaults.route_cache_capacity,
-                )
-            ),
-            connector_limit=int(
-                section.get("connector_limit", defaults.connector_limit)
-            ),
-            turn_threshold_degrees=float(
-                section.get(
-                    "turn_threshold_degrees",
-                    defaults.turn_threshold_degrees,
-                )
-            ),
-            minimum_turn_leg=float(
-                section.get(
-                    "minimum_turn_leg",
-                    defaults.minimum_turn_leg,
-                )
-            ),
-            chokepoint_narrow_clearance=float(
-                section.get(
-                    "chokepoint_narrow_clearance",
-                    defaults.chokepoint_narrow_clearance,
-                )
-            ),
-            chokepoint_shoulder_clearance=float(
-                section.get(
-                    "chokepoint_shoulder_clearance",
-                    defaults.chokepoint_shoulder_clearance,
-                )
-            ),
-            chokepoint_shoulder_length=float(
-                section.get(
-                    "chokepoint_shoulder_length",
-                    defaults.chokepoint_shoulder_length,
-                )
-            ),
-            recovery_anchor_interval=float(
-                section.get(
-                    "recovery_anchor_interval",
-                    defaults.recovery_anchor_interval,
-                )
-            ),
+            minimum_cluster_cells=int(section.get(
+                "minimum_cluster_cells",
+                defaults.minimum_cluster_cells,
+            )),
+            distance_band=float(section.get(
+                "distance_band",
+                defaults.distance_band,
+            )),
+            wall_continuation_weight=float(section.get(
+                "wall_continuation_weight",
+                defaults.wall_continuation_weight,
+            )),
+            cluster_size_weight=float(section.get(
+                "cluster_size_weight",
+                defaults.cluster_size_weight,
+            )),
+            cluster_proximity_weight=float(section.get(
+                "cluster_proximity_weight",
+                defaults.cluster_proximity_weight,
+            )),
+            global_cell_size=int(section.get(
+                "global_cell_size",
+                defaults.global_cell_size,
+            )),
+            global_refresh_interval=float(section.get(
+                "global_refresh_interval",
+                defaults.global_refresh_interval,
+            )),
         )
 
     @staticmethod
@@ -510,27 +392,29 @@ class MenuSettingsRepository:
         section: object,
         defaults: ExplorationConfig,
     ) -> ExplorationConfig:
-        """Parse exploration policy and MCTS search settings."""
+        """Parse policy while ignoring retired legacy MCTS keys."""
         return ExplorationConfig(
             policy=str(section.get("policy", defaults.policy)),
-            iterations=int(section.get("iterations", defaults.iterations)),
-            horizon=int(section.get("horizon", defaults.horizon)),
-            planning_rays=int(
-                section.get("planning_rays", defaults.planning_rays)
-            ),
-            uct_exploration=float(
-                section.get(
-                    "uct_exploration",
-                    defaults.uct_exploration,
-                )
-            ),
-            discount=float(section.get("discount", defaults.discount)),
-            decision_time_budget_ms=float(
-                section.get(
-                    "decision_time_budget_ms",
-                    defaults.decision_time_budget_ms,
-                )
-            ),
+            stagnation_distance=float(section.get(
+                "stagnation_distance",
+                defaults.stagnation_distance,
+            )),
+            stagnation_min_sensor_cells_per_px=float(section.get(
+                "stagnation_min_sensor_cells_per_px",
+                defaults.stagnation_min_sensor_cells_per_px,
+            )),
+            wall_direction_bias=float(section.get(
+                "wall_direction_bias",
+                defaults.wall_direction_bias,
+            )),
+            unexplored_direction_bias=float(section.get(
+                "unexplored_direction_bias",
+                defaults.unexplored_direction_bias,
+            )),
+            separation_direction_bias=float(section.get(
+                "separation_direction_bias",
+                defaults.separation_direction_bias,
+            )),
         )
 
     @staticmethod
@@ -562,12 +446,6 @@ class MenuSettingsRepository:
         return TraceConfig(
             enabled=enabled,
             directory=str(section.get("directory", defaults.directory)),
-            mcts_root_visits=int(
-                section.get(
-                    "mcts_root_visits",
-                    defaults.mcts_root_visits,
-                )
-            ),
             frame_interval=float(
                 section.get("frame_interval", defaults.frame_interval)
             ),

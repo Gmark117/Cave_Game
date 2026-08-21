@@ -75,9 +75,23 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             frontier=replace(
                 defaults.frontier,
                 confidence_threshold=0.75,
+                minimum_cluster_cells=9,
+                distance_band=20.0,
+                wall_continuation_weight=2.5,
+                cluster_size_weight=3.0,
+                cluster_proximity_weight=0.5,
+                global_cell_size=24,
+                global_refresh_interval=3.0,
             ),
-            waypoints=replace(defaults.waypoints, spatial_hash_cell=24),
-            exploration=replace(defaults.exploration, iterations=32),
+            exploration=replace(
+                defaults.exploration,
+                policy="random",
+                stagnation_distance=144.0,
+                stagnation_min_sensor_cells_per_px=0.75,
+                wall_direction_bias=5.0,
+                unexplored_direction_bias=2.5,
+                separation_direction_bias=1.25,
+            ),
             rendering=replace(defaults.rendering, refresh_interval=0.2),
             trace=replace(defaults.trace, enabled=True),
         )
@@ -95,7 +109,6 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "SLAM",
                 "SHARING",
                 "FRONTIER",
-                "WAYPOINTS",
                 "EXPLORATION",
                 "RENDERING",
                 "TRACE",
@@ -160,78 +173,64 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.slam, defaults.slam)
         self.assertEqual(loaded.sharing.pair_cooldown, 2.0)
 
-    def test_phase6_typed_navigation_schema_contains_only_live_controls(self) -> None:
+    def test_navigation_schema_contains_only_random_escape_controls(self) -> None:
         defaults = SimulationConfig()
 
         self.assertEqual(
             {field.name for field in fields(defaults.frontier)},
             {
                 "confidence_threshold",
-                "minimum_unknown_support",
-                "continuation_min_distance",
-                "continuation_scan_headings",
+                "stride",
                 "rebuild_cooldown",
-                "cluster_match_distance",
-                "missing_refresh_limit",
-                "gateway_min_separation",
-            },
-        )
-        self.assertEqual(
-            {field.name for field in fields(defaults.waypoints)},
-            {
-                "enabled",
-                "spatial_hash_cell",
-                "merge_radius",
-                "connector_distance",
-                "gateway_connector_distance",
-                "route_cache_capacity",
-                "connector_limit",
-                "turn_threshold_degrees",
-                "minimum_turn_leg",
-                "chokepoint_narrow_clearance",
-                "chokepoint_shoulder_clearance",
-                "chokepoint_shoulder_length",
-                "recovery_anchor_interval",
+                "minimum_cluster_cells",
+                "distance_band",
+                "wall_continuation_weight",
+                "cluster_size_weight",
+                "cluster_proximity_weight",
+                "global_cell_size",
+                "global_refresh_interval",
             },
         )
         self.assertEqual(
             {field.name for field in fields(defaults.exploration)},
             {
                 "policy",
-                "iterations",
-                "horizon",
-                "planning_rays",
-                "uct_exploration",
-                "discount",
-                "decision_time_budget_ms",
+                "stagnation_distance",
+                "stagnation_min_sensor_cells_per_px",
+                "wall_direction_bias",
+                "unexplored_direction_bias",
+                "separation_direction_bias",
             },
         )
 
-    def test_phase6_navigation_defaults_match_the_locked_plan(self) -> None:
+    def test_random_navigation_defaults(self) -> None:
         defaults = SimulationConfig()
 
-        self.assertEqual(defaults.waypoints.spatial_hash_cell, 32)
-        self.assertEqual(defaults.waypoints.merge_radius, 8.0)
-        self.assertEqual(defaults.waypoints.connector_distance, 64.0)
+        self.assertEqual(defaults.frontier.stride, 4)
+        self.assertEqual(defaults.frontier.confidence_threshold, 0.6)
+        self.assertEqual(defaults.frontier.minimum_cluster_cells, 12)
+        self.assertEqual(defaults.frontier.distance_band, 16.0)
+        self.assertEqual(defaults.frontier.wall_continuation_weight, 2.0)
+        self.assertEqual(defaults.frontier.cluster_size_weight, 2.0)
+        self.assertEqual(defaults.frontier.cluster_proximity_weight, 1.0)
+        self.assertEqual(defaults.frontier.global_cell_size, 32)
+        self.assertEqual(defaults.frontier.global_refresh_interval, 2.0)
+        self.assertEqual(defaults.exploration.policy, "random")
+        self.assertEqual(defaults.exploration.stagnation_distance, 120.0)
         self.assertEqual(
-            defaults.waypoints.gateway_connector_distance,
-            192.0,
+            defaults.exploration.stagnation_min_sensor_cells_per_px,
+            0.5,
         )
-        self.assertEqual(defaults.waypoints.route_cache_capacity, 64)
-        self.assertEqual(defaults.frontier.cluster_match_distance, 32.0)
-        self.assertEqual(defaults.frontier.minimum_unknown_support, 4)
-        self.assertEqual(defaults.frontier.continuation_min_distance, 12.0)
-        self.assertEqual(defaults.frontier.continuation_scan_headings, 3)
-        self.assertEqual(defaults.frontier.missing_refresh_limit, 3)
-        self.assertEqual(defaults.frontier.gateway_min_separation, 64.0)
-        self.assertEqual(defaults.exploration.decision_time_budget_ms, 40.0)
+        self.assertEqual(defaults.exploration.wall_direction_bias, 4.0)
+        self.assertEqual(defaults.exploration.unexplored_direction_bias, 2.0)
+        self.assertEqual(defaults.exploration.separation_direction_bias, 1.5)
 
     def test_legacy_navigation_keys_are_readable_but_ignored(self) -> None:
         temporary_directory, repository = self.make_repository()
         self.addCleanup(temporary_directory.cleanup)
         repository.simulation_path.write_text(
             "[FRONTIER]\n"
-            "stride = no-longer-a-number\n"
+            "stride = 2\n"
             "confidence_threshold = 0.75\n"
             "continuation_min_distance = 15.0\n"
             "continuation_scan_headings = 2\n"
@@ -244,6 +243,7 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             "connector_distance = 48.0\n"
             "\n"
             "[EXPLORATION]\n"
+            "policy = mcts\n"
             "iterations = 17\n"
             "branching_factor = no-longer-a-number\n"
             "frontier_cluster_limit = no-longer-a-number\n"
@@ -254,14 +254,9 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
 
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.frontier.confidence_threshold, 0.75)
-        self.assertEqual(loaded.frontier.continuation_min_distance, 15.0)
-        self.assertEqual(loaded.frontier.continuation_scan_headings, 2)
-        self.assertEqual(loaded.waypoints.merge_radius, 6.0)
-        self.assertEqual(loaded.waypoints.connector_distance, 48.0)
-        self.assertEqual(loaded.waypoints.spatial_hash_cell, 32)
-        self.assertEqual(loaded.waypoints.gateway_connector_distance, 192.0)
-        self.assertEqual(loaded.waypoints.route_cache_capacity, 64)
-        self.assertEqual(loaded.exploration.iterations, 17)
+        self.assertEqual(loaded.frontier.stride, 2)
+        self.assertFalse(hasattr(loaded, "waypoints"))
+        self.assertEqual(loaded.exploration.policy, "random")
 
     def test_next_save_replaces_all_legacy_navigation_keys(self) -> None:
         temporary_directory, repository = self.make_repository()
@@ -275,52 +270,30 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             set(config["FRONTIER"]),
             {
                 "confidence_threshold",
-                "minimum_unknown_support",
-                "continuation_min_distance",
-                "continuation_scan_headings",
+                "stride",
                 "rebuild_cooldown",
-                "cluster_match_distance",
-                "missing_refresh_limit",
-                "gateway_min_separation",
-            },
-        )
-        self.assertEqual(
-            set(config["WAYPOINTS"]),
-            {
-                "enabled",
-                "spatial_hash_cell",
-                "merge_radius",
-                "connector_distance",
-                "gateway_connector_distance",
-                "route_cache_capacity",
-                "connector_limit",
-                "turn_threshold_degrees",
-                "minimum_turn_leg",
-                "chokepoint_narrow_clearance",
-                "chokepoint_shoulder_clearance",
-                "chokepoint_shoulder_length",
-                "recovery_anchor_interval",
+                "minimum_cluster_cells",
+                "distance_band",
+                "wall_continuation_weight",
+                "cluster_size_weight",
+                "cluster_proximity_weight",
+                "global_cell_size",
+                "global_refresh_interval",
             },
         )
         self.assertEqual(
             set(config["EXPLORATION"]),
             {
                 "policy",
-                "iterations",
-                "horizon",
-                "planning_rays",
-                "uct_exploration",
-                "discount",
-                "decision_time_budget_ms",
+                "stagnation_distance",
+                "stagnation_min_sensor_cells_per_px",
+                "wall_direction_bias",
+                "unexplored_direction_bias",
+                "separation_direction_bias",
             },
         )
-        self.assertEqual(config.getint("WAYPOINTS", "spatial_hash_cell"), 32)
-        self.assertEqual(config.getfloat("WAYPOINTS", "merge_radius"), 8.0)
-        self.assertEqual(
-            config.getfloat("WAYPOINTS", "gateway_connector_distance"),
-            192.0,
-        )
-        self.assertEqual(config.getint("WAYPOINTS", "route_cache_capacity"), 64)
+        self.assertFalse(config.has_section("WAYPOINTS"))
+        self.assertEqual(config.get("EXPLORATION", "policy"), "random")
 
 
 if __name__ == "__main__":

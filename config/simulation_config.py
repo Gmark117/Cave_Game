@@ -72,131 +72,78 @@ class SharingConfig:
 
 @dataclass(frozen=True)
 class FrontierConfig:
-    """Stable frontier extraction and lifecycle settings."""
+    """Local borders and cached whole-map frontier guidance settings."""
 
     confidence_threshold: float = 0.6
-    minimum_unknown_support: int = 4
-    continuation_min_distance: float = 12.0
-    continuation_scan_headings: int = 3
+    stride: int = 4
     rebuild_cooldown: float = 0.25
-    cluster_match_distance: float = 32.0
-    missing_refresh_limit: int = 3
-    gateway_min_separation: float = 64.0
+    minimum_cluster_cells: int = 12
+    distance_band: float = 16.0
+    wall_continuation_weight: float = 2.0
+    cluster_size_weight: float = 2.0
+    cluster_proximity_weight: float = 1.0
+    global_cell_size: int = 32
+    global_refresh_interval: float = 2.0
 
     def __post_init__(self) -> None:
-        """Validate frontier extraction and lifecycle controls."""
+        """Validate border extraction controls."""
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise ValueError(
                 "confidence_threshold must be between zero and one"
             )
-        if not 1 <= self.minimum_unknown_support <= 9:
-            raise ValueError(
-                "minimum_unknown_support must be between one and nine"
-            )
-        if self.continuation_min_distance < 0.0:
-            raise ValueError("continuation_min_distance must be non-negative")
-        if not 1 <= self.continuation_scan_headings <= 6:
-            raise ValueError(
-                "continuation_scan_headings must be between one and six"
-            )
+        if self.stride <= 0:
+            raise ValueError("frontier stride must be positive")
         if self.rebuild_cooldown < 0.0:
             raise ValueError("rebuild_cooldown must be non-negative")
-        if self.cluster_match_distance < 0.0:
-            raise ValueError("cluster_match_distance must be non-negative")
-        if self.missing_refresh_limit < 0:
-            raise ValueError("missing_refresh_limit must be non-negative")
-        if self.gateway_min_separation < 0.0:
-            raise ValueError("gateway_min_separation must be non-negative")
-
-
-@dataclass(frozen=True)
-class WaypointConfig:
-    """Strategic trail, highway routing, and local connector limits."""
-
-    enabled: bool = True
-    spatial_hash_cell: int = 32
-    merge_radius: float = 8.0
-    connector_distance: float = 64.0
-    gateway_connector_distance: float = 192.0
-    route_cache_capacity: int = 64
-    connector_limit: int = 8
-    turn_threshold_degrees: float = 45.0
-    minimum_turn_leg: float = 24.0
-    chokepoint_narrow_clearance: float = 8.0
-    chokepoint_shoulder_clearance: float = 16.0
-    chokepoint_shoulder_length: float = 24.0
-    recovery_anchor_interval: float = 128.0
-
-    def __post_init__(self) -> None:
-        """Validate strategic-graph and bounded-connector controls."""
-        if self.spatial_hash_cell <= 0:
-            raise ValueError("spatial_hash_cell must be positive")
-        if self.merge_radius < 0.0:
-            raise ValueError("waypoint merge_radius must be non-negative")
-        if self.merge_radius >= self.spatial_hash_cell:
+        if self.minimum_cluster_cells <= 0:
+            raise ValueError("minimum_cluster_cells must be positive")
+        if self.distance_band <= 0.0:
+            raise ValueError("frontier distance_band must be positive")
+        if self.global_cell_size <= 0:
+            raise ValueError("frontier global_cell_size must be positive")
+        if self.global_refresh_interval < 0.0:
             raise ValueError(
-                "waypoint merge_radius must be smaller than spatial_hash_cell"
+                "frontier global_refresh_interval must be non-negative"
             )
-        if self.connector_distance <= 0.0:
-            raise ValueError("connector_distance must be positive")
-        if self.gateway_connector_distance <= 0.0:
-            raise ValueError("gateway_connector_distance must be positive")
-        if self.gateway_connector_distance < self.connector_distance:
-            raise ValueError(
-                "gateway_connector_distance must not be below connector_distance"
-            )
-        if self.route_cache_capacity <= 0:
-            raise ValueError("route_cache_capacity must be positive")
-        if self.connector_limit <= 0:
-            raise ValueError("connector_limit must be positive")
         if min(
-            self.turn_threshold_degrees,
-            self.minimum_turn_leg,
-            self.chokepoint_narrow_clearance,
-            self.chokepoint_shoulder_clearance,
-            self.chokepoint_shoulder_length,
-            self.recovery_anchor_interval,
-        ) <= 0.0:
-            raise ValueError("strategic waypoint thresholds must be positive")
-        if self.chokepoint_narrow_clearance >= self.chokepoint_shoulder_clearance:
-            raise ValueError(
-                "chokepoint narrow clearance must be below shoulder clearance"
-            )
+            self.wall_continuation_weight,
+            self.cluster_size_weight,
+            self.cluster_proximity_weight,
+        ) < 0.0:
+            raise ValueError("frontier cluster weights must be non-negative")
 
 
 @dataclass(frozen=True)
 class ExplorationConfig:
-    """Exploration policy selection and MCTS search controls."""
+    """Biased-random exploration and low-information recovery controls."""
 
-    policy: str = "mcts"
-    iterations: int = 256
-    horizon: int = 4
-    planning_rays: int = 4
-    uct_exploration: float = 1.414
-    discount: float = 0.95
-    decision_time_budget_ms: float = 40.0
+    policy: str = "random"
+    stagnation_distance: float = 120.0
+    stagnation_min_sensor_cells_per_px: float = 0.5
+    wall_direction_bias: float = 4.0
+    unexplored_direction_bias: float = 2.0
+    separation_direction_bias: float = 1.5
 
     def __post_init__(self) -> None:
-        """Validate exploration policy and numeric search settings."""
+        """Validate and normalize legacy policy names."""
         policy = self.policy.casefold()
-        if policy not in {"mcts", "frontier"}:
-            raise ValueError("policy must be 'mcts' or 'frontier'")
-        object.__setattr__(self, "policy", policy)
-
-        if self.iterations <= 0:
-            raise ValueError("iterations must be positive")
-        if self.horizon <= 0:
-            raise ValueError("horizon must be positive")
-        if self.planning_rays <= 0:
-            raise ValueError("planning_rays must be positive")
-        if self.uct_exploration < 0.0:
-            raise ValueError("uct_exploration must be non-negative")
-        if not 0.0 <= self.discount <= 1.0:
-            raise ValueError("discount must be between zero and one")
-        if self.decision_time_budget_ms < 0.0:
+        if policy not in {"random", "wall_region", "mcts", "frontier"}:
             raise ValueError(
-                "decision_time_budget_ms must be non-negative"
+                "policy must be 'random', 'wall_region', 'mcts', or 'frontier'"
             )
+        if self.stagnation_distance <= 0.0:
+            raise ValueError("stagnation_distance must be positive")
+        if self.stagnation_min_sensor_cells_per_px < 0.0:
+            raise ValueError(
+                "stagnation_min_sensor_cells_per_px must be non-negative"
+            )
+        if min(
+            self.wall_direction_bias,
+            self.unexplored_direction_bias,
+            self.separation_direction_bias,
+        ) < 0.0:
+            raise ValueError("exploration direction biases must be non-negative")
+        object.__setattr__(self, "policy", "random")
 
 
 @dataclass(frozen=True)
@@ -220,15 +167,12 @@ class TraceConfig:
 
     enabled: bool = False
     directory: str = "logs"
-    mcts_root_visits: int = 6
     frame_interval: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate trace output settings."""
         if not self.directory:
             raise ValueError("trace directory must not be empty")
-        if self.mcts_root_visits < 0:
-            raise ValueError("mcts_root_visits must be non-negative")
         if self.frame_interval < 0.0:
             raise ValueError("frame_interval must be non-negative")
 
@@ -244,4 +188,3 @@ class SimulationConfig:
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     rendering: RenderingConfig = field(default_factory=RenderingConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
-    waypoints: WaypointConfig = field(default_factory=WaypointConfig)

@@ -281,7 +281,13 @@ class TerrainSharingService:
         drone_snapshot: Any,
         other_snapshot: Any,
     ) -> bool:
-        """Exchange meaningful terrain, frontier, and SLAM data for one pair."""
+        """Exchange meaningful terrain and SLAM data for one pair.
+
+        Frontier coordinates are derived state.  Sharing their old coordinates
+        used to mix borders extracted from different map versions; recipients
+        now rebuild them from the merged local SLAM on their movement thread.
+        """
+        _ = drone_snapshot, other_snapshot
         drone_terrain = drone.terrain_knowledge.snapshot()
         other_terrain = other_drone.terrain_knowledge.snapshot()
 
@@ -313,38 +319,56 @@ class TerrainSharingService:
             drone_slam.confidence,
         )
 
-        transfer_clusters = getattr(drone, "share_frontier_clusters_with", None)
-        transferred_cluster_ids = (
-            transfer_clusters(other_drone)
-            if transfer_clusters is not None else ()
-        )
-        reverse_transfer = getattr(other_drone, "share_frontier_clusters_with", None)
-        reverse_cluster_ids = (
-            reverse_transfer(drone)
-            if reverse_transfer is not None else ()
-        )
-
         if not (
             should_other_receive
             or should_drone_receive
             or should_other_receive_slam
             or should_drone_receive_slam
-            or transferred_cluster_ids
-            or reverse_cluster_ids
         ):
             return False
 
+        changed = False
         if should_other_receive:
-            other_drone.terrain_knowledge.merge_from(drone_terrain)
+            changed |= bool(
+                other_drone.terrain_knowledge.merge_from(drone_terrain)
+            )
         if should_drone_receive:
-            drone.terrain_knowledge.merge_from(other_terrain)
+            changed |= bool(
+                drone.terrain_knowledge.merge_from(other_terrain)
+            )
 
+        other_slam_changed = False
+        drone_slam_changed = False
         if should_other_receive_slam:
-            other_drone.slam_map.merge_from(drone_slam)
+            other_slam_changed = bool(
+                other_drone.slam_map.merge_from(drone_slam)
+            )
         if should_drone_receive_slam:
-            drone.slam_map.merge_from(other_slam)
+            drone_slam_changed = bool(
+                drone.slam_map.merge_from(other_slam)
+            )
+        if other_slam_changed:
+            self._notify_shared_slam_changed(other_drone)
+        if drone_slam_changed:
+            self._notify_shared_slam_changed(drone)
 
-        return True
+        self._trace(
+            "drone_slam_exchange",
+            drone_id=int(drone.id),
+            other_drone_id=int(other_drone.id),
+            drone_slam_changed=drone_slam_changed,
+            other_slam_changed=other_slam_changed,
+            raw_frontier_coordinates_shared=False,
+        )
+        return bool(changed or other_slam_changed or drone_slam_changed)
+
+    @staticmethod
+    def _notify_shared_slam_changed(drone: Any) -> None:
+        """Invalidate derived navigation state without cross-thread rebuilds."""
+        controller = getattr(drone, "movement_controller", None)
+        callback = getattr(controller, "mark_shared_slam_changed", None)
+        if callable(callback):
+            callback()
 
     def share_with_rovers(self) -> None:
         """Share terrain knowledge from drones to nearby rovers."""

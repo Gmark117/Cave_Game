@@ -167,7 +167,12 @@ class MissionControlLifecycleMixin:
                         stages_ms=dict(timing.stages_ms),
                         dirty_maps=self.slam_view.dirty_map_count(),
                         team_exhausted=bool(
-                            self.exploration_coordinator.team_exhausted
+                            drone_snapshots
+                            and all(
+                                snapshot.returning_home or snapshot.done
+                                for _drone, snapshot, _progress
+                                in drone_snapshots
+                            )
                         ),
                         wall_mapping={
                             "mapped_wall_pixels": (

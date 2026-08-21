@@ -16,7 +16,6 @@ from mapping.localization import PoseEstimate
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainSnapshot
 from mapping.vision_sensor import VisionScan
-from navigation.navigation_intent import MovementMode, NavigationIntent
 
 
 class RecordingControl:
@@ -132,6 +131,7 @@ class DroneSensorTests(unittest.TestCase):
             if name == "sensor_scan"
         )
         progress = self.drone.slam_map.progress_snapshot()
+        completion = self.drone.sensor_controller.last_completed_scan
 
         self.assertEqual(event["completed_scan_sequence"], 1)
         self.assertGreater(event["newly_known_cells"], 0)
@@ -148,6 +148,13 @@ class DroneSensorTests(unittest.TestCase):
         self.assertAlmostEqual(
             event["cumulative_sensor_confidence_gain"],
             progress.sensor_confidence_gain,
+        )
+        self.assertIsNotNone(completion)
+        self.assertEqual(completion.sequence, 1)
+        self.assertEqual(completion.pose, (32, 32, 0.0))
+        self.assertEqual(
+            completion.newly_known_cells,
+            event["newly_known_cells"],
         )
 
     def test_zero_gain_sensor_scan_is_traced_as_completed(self) -> None:
@@ -299,54 +306,6 @@ class DroneSensorTests(unittest.TestCase):
         self.drone.update_sensors()
 
         self.assertEqual(len(calls), 2)
-
-    def test_scan_intent_admits_one_unchanged_pose_sensor_sequence(self) -> None:
-        self.drone.update_sensors()
-        progress = self.drone.slam_map.progress_snapshot()
-        self.drone.runtime_state.set_navigation_intent(NavigationIntent(
-            mode=MovementMode.SCAN,
-            target=self.drone.snapshot().position,
-            scan_sequence=progress.completed_scan_sequence,
-        ))
-
-        self.drone.update_sensors()
-        admitted = self.drone.slam_map.progress_snapshot()
-        self.drone.update_sensors()
-        suppressed = self.drone.slam_map.progress_snapshot()
-
-        self.assertEqual(
-            admitted.completed_scan_sequence,
-            progress.completed_scan_sequence + 1,
-        )
-        self.assertEqual(
-            suppressed.completed_scan_sequence,
-            admitted.completed_scan_sequence,
-        )
-
-    def test_pending_local_scan_admits_one_unchanged_pose_sequence(self) -> None:
-        self.drone.update_sensors()
-        progress = self.drone.slam_map.progress_snapshot()
-        self.drone.runtime_state.set_navigation_intent(NavigationIntent(
-            mode=MovementMode.TRAVEL,
-            target=(40, 32),
-            scan_sequence=progress.completed_scan_sequence,
-            local_scan_pending=True,
-        ))
-
-        self.drone.update_sensors()
-        admitted = self.drone.slam_map.progress_snapshot()
-        self.drone.update_sensors()
-        suppressed = self.drone.slam_map.progress_snapshot()
-
-        self.assertEqual(
-            admitted.completed_scan_sequence,
-            progress.completed_scan_sequence + 1,
-        )
-        self.assertEqual(
-            suppressed.completed_scan_sequence,
-            admitted.completed_scan_sequence,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

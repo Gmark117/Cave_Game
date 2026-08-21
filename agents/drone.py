@@ -3,21 +3,13 @@
 import random as rand
 from typing import Tuple, TYPE_CHECKING
 
-from agents.exploration_policy import FrontierExplorationPolicy
-from agents.mcts_exploration_policy import MctsExplorationPolicy
+from agents.exploration_policy import RandomDirectionPolicy
 from mapping.slam_map import SlamMap
 from agents.drone_movement import DroneMovementController
 from agents.drone_runtime_state import DroneRuntimeState, DroneSnapshot
 from mapping.drone_sensor import DroneSensorController
 from mapping.localization import PerfectPoseLocalizer
 from mapping.terrain_knowledge import TerrainKnowledge
-from navigation.waypoint_graph import WaypointGraph
-from navigation.frontier_clusters import (
-    AssignmentRegistry,
-    FrontierClusterRegistry,
-    FrontierExtractor,
-    FrontierGatewayManager,
-)
 from contracts import (
     DroneMovementDependencies,
     DroneSensorDependencies,
@@ -84,51 +76,6 @@ class Drone:
         )
         self.localizer = PerfectPoseLocalizer()
         self.exploration_policy = self._build_exploration_policy()
-        frontier_settings = self.settings.frontier
-        self.frontier_registry = getattr(control, "frontier_registry", None)
-        if self.frontier_registry is None:
-            self.frontier_registry = FrontierClusterRegistry(
-                match_distance=frontier_settings.cluster_match_distance,
-                missing_refresh_limit=frontier_settings.missing_refresh_limit,
-            )
-        self.frontier_assignments = getattr(control, "frontier_assignments", None)
-        if self.frontier_assignments is None:
-            self.frontier_assignments = AssignmentRegistry()
-        self.frontier_extractor = FrontierExtractor(
-            frontier_settings.confidence_threshold,
-            minimum_unknown_support=(
-                frontier_settings.minimum_unknown_support
-            ),
-        )
-
-        waypoint_settings = getattr(self.settings, "waypoints", None)
-        waypoint_graph = getattr(control, "waypoint_graph", None)
-        if (
-            waypoint_graph is None
-            and waypoint_settings is not None
-            and waypoint_settings.enabled
-        ):
-            # Lightweight test/custom controls may not own mission services.
-            # Production MissionControl injects one graph shared by all drones.
-            waypoint_graph = WaypointGraph(
-                merge_radius=waypoint_settings.merge_radius,
-                connector_distance=waypoint_settings.connector_distance,
-                connector_limit=waypoint_settings.connector_limit,
-                spatial_hash_cell=waypoint_settings.spatial_hash_cell,
-                route_cache_capacity=waypoint_settings.route_cache_capacity,
-            )
-        self.frontier_gateway_manager = getattr(
-            control, "frontier_gateway_manager", None
-        )
-        if self.frontier_gateway_manager is None and waypoint_graph is not None:
-            self.frontier_gateway_manager = FrontierGatewayManager(
-                self.frontier_registry,
-                waypoint_graph,
-                minimum_separation=frontier_settings.gateway_min_separation,
-            )
-        self.exploration_coordinator = getattr(
-            control, "exploration_coordinator", None
-        )
 
         # SLAM state
         map_h = len(self.cave)
@@ -139,11 +86,20 @@ class Drone:
         self.movement_controller = DroneMovementController(
             self,
             DroneMovementDependencies(
+                compute_path=control.compute_path,
                 simulation_time=control.simulation_time,
                 pause_checkpoint=control.pause_checkpoint,
                 wait_simulation_delay=control.wait_simulation_delay,
+                compute_path_segment=getattr(
+                    control,
+                    "compute_path_segment",
+                    None,
+                ),
                 runtime_trace=getattr(control, "runtime_trace", None),
-                waypoint_graph=waypoint_graph,
+                get_drone_positions=lambda: tuple(
+                    (peer.id, peer.snapshot().position)
+                    for peer in getattr(control, "drones", ())
+                ),
             ),
         )
         self.sensor_controller = DroneSensorController(
@@ -158,14 +114,9 @@ class Drone:
         self.renderer = DroneRenderer(self)
 
     def _build_exploration_policy(self):
-        """Create the configured exploration policy for this drone."""
-        exploration = self.settings.exploration
-        if exploration.policy == "frontier":
-            return FrontierExplorationPolicy()
-
-        mission_seed = self.settings.mission_config.seed
-        policy_seed = int(mission_seed) + (self.id * 9_973)
-        return MctsExplorationPolicy(exploration, seed=policy_seed)
+        """Create a reproducible random policy private to this drone."""
+        seed = int(self.settings.mission_config.seed) + self.id * 9_973
+        return RandomDirectionPolicy(seed=seed)
 
     
     def calculate_radius(self) -> int:
@@ -197,16 +148,11 @@ class Drone:
         """Return detached runtime state for cross-thread consumers."""
         return self.runtime_state.snapshot()
 
-    def share_frontier_clusters_with(self, other_drone: "Drone") -> tuple[int, ...]:
-        """Transfer stable frontier knowledge across an authorized link."""
-        if self.frontier_registry is not other_drone.frontier_registry:
-            return ()
-        transferred = self.frontier_registry.share(self.id, other_drone.id)
-        if transferred:
-            other_drone.runtime_state.replace_frontier_clusters(
-                self.frontier_registry.visible_to(other_drone.id)
-            )
-        return transferred
+    def merge_frontiers(self, other_border) -> None:
+        """Merge simple border coordinates received from another drone."""
+        if other_border is None:
+            return
+        self.runtime_state.merge_frontiers(other_border)
 
     def toggle_path(self) -> None:
         """Toggle rendering visibility for the drone path overlay."""

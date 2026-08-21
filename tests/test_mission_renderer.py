@@ -64,7 +64,6 @@ class MissionRendererTests(unittest.TestCase):
             ),
             is_paused=lambda: getattr(control, "is_paused", False),
             is_music_enabled=lambda: getattr(control, "music_enabled", True),
-            waypoint_renderer=getattr(control, "waypoint_renderer", None),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -103,9 +102,6 @@ class MissionRendererTests(unittest.TestCase):
         slam_view = SimpleNamespace(
             draw=lambda: events.append("slam"),
         )
-        waypoint_renderer = SimpleNamespace(
-            draw=lambda window: events.append("waypoints"),
-        )
         build_debug_lines = Mock(
             side_effect=lambda snapshots: events.append("debug") or ["line"],
         )
@@ -121,7 +117,6 @@ class MissionRendererTests(unittest.TestCase):
         control = SimpleNamespace(
             game=SimpleNamespace(window=RecordingWindow(events)),
             slam_view=slam_view,
-            waypoint_renderer=waypoint_renderer,
             debug_info=debug_info,
             control_center=control_center,
             drones=[drone],
@@ -143,7 +138,6 @@ class MissionRendererTests(unittest.TestCase):
             [
                 "clear",
                 "slam",
-                "waypoints",
                 "drone_path",
                 "rover_path",
                 "drone_vision",
@@ -198,29 +192,6 @@ class MissionRendererTests(unittest.TestCase):
             events,
             ["background", "slam", "control_center"],
         )
-
-    def test_selected_drone_view_hides_shared_waypoint_overlay(self) -> None:
-        waypoint_renderer = SimpleNamespace(draw=Mock())
-        control = SimpleNamespace(
-            game=SimpleNamespace(window=RecordingWindow([])),
-            slam_view=SimpleNamespace(draw=lambda: None),
-            waypoint_renderer=waypoint_renderer,
-            control_center=SimpleNamespace(
-                draw_control_center=Mock(),
-            ),
-            drones=[],
-            rovers=[],
-            presentation=SimpleNamespace(
-                show_terrain_heatmap=False,
-                selected_drone_heatmap_id=0,
-                show_full_map=False,
-            ),
-        )
-
-        MissionRenderer(self.make_dependencies(control)).draw()
-
-        waypoint_renderer.draw.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()

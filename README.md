@@ -10,19 +10,11 @@ The codebase is organized around a simple control chain: `main.py` creates the g
 - `agents/drone.py` models local exploration, vision, and terrain knowledge.
 - `agents/rover.py` acts as a mobile or stationary support agent depending on mission setup.
 - `mapping/terrain_knowledge.py` owns terrain arrays, synchronization, snapshots, observation fusion, and merging.
-- `navigation/waypoint_graph.py` owns the shared strategic topology, stable
-  node/edge/route IDs, exact edge polylines, and revision-keyed route cache.
-- `navigation/frontier_clusters.py` owns stable frontier identity,
-  reservations, and belief-validated gateways.
-- `mission/exploration_coordination.py` reconciles canonical retirements into
-  every drone, confirms team-wide exhaustion, and starts coordinated homing.
 - `mapping/wall_mapping.py` measures exposed cave/pillar/internal-wall surface
   coverage from combined occupied SLAM evidence.
-- `navigation/navigation_intent.py` and `agents/local_mcts_controller.py` own
-  persistent route execution state and bounded goal-conditioned local control.
-- `navigation/pathfinding.py` and `navigation/astar_pathfinder.py` remain
-  physical-simulator and disabled-rover infrastructure; drone planning does
-  not call their ground-truth cave-map A*.
+- `agents/exploration_policy.py` owns reproducible weighted-random selection.
+- `navigation/pathfinding.py` and `navigation/astar_pathfinder.py` provide A*
+  for cul-de-sac escape, homing, and the disabled rover flow.
 - `agents/graph.py` tracks valid movement and exploration connectivity.
 - `ui/control_center/facade.py` is the UI facade, `ui/control_center/controller.py` owns timer
   and input state, and `ui/control_center/renderer.py` owns Pygame layout and
@@ -106,29 +98,36 @@ still blitted every frame.
 
 ### Agent Responsibilities
 
-`agents/drone.py` composes each drone's local mapping, strategic policy,
-movement state machine, sensor, and renderer. Frontier extraction produces
-stable cluster IDs from that drone's SLAM belief. A shared assignment registry
-reserves a cluster, while each drone selects a requester-known-free waypoint
-from that stable cluster's cells. A gateway is protected only when a required
-belief corridor actually connects the cluster to the strategic graph. The
-selected goal and exact oriented route are latched in a stable-ID navigation
-intent. Normal movement advances the stored polyline cursor by one bounded
-prefix with no per-prefix A* or goal reselection; only route construction may
-run bounded known-free connector A*.
+`agents/drone.py` composes each drone's local mapping, weighted-random policy,
+movement controller, sensor, and renderer. During ordinary exploration the
+controller groups local unknown boundaries into connected components. It
+weights collision-free headings toward sufficiently large wall-touching
+components first, generic components second, and separation from nearby
+teammates throughout. A cached 32-pixel coarse index periodically summarizes
+frontiers across the drone's complete SLAM map. When its selected region lies
+beyond the local scoring window, that bearing becomes the strategic signal
+and local geometry remains a lower-weight tactical correction. Tiny components do not bias normal movement but remain
+available to bounded stagnation cleanup. It then walks a ten-pixel raster step. If no
+radius-length heading is open, it extracts border cells from the drone's local
+SLAM and uses A* to reach the nearest viable border. Reaching an
+escape border suppresses that exact target until its local frontier geometry
+changes, then performs a recovery-only full-circle turn toward a physically
+usable heading. A distance-based sensor-gain window also redirects stagnant
+random walks toward local unknown SLAM boundaries. Its scan-only heading may
+face a wall even though translation in that direction is invalid; movement
+waits for one completed scan, then restores a collision-safe heading. It falls
+back to a frontier outside the recent trail when A* is needed. A* is also used
+to return home.
+Every physical point is appended to the path history consumed by the renderer.
 
 `agents/rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
 
 ### Support Systems
 
-`navigation/waypoint_graph.py` provides the thread-safe strategic highway. Its
-monotonic IDs survive role changes, its travelled and requester-scoped
-belief-corridor edges retain complete physical polylines, and reverse route
-trees are cached by topology, requester, and requester-scoped belief-edge
-validity. Unrelated SLAM revisions can therefore reuse a valid tree.
-`navigation/pathfinding.py` still owns a cave-map-backed worker pool used at the
-physical simulator/standalone algorithm boundary, and terrain-weighted routing
-for the currently disabled rover flow. It is not injected into drone movement.
+`navigation/pathfinding.py` owns a cave-map-backed worker pool for drone escape
+and homing routes. A search that reaches its fixed work cap returns a tagged
+progress segment; the drone follows it and replans toward the unchanged goal.
+The service also retains terrain-weighted routing for the disabled rover flow.
 `agents/graph.py` remains the physical collision/history boundary, while
 `ui/control_center/facade.py` and `mission/presentation_adapter.py` keep UI
 concerns outside the simulation core.
@@ -145,16 +144,17 @@ The simulation works as a feedback loop:
 5. Nearby agents exchange data when the mission rules allow it.
 6. The UI reports exposed wall-surface coverage from combined occupied SLAM;
    roughness remains an optional terrain heatmap.
-7. Belief-only frontier extraction prioritizes continuation of already
-   observed wall surfaces. Coherent open unknown regions are used only to find
-   another wall; the coherence threshold remains a defensive filter rather
-   than compensating for gaps in the visibility cone. A retained wall target
-   must offer a meaningfully displaced next viewpoint; unchanged pixel-scale
-   tips are locally suppressed, and valid continuations use a directed partial
-   sweep instead of another full rotation.
-8. Canonical frontier retirement is reconciled across the team. All drones
-   home together only after every drone confirms the shared registry is empty.
-9. Mission completion requires every drone to finish that coordinated return.
+7. Ordinary movement makes a seeded weighted-random choice inside the current
+   vision cone. Connected wall-frontier components outrank generic components.
+   Wall candidates combine continuation, size rank, and proximity with 2:2:1
+   weights; generic candidates combine size rank and proximity with 2:1
+   weights. A coarse whole-map cache applies the same tiering every two seconds
+   and steers toward remote regions without rescoring every frontier pixel on
+   every step. Positional separation spreads nearby drones.
+8. If a drone is boxed in, local-SLAM border cells are rebuilt and A* selects
+   an escape. Exact team wall completion starts coordinated homing; local
+   border exhaustion remains a compatibility fallback.
+9. Mission completion requires every drone to finish its return.
 
 That flow is important because the game does not use a single global terrain oracle. Instead, knowledge is built from observations and exchanged through explicit events. This makes the heatmap, the agent behavior, and the mission state all consistent with one another.
 
@@ -193,8 +193,12 @@ The distributed-semantics contract is:
 - Mission-global terrain is telemetry and UI aggregation only.
 - Exploration progress is occupied-SLAM coverage of exposed wall surfaces;
   buried solid rock is excluded.
-- Exploration exhaustion is belief-only and team-coordinated through the
-  canonical frontier registry; the cave map is not exposed to planners.
+- Exact team wall completion is a mission-level homing trigger. The exposed
+  ground-truth wall mask remains confined to mission evaluation and is never
+  supplied to a drone's heading scorer.
+- SLAM-derived border selection is local. The physical cave map is consulted
+  by collision checks, sensor simulation, communication line of sight, and
+  the deliberately simple A* escape/homing service.
 - Sharing is the only mechanism that transfers local knowledge between agents.
 - Rover movement remains disabled. Its existing target and route code is
   disabled until it uses rover-local received knowledge before activation.
@@ -204,6 +208,8 @@ The distributed-semantics contract is:
 The sharing model is intentionally limited.
 
 - Drone-to-drone exchange is triggered by proximity and throttled so the system does not spend all of its time copying arrays.
+- SLAM is shared, but derived frontier coordinates are not. A recipient
+  invalidates and rebuilds its own borders before mission-exhaustion checks.
 - Rover sharing acts as a support mechanism for collecting knowledge near a persistent reference point.
 - The heatmap refresh is also throttled so rendering stays responsive.
 
@@ -225,33 +231,45 @@ The reason for this architecture is practical: cave generation is naturally para
 
 ## Exploration Behavior
 
-Drone movement separates strategic selection from bounded local execution.
+Drone movement intentionally uses a small baseline policy.
 
 The agent typically does the following:
 
 - scan nearby terrain and update private SLAM/terrain knowledge,
-- refresh stable frontier clusters, prefer an unassigned wall-continuation
-  cluster, and use coherent unknown space only as a wall-discovery fallback,
-- select an informative locally known-free cell within the stable cluster,
-  batch retained wall progress by at least the configured continuation
-  distance, and construct a cached strategic route,
-- persist a gateway only when a required bounded belief corridor was actually
-  connected; retire its orphan corridor with the cluster,
-- persist cluster, gateway, assignment, route, and intent IDs plus exact route
-  cursors across movement ticks,
-- follow the stored oriented edge polyline deterministically during normal
-  travel, and use bounded goal-conditioned local MCTS only when local
-  deviations provide a real choice; single-choice scan and recovery modes use
-  deterministic stored-intent fast paths,
-- invalidate or change goals only for explicit reservation, topology, belief,
-  collision, scan, or watchdog reasons.
-- reconcile peer-retired IDs before selection and begin homing only after all
-  drones have reported a frontier-free team epoch.
+- test integer headings inside the current 60-degree vision cone for a clear
+  radius-length look-ahead and ten-pixel short step,
+- group local unknown boundaries into eight-connected components and exclude
+  components below the configured 12-cell normal-heading size threshold,
+- periodically aggregate the complete local SLAM into 32-pixel coarse
+  frontier regions, retain one remote strategic target for two seconds, and
+  bias the current collision-safe cone toward its bearing,
+- keep wall-touching components as the strict first tier and score them from
+  continuation alignment, normalized size rank, and proximity at 2:2:1; when
+  none are actionable, score generic components from size rank and proximity
+  at 2:1,
+- add a positional separation score that repels nearby teammates and assigns
+  deterministic launch sectors while the drones still overlap,
+- choose by the resulting weights with a per-drone seeded random generator,
+- walk the chosen line directly and record every point for path rendering,
+- after 120 travelled pixels, keep weighted-random movement when sensor-local
+  gain is productive; otherwise rotate directly toward an unknown cell beside a
+  reachable SLAM border and hold position for exactly one completed scan,
+- retain refreshed work after sensor gain, or suppress unchanged local
+  frontier geometry after a zero-gain directed scan, then restore a
+  collision-safe movement heading,
+- when no local border can be viewed, use A* to reach a border outside the
+  recent breadcrumb trail,
+- when no local heading is available, rebuild known-free/unknown boundaries
+  from local SLAM and use A* to reach the nearest viable border,
+- after escape A*, retire the reached border while its local geometry is
+  unchanged and rotate in place toward a usable outgoing heading,
+- use the same A* service for homing after exact team wall completion or local
+  border exhaustion; capped searches return a useful partial route and replan
+  from its endpoint instead of being reported as unreachable.
 
-Planner-facing types contain SLAM belief and stable IDs, never the true cave
-map. The true map is still used where the simulator must enforce physical
-collision, generate sensor observations, test communication line of sight, or
-exercise the disabled rover/pathfinding scaffolding.
+Border extraction consumes local SLAM only. The true map remains the physical
+simulation boundary for collision checks, sensor observations, communication
+line of sight, and A* escape/homing routes.
 
 ## Rendering and UI
 
@@ -259,10 +277,8 @@ The rendering path is deliberately separated from mission logic.
 
 `rendering/mission_renderer.py` owns complete frame composition and the
 stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain
-view. `rendering/waypoint_renderer.py` rebuilds one persistent overlay per
-committed topology revision and renders HOME, JUNCTION, CHOKEPOINT, TURN,
-FRONTIER_GATEWAY, and RECOVERY_ANCHOR roles distinctly. Each agent renderer
-owns paths, vision, and icons. The control-center facade builds immutable frame
+view. Each agent renderer owns paths, vision, and icons; the drone breadcrumb
+path is the only navigation overlay. The control-center facade builds immutable frame
 data, its controller owns timer/tab/input state, and its renderer owns all
 Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps
 presentation state isolated so toggles do not contaminate the simulation
@@ -271,11 +287,10 @@ model.
 Rendering is layered so the visual output stays readable:
 
 1. Black canvas and SLAM or terrain surface
-2. Waypoint highway edges and nodes
-3. Agent paths
-4. Drone vision
-5. Agent icons
-6. Control center and stop button
+2. Agent paths
+3. Drone vision
+4. Agent icons
+5. Control center and stop button
 
 Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 
@@ -284,12 +299,12 @@ Runtime code delegates frame composition directly to `MissionRenderer.draw()`.
 The project keeps its runtime settings and visual assets in predictable locations.
 
 - `GameConfig/options.default.ini` and `GameConfig/simulation.default.ini`
-  store committed defaults. Strategic navigation settings use a 32 px spatial
-  hash, an 8 px merge radius, 64/192 px local/gateway connector bounds, a
-  64-entry route cache, a four-cell local unknown-coherence threshold, a 12 px
-  retained-wall displacement, a three-heading continuation sweep,
-  trail-promotion thresholds, and the bounded local MCTS budget. Retired
-  breadcrumb/frontier-fallback settings are neither typed nor persisted.
+  store committed defaults. Navigation exposes local-SLAM border confidence,
+  sampling stride, rebuild cooldown, frontier component threshold/proximity
+  scale/score weights, coarse global cell size/refresh interval, the weighted `random` policy, its
+  wall/unexplored/separation biases, and its
+  stagnation distance/gain threshold. Older waypoint and MCTS INI keys are ignored when loading
+  existing files.
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
   user changes and are ignored by Git.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
@@ -323,9 +338,9 @@ Simulation settings available in-game:
 | Known map visualization | Implemented | Available in current simulation flow |
 | Distributed terrain sharing | Implemented | Drone-to-drone and rover terrain sharing are active |
 | POI and path sharing | Planned | POI model exists; runtime integration is deferred |
-| Strategic navigation graph | Implemented | Stable IDs, exact stored edge polylines, belief-scoped connectors, persistent cursor execution, and a revision-batched role overlay are active |
+| Drone path rendering | Implemented | Each drone's complete travelled breadcrumb path is rendered incrementally |
 | Battery management | Planned | Not yet implemented |
-| Stable frontier exploration | Implemented | Stable clusters, reservations, persistent goals, deterministic route following, and bounded local MCTS are active |
+| Random exploration with A* escape | Implemented | Random local steps are direct; A* is reserved for cul-de-sac borders and homing |
 | Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |
 | Drift modeling | Planned | Not yet implemented |
 

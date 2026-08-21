@@ -130,18 +130,21 @@ class MissionRendererDependencies:
     presentation: PresentationInvalidator
     is_paused: Callable[[], bool]
     is_music_enabled: Callable[[], bool]
-    waypoint_renderer: Any | None = None
 
 
 @dataclass(frozen=True)
 class DroneMovementDependencies:
     """Callbacks used by drone movement without retaining mission control."""
 
+    compute_path: Callable[[Position, Position], list[Position]]
     simulation_time: Callable[[], float]
     pause_checkpoint: Callable[[], bool]
     wait_simulation_delay: Callable[[float], bool]
     runtime_trace: Any | None = None
-    waypoint_graph: Any | None = None
+    get_drone_positions: Callable[
+        [], Sequence[tuple[int, Position]]
+    ] = lambda: ()
+    compute_path_segment: Callable[[Position, Position], Any] | None = None
 
 
 @dataclass(frozen=True)

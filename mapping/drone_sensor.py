@@ -5,6 +5,7 @@ sampling. It deliberately contains no drawing code, so sensing continues
 regardless of whether the vision overlay is visible.
 """
 
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import numpy as np
@@ -13,10 +14,19 @@ from mapping.roughness_sampler import RoughnessSampler
 from mapping.vision_sensor import RayHit, VisionSensor
 from mapping.terrain_knowledge import TerrainSample
 from contracts import DroneSensorDependencies
-from navigation.navigation_intent import MovementMode
 
 
 LIDAR_RANGE_RADIUS_MULTIPLIER = 4
+
+
+@dataclass(frozen=True)
+class SensorScanCompletion:
+    """Sensor-local result for one fully applied scan pose."""
+
+    pose: tuple[int, int, float]
+    sequence: int
+    newly_known_cells: int
+    confidence_gain: float
 
 
 class DroneSensorController:
@@ -49,7 +59,13 @@ class DroneSensorController:
         )
         self.latest_pose_estimate = None
         self._last_scan_pose: tuple[int, int, float] | None = None
+        self._last_completed_scan: SensorScanCompletion | None = None
         self._last_skip_pose_logged: tuple[int, int, float] | None = None
+
+    @property
+    def last_completed_scan(self) -> SensorScanCompletion | None:
+        """Return the latest scan whose SLAM update has fully completed."""
+        return self._last_completed_scan
 
     def update(self) -> None:
         """Cast rays and update the drone's SLAM and terrain knowledge."""
@@ -63,20 +79,8 @@ class DroneSensorController:
         self.latest_pose_estimate = pose_estimate
         pose_signature = self._pose_signature(pose_estimate)
         progress_before = drone.slam_map.progress_snapshot()
-        intent = snapshot.navigation_intent
-        requested_repeat_scan = bool(
-            intent is not None
-            and (
-                intent.mode == MovementMode.SCAN
-                or intent.local_scan_pending
-            )
-            and progress_before.completed_scan_sequence
-            <= intent.scan_sequence
-        )
         if pose_signature == self._last_scan_pose:
-            if requested_repeat_scan:
-                self._last_skip_pose_logged = None
-            elif self._last_skip_pose_logged != pose_signature:
+            if self._last_skip_pose_logged != pose_signature:
                 self._trace(
                     "sensor_pose_static_skip",
                     pose=pose_signature,
@@ -84,8 +88,7 @@ class DroneSensorController:
                 )
                 self._last_skip_pose_logged = pose_signature
                 return
-            else:
-                return
+            return
 
         origin = pose_estimate.position
         vision_scan = self.vision_sensor.scan_cone(
@@ -111,6 +114,20 @@ class DroneSensorController:
             now=now,
         )
         progress_after = drone.slam_map.progress_snapshot()
+        newly_known_cells = (
+            progress_after.sensor_newly_known_cells
+            - progress_before.sensor_newly_known_cells
+        )
+        confidence_gain = (
+            progress_after.sensor_confidence_gain
+            - progress_before.sensor_confidence_gain
+        )
+        self._last_completed_scan = SensorScanCompletion(
+            pose=pose_signature,
+            sequence=progress_after.completed_scan_sequence,
+            newly_known_cells=newly_known_cells,
+            confidence_gain=confidence_gain,
+        )
         self._trace(
             "sensor_scan",
             pose=pose_signature,
@@ -126,21 +143,14 @@ class DroneSensorController:
             completed_scan_sequence=(
                 progress_after.completed_scan_sequence
             ),
-            newly_known_cells=(
-                progress_after.sensor_newly_known_cells
-                - progress_before.sensor_newly_known_cells
-            ),
-            confidence_gain=(
-                progress_after.sensor_confidence_gain
-                - progress_before.sensor_confidence_gain
-            ),
+            newly_known_cells=newly_known_cells,
+            confidence_gain=confidence_gain,
             cumulative_sensor_newly_known_cells=(
                 progress_after.sensor_newly_known_cells
             ),
             cumulative_sensor_confidence_gain=(
                 progress_after.sensor_confidence_gain
             ),
-            requested_repeat_scan=requested_repeat_scan,
             terrain_samples=terrain_samples,
         )
 

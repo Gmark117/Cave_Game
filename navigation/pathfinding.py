@@ -126,6 +126,57 @@ class PathfindingService:
             if acquired:
                 pool_sem.release()
 
+    def compute_path_segment(
+        self,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+    ) -> astar_pathfinder.PathResult:
+        """Compute a complete drone route or a capped progress segment."""
+        unavailable = astar_pathfinder.PathResult(
+            (),
+            astar_pathfinder.PATH_RESOURCE_UNAVAILABLE,
+            0,
+            float("inf"),
+        )
+        if not self.ready:
+            return unavailable
+
+        map_shm = self.map_shm
+        map_shape = self.map_shape
+        pool = self.pool
+        pool_sem = self.pool_sem
+        if (
+            map_shm is None
+            or map_shape is None
+            or pool is None
+            or pool_sem is None
+        ):
+            return unavailable
+
+        acquired = False
+        try:
+            pool_sem.acquire()
+            acquired = True
+            future = pool.submit(
+                astar_pathfinder.compute_path_segment,
+                map_shm.name,
+                map_shape,
+                start,
+                goal,
+            )
+            return future.result()
+        except (RuntimeError, ValueError, OSError) as exc:
+            logger.warning(
+                "Segmented pathfinding request failed for %s -> %s: %s",
+                start,
+                goal,
+                exc,
+            )
+            return unavailable
+        finally:
+            if acquired:
+                pool_sem.release()
+
     def compute_weighted_path(
         self,
         roughness_map: np.ndarray,

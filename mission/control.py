@@ -23,7 +23,6 @@ from mapping.terrain_sharing import TerrainSharingService
 from mapping.wall_mapping import WallMappingSnapshot, wall_mapping_snapshot
 from mission.debug_info import MissionDebugInfo
 from mission.frame_timing import FrameProfiler
-from mission.exploration_coordination import TeamExplorationCoordinator
 from mission.objectives import build_mission_objective
 from mission.pause_control import PauseCoordinator, SimulationClock
 from mission.runtime_trace import RuntimeTraceLogger
@@ -36,17 +35,11 @@ from contracts import (
     TerrainSharingDependencies,
 )
 from navigation.pathfinding import PathfindingService
-from navigation.waypoint_graph import WaypointGraph
-from navigation.frontier_clusters import (
-    AssignmentRegistry,
-    FrontierClusterRegistry,
-    FrontierGatewayManager,
-)
+from navigation.astar_pathfinder import PathResult
 from mission.presentation_adapter import PresentationAdapter
 from rendering.slam_renderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
 from rendering.slam_view import SlamViewService
-from rendering.waypoint_renderer import WaypointRenderer
 from mission.lifecycle import MissionControlLifecycleMixin
 
 
@@ -104,32 +97,6 @@ class MissionControl(MissionControlLifecycleMixin):
             self.map_matrix,
             self.settings.mission_config.num_drones,
         )
-        waypoint_settings = self.settings.waypoints
-        self.waypoint_graph = (
-            WaypointGraph(
-                merge_radius=waypoint_settings.merge_radius,
-                connector_distance=waypoint_settings.connector_distance,
-                connector_limit=waypoint_settings.connector_limit,
-                spatial_hash_cell=waypoint_settings.spatial_hash_cell,
-                route_cache_capacity=waypoint_settings.route_cache_capacity,
-            )
-            if waypoint_settings.enabled
-            else None
-        )
-        frontier_settings = self.settings.frontier
-        self.frontier_registry = FrontierClusterRegistry(
-            match_distance=frontier_settings.cluster_match_distance,
-            missing_refresh_limit=frontier_settings.missing_refresh_limit,
-        )
-        self.frontier_assignments = AssignmentRegistry()
-        self.frontier_gateway_manager = (
-            FrontierGatewayManager(
-                self.frontier_registry,
-                self.waypoint_graph,
-                minimum_separation=frontier_settings.gateway_min_separation,
-            )
-            if self.waypoint_graph is not None else None
-        )
         self.mission_event = threading.Event()
         self.simulation_clock = SimulationClock()
         self.pause_coordinator = PauseCoordinator(self.mission_event)
@@ -160,48 +127,49 @@ class MissionControl(MissionControlLifecycleMixin):
             map_width=self.map_w,
             map_height=self.map_h,
             exploration_policy=self.settings.exploration.policy,
-            exploration_completion="team_frontier_exhaustion_and_home",
+            exploration_completion=(
+                "team_wall_mapping_or_local_border_exhaustion_and_home"
+            ),
             exploration_progress="exposed_wall_slam_coverage",
             terrain_role="rover_navigation_only",
-            frontier_policy="wall_continuation_then_coherent_discovery",
-            frontier_minimum_unknown_support=(
-                self.settings.frontier.minimum_unknown_support
+            frontier_policy=(
+                "cached_global_wall_then_region_guidance_with_astar_escape"
             ),
-            mcts_decision_time_budget_ms=(
-                self.settings.exploration.decision_time_budget_ms
+            frontier_stride=self.settings.frontier.stride,
+            frontier_minimum_cluster_cells=(
+                self.settings.frontier.minimum_cluster_cells
             ),
-            waypoint_routing=self.settings.waypoints.enabled,
-            waypoint_spatial_hash_cell=(
-                self.settings.waypoints.spatial_hash_cell
+            frontier_distance_band=self.settings.frontier.distance_band,
+            frontier_wall_continuation_weight=(
+                self.settings.frontier.wall_continuation_weight
             ),
-            waypoint_merge_radius=self.settings.waypoints.merge_radius,
-            waypoint_connector_distance=(
-                self.settings.waypoints.connector_distance
+            frontier_cluster_size_weight=(
+                self.settings.frontier.cluster_size_weight
             ),
-            waypoint_gateway_connector_distance=(
-                self.settings.waypoints.gateway_connector_distance
+            frontier_cluster_proximity_weight=(
+                self.settings.frontier.cluster_proximity_weight
             ),
-            waypoint_route_cache_capacity=(
-                self.settings.waypoints.route_cache_capacity
+            frontier_global_cell_size=(
+                self.settings.frontier.global_cell_size
             ),
-            # Phase 6 deliberately dual-writes legacy trace aliases until a
-            # live replacement-schema trace is accepted.
-            waypoint_spacing=self.settings.waypoints.spatial_hash_cell,
-            waypoint_direct_path_limit=(
-                self.settings.waypoints.gateway_connector_distance
-                - self.settings.waypoints.connector_distance
+            frontier_global_refresh_interval=(
+                self.settings.frontier.global_refresh_interval
             ),
-            waypoint_bridge_distance=(
-                self.settings.waypoints.gateway_connector_distance
+            stagnation_distance=(
+                self.settings.exploration.stagnation_distance
             ),
-        )
-        self.exploration_coordinator = TeamExplorationCoordinator(
-            registry=self.frontier_registry,
-            assignments=self.frontier_assignments,
-            get_drones=lambda: self.drones,
-            gateway_manager=self.frontier_gateway_manager,
-            waypoint_graph=self.waypoint_graph,
-            runtime_trace=self.runtime_trace,
+            stagnation_min_sensor_cells_per_px=(
+                self.settings.exploration.stagnation_min_sensor_cells_per_px
+            ),
+            wall_direction_bias=(
+                self.settings.exploration.wall_direction_bias
+            ),
+            unexplored_direction_bias=(
+                self.settings.exploration.unexplored_direction_bias
+            ),
+            separation_direction_bias=(
+                self.settings.exploration.separation_direction_bias
+            ),
         )
         
         self.delay = 1/15 # Set a delay for frame updates
@@ -212,11 +180,6 @@ class MissionControl(MissionControlLifecycleMixin):
         # Initialize presentation adapter for UI state and map rendering
         self.presentation = PresentationAdapter(self.map_w, self.map_h)
         self.slam_renderer = SlamRenderer(self.map_w, self.map_h)
-        self.waypoint_renderer = (
-            WaypointRenderer(self.waypoint_graph, self.map_w, self.map_h)
-            if self.waypoint_graph is not None
-            else None
-        )
         self.last_explored_update = 0.0
         self.wall_mapping_progress = WallMappingSnapshot(0, 0, 0.0, False)
         self.explored_update_interval = 0.5
@@ -285,7 +248,6 @@ class MissionControl(MissionControlLifecycleMixin):
                 presentation=self.presentation,
                 is_paused=lambda: self.is_paused,
                 is_music_enabled=self.music_enabled,
-                waypoint_renderer=self.waypoint_renderer,
             )
         )
         
@@ -373,6 +335,20 @@ class MissionControl(MissionControlLifecycleMixin):
             self.pause_coordinator.unregister_current_worker()
 
 
+    def compute_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """Compute an A* escape or homing path for a drone."""
+        return self.pathfinding.compute_path(start, goal)
+
+
+    def compute_path_segment(
+        self,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+    ) -> PathResult:
+        """Compute a complete drone route or one capped progress segment."""
+        return self.pathfinding.compute_path_segment(start, goal)
+
+
     def compute_rover_path(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
         """Compute the disabled rover path using mission terrain telemetry.
 
@@ -453,7 +429,8 @@ class MissionControl(MissionControlLifecycleMixin):
         self._update_wall_mapping_progress()
 
     def _update_wall_mapping_progress(self) -> WallMappingSnapshot:
-        """Publish throttled wall-surface coverage without steering agents."""
+        """Publish wall coverage and start homing at exact completion."""
+        was_complete = self.wall_mapping_progress.complete
         versions = tuple(drone.slam_map.version for drone in self.drones)
         if versions == self.wall_mapping_progress.slam_versions:
             progress = self.wall_mapping_progress
@@ -466,6 +443,16 @@ class MissionControl(MissionControlLifecycleMixin):
                 ),
             )
         self.wall_mapping_progress = progress
+        if progress.complete and not was_complete:
+            for drone in self.drones:
+                drone.runtime_state.start_returning_home()
+            if self.runtime_trace is not None:
+                self.runtime_trace.record(
+                    "team_wall_mapping_complete",
+                    mapped_wall_pixels=progress.mapped_wall_pixels,
+                    total_wall_pixels=progress.total_wall_pixels,
+                    drone_count=len(self.drones),
+                )
         now = self.simulation_time()
         if (
             self.control_center is not None
@@ -475,6 +462,11 @@ class MissionControl(MissionControlLifecycleMixin):
                 >= self.explored_update_interval
             )
         ):
-            self.control_center.set_explored_percent(round(progress.ratio * 100))
+            displayed_percent = (
+                100
+                if progress.complete
+                else min(99, int(progress.ratio * 100.0))
+            )
+            self.control_center.set_explored_percent(displayed_percent)
             self.last_explored_update = now
         return progress

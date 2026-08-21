@@ -8,10 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config.simulation_config import (
+    ExplorationConfig,
+    FrontierConfig,
     SimulationConfig,
     SlamConfig,
     TraceConfig,
-    WaypointConfig,
 )
 from mission.runtime_trace import RuntimeTraceLogger
 from mapping.poi import POI
@@ -53,7 +54,17 @@ class HelperAndModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TraceConfig(directory="")
         with self.assertRaises(ValueError):
-            WaypointConfig(spatial_hash_cell=4, merge_radius=4.0)
+            ExplorationConfig(wall_direction_bias=-1.0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(minimum_cluster_cells=0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(distance_band=0.0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(cluster_size_weight=-1.0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(global_cell_size=0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(global_refresh_interval=-1.0)
 
     def test_runtime_trace_writes_jsonl_events(self) -> None:
         self.assertEqual(RuntimeTraceLogger.SCHEMA_VERSION, 3)
@@ -217,6 +228,49 @@ class HelperAndModelTests(unittest.TestCase):
         self.assertIn("waypoint segment paths: astar=1", summary)
         self.assertIn("Characterization:", summary)
         self.assertIn("waypoint routes: calls=1 ok=1 failed=0", summary)
+
+    def test_trace_analyzer_summarizes_clusters_and_partial_astar(self) -> None:
+        lines = summarize([
+            {"event": "trace_started", "path": "example.jsonl"},
+            {
+                "event": "drone_random_direction_selected",
+                "drone_id": 0,
+                "selection_mode": "wall_tracking",
+                "frontier_cluster_count": 5,
+                "eligible_frontier_cluster_count": 2,
+                "filtered_frontier_cluster_count": 3,
+                "selected_frontier_cluster_size": 12,
+                "selected_frontier_cluster_score": 4.25,
+                "selected_frontier_cluster_size_rank": 1.0,
+                "selected_frontier_cluster_proximity": 0.25,
+                "wall_frontier_candidate_count": 2,
+                "generic_frontier_candidate_count": 1,
+            },
+            {
+                "event": "drone_homing_path",
+                "drone_id": 0,
+                "path_status": "partial_limit",
+            },
+            {
+                "event": "drone_astar_partial_segment",
+                "drone_id": 0,
+                "accepted": True,
+            },
+        ])
+        summary = "\n".join(lines)
+
+        self.assertIn("selected=1 avg_size=12.0 max_size=12", summary)
+        self.assertIn(
+            "observed=5 eligible=2 filtered=3 wall_candidates=2 "
+            "generic_candidates=1",
+            summary,
+        )
+        self.assertIn(
+            "avg_score=4.25 avg_size_rank=1.00 avg_proximity=0.25",
+            summary,
+        )
+        self.assertIn("A* path statuses: home:partial_limit=1", summary)
+        self.assertIn("A* partial segments: accepted=1", summary)
 
     def test_configuration_resources_and_options_are_available(self) -> None:
         self.assertEqual(GameOptions.MAP_SIZE, ["Small", "Medium", "Large"])

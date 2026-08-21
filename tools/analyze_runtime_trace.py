@@ -1742,9 +1742,6 @@ def _schema_validation(
 ) -> TraceSchemaValidationMetrics:
     """Validate required schema-v3 fields without rejecting legacy traces."""
     requirements: Mapping[str, tuple[tuple[str, ...], ...]] = {
-        "mission_constructed": (
-            ("mcts_decision_time_budget_ms",),
-        ),
         "drone_waypoint_route": (
             ("drone_id",),
             ("target",),
@@ -1803,6 +1800,12 @@ def _schema_validation(
             ("mcts", "iterations"),
             ("mcts", "root_coverage_complete"),
             ("mcts", "budget_ms"),
+        ),
+        "drone_local_policy_decision": (
+            ("drone_id",),
+            ("decision",),
+            ("decision", "exploration_mode"),
+            ("decision", "local_primitive"),
         ),
         "drone_watchdog": (
             ("drone_id",),
@@ -1996,6 +1999,7 @@ def _navigation_acceptance_counts(
     pending_watchdogs: dict[int, tuple[bool, str]] = {}
     planning_tick_events = DECISION_EVENTS | {
         "drone_local_mcts_decision",
+        "drone_local_policy_decision",
         "drone_navigation_tick",
         "drone_intent_result",
     }
@@ -2358,20 +2362,21 @@ def format_characterization(metrics: RuntimeTraceMetrics) -> list[str]:
             f"{drone_metrics.reversal_opportunities} "
             f"({_format_rate(drone_metrics.reversal_rate)})"
         )
-    lines.append(
-        "  MCTS: "
-        f"searches={mcts.search_count} "
-        f"iterations_le_1={mcts.at_most_one_iteration_count} "
-        f"({_format_rate(mcts.at_most_one_iteration_rate)}) "
-        f"median={_format_optional(mcts.median_elapsed_ms, 'ms')} "
-        f"mean={_format_optional(mcts.mean_elapsed_ms, 'ms')} "
-        f"p99={_format_optional(mcts.p99_elapsed_ms, 'ms')} "
-        f"max={_format_optional(mcts.maximum_elapsed_ms, 'ms')} "
-        f"incomplete_roots={mcts.incomplete_root_coverage_count} "
-        f"over_budget={mcts.over_budget_count}/"
-        f"{mcts.timing_sample_count} "
-        f"budget={mcts.budget_ms:.2f}ms[{mcts.budget_source}]"
-    )
+    if mcts.search_count or mcts.timing_sample_count:
+        lines.append(
+            "  legacy MCTS: "
+            f"searches={mcts.search_count} "
+            f"iterations_le_1={mcts.at_most_one_iteration_count} "
+            f"({_format_rate(mcts.at_most_one_iteration_rate)}) "
+            f"median={_format_optional(mcts.median_elapsed_ms, 'ms')} "
+            f"mean={_format_optional(mcts.mean_elapsed_ms, 'ms')} "
+            f"p99={_format_optional(mcts.p99_elapsed_ms, 'ms')} "
+            f"max={_format_optional(mcts.maximum_elapsed_ms, 'ms')} "
+            f"incomplete_roots={mcts.incomplete_root_coverage_count} "
+            f"over_budget={mcts.over_budget_count}/"
+            f"{mcts.timing_sample_count} "
+            f"budget={mcts.budget_ms:.2f}ms[{mcts.budget_source}]"
+        )
     lines.append(
         "  waypoint routes: "
         f"calls={routes.route_calls} "
@@ -2436,13 +2441,6 @@ def format_characterization(metrics: RuntimeTraceMetrics) -> list[str]:
             f"watchdog_delays={acceptance.watchdog_transition_delays}"
         ),
         (
-            "  MCTS gates: "
-            f"p99={_format_optional(acceptance.mcts_p99_elapsed_ms, 'ms')} "
-            f"max={_format_optional(acceptance.mcts_maximum_elapsed_ms, 'ms')} "
-            f"incomplete_roots={acceptance.incomplete_root_coverage_count} "
-            f"unsafe_incomplete={acceptance.unsafe_incomplete_search_count}"
-        ),
-        (
             "  route execution gates: "
             "repeated_cache_hit="
             f"{_format_rate(acceptance.repeated_route_cache_hit_rate)} "
@@ -2464,6 +2462,14 @@ def format_characterization(metrics: RuntimeTraceMetrics) -> list[str]:
             f"legacy_fields={acceptance.legacy_trace_fields_present}"
         ),
     ])
+    if mcts.search_count or mcts.timing_sample_count:
+        lines.append(
+            "  legacy MCTS gates: "
+            f"p99={_format_optional(acceptance.mcts_p99_elapsed_ms, 'ms')} "
+            f"max={_format_optional(acceptance.mcts_maximum_elapsed_ms, 'ms')} "
+            f"incomplete_roots={acceptance.incomplete_root_coverage_count} "
+            f"unsafe_incomplete={acceptance.unsafe_incomplete_search_count}"
+        )
     return lines
 
 
@@ -2492,6 +2498,25 @@ def summarize(
     waypoint_segment_sources: dict[int, Counter[str]] = defaultdict(Counter)
     waypoint_route_time_total: dict[int, float] = defaultdict(float)
     waypoint_route_time_max: dict[int, float] = defaultdict(float)
+    stagnation_scan_dispositions: dict[int, Counter[str]] = defaultdict(
+        Counter
+    )
+    stagnation_scan_sensor_cells: dict[int, int] = defaultdict(int)
+    stagnation_scan_confidence_gain: dict[int, float] = defaultdict(float)
+    heading_selection_modes: dict[int, Counter[str]] = defaultdict(Counter)
+    heading_cluster_sizes: dict[int, list[int]] = defaultdict(list)
+    heading_cluster_scores: dict[int, list[tuple[float, float, float]]] = (
+        defaultdict(list)
+    )
+    heading_cluster_totals: dict[int, Counter[str]] = defaultdict(Counter)
+    global_frontier_sizes: dict[int, list[int]] = defaultdict(list)
+    global_frontier_distances: dict[int, list[float]] = defaultdict(list)
+    global_frontier_cache_ms: dict[int, list[float]] = defaultdict(list)
+    global_frontier_cache_totals: dict[int, Counter[str]] = defaultdict(
+        Counter
+    )
+    astar_path_statuses: dict[int, Counter[str]] = defaultdict(Counter)
+    partial_segment_outcomes: dict[int, Counter[str]] = defaultdict(Counter)
     waypoint_graph_size: dict[int, tuple[int, int]] = {}
     last_frame: dict[str, Any] | None = None
     trace_path = "-"
@@ -2509,6 +2534,86 @@ def summarize(
             continue
         drone_id = int(drone_id)
         per_drone_counts[drone_id][event_name] += 1
+        if event_name == "drone_stagnation_scan_completed":
+            stagnation_scan_dispositions[drone_id][
+                str(event.get("disposition", "unknown"))
+            ] += 1
+            stagnation_scan_sensor_cells[drone_id] += int(
+                event.get("sensor_newly_known_cells", 0) or 0
+            )
+            stagnation_scan_confidence_gain[drone_id] += float(
+                event.get("sensor_confidence_gain", 0.0) or 0.0
+            )
+        if event_name == "drone_random_direction_selected":
+            heading_selection_modes[drone_id][
+                str(event.get("selection_mode", "legacy_uniform"))
+            ] += 1
+            selected_size = int(
+                event.get("selected_frontier_cluster_size", 0) or 0
+            )
+            if selected_size > 0:
+                heading_cluster_sizes[drone_id].append(selected_size)
+            if (
+                selected_size > 0
+                and "selected_frontier_cluster_score" in event
+            ):
+                heading_cluster_scores[drone_id].append((
+                    float(event.get("selected_frontier_cluster_score", 0.0)),
+                    float(event.get(
+                        "selected_frontier_cluster_size_rank", 0.0,
+                    )),
+                    float(event.get(
+                        "selected_frontier_cluster_proximity", 0.0,
+                    )),
+                ))
+            heading_cluster_totals[drone_id]["observed"] += int(
+                event.get("frontier_cluster_count", 0) or 0
+            )
+            heading_cluster_totals[drone_id]["eligible"] += int(
+                event.get("eligible_frontier_cluster_count", 0) or 0
+            )
+            heading_cluster_totals[drone_id]["filtered"] += int(
+                event.get("filtered_frontier_cluster_count", 0) or 0
+            )
+            heading_cluster_totals[drone_id]["wall_candidates"] += int(
+                event.get("wall_frontier_candidate_count", 0) or 0
+            )
+            heading_cluster_totals[drone_id]["generic_candidates"] += int(
+                event.get("generic_frontier_candidate_count", 0) or 0
+            )
+            if bool(event.get("global_frontier_active", False)):
+                global_frontier_sizes[drone_id].append(int(
+                    event.get("global_frontier_region_size", 0) or 0
+                ))
+                distance = event.get("global_frontier_region_distance")
+                if distance is not None:
+                    global_frontier_distances[drone_id].append(
+                        float(distance)
+                    )
+        if event_name == "drone_global_frontiers_rebuilt":
+            global_frontier_cache_ms[drone_id].append(float(
+                event.get("elapsed_ms", 0.0) or 0.0
+            ))
+            global_frontier_cache_totals[drone_id]["regions"] += int(
+                event.get("region_count", 0) or 0
+            )
+            global_frontier_cache_totals[drone_id]["eligible"] += int(
+                event.get("eligible_region_count", 0) or 0
+            )
+            global_frontier_cache_totals[drone_id]["filtered"] += int(
+                event.get("filtered_region_count", 0) or 0
+            )
+        if event_name in {"drone_border_path", "drone_homing_path"}:
+            route_kind = (
+                "home" if event_name == "drone_homing_path" else "border"
+            )
+            astar_path_statuses[drone_id][
+                f"{route_kind}:{event.get('path_status', 'legacy')}"
+            ] += 1
+        if event_name == "drone_astar_partial_segment":
+            partial_segment_outcomes[drone_id][
+                "accepted" if event.get("accepted") else "rejected"
+            ] += 1
         last_by_drone[drone_id].append(event)
         if event_name == "drone_waypoint_route":
             waypoint_route_statuses[drone_id][
@@ -2572,6 +2677,29 @@ def summarize(
         lines.extend(["", f"Drone {drone_id}:"])
         counts = per_drone_counts[drone_id]
         interesting = (
+            "drone_random_direction_selected",
+            "drone_global_frontiers_rebuilt",
+            "drone_slam_frontiers_refreshed",
+            "drone_random_step",
+            "drone_border_path",
+            "drone_homing_path",
+            "drone_astar_partial_segment",
+            "drone_partial_frontier_route_cancelled",
+            "drone_border_target_suppressed",
+            "drone_recovery_reoriented",
+            "drone_recovery_no_outgoing_heading",
+            "drone_no_reachable_border",
+            "drone_stagnation_window",
+            "drone_stagnation_detected",
+            "drone_stagnation_reoriented",
+            "drone_stagnation_scan_started",
+            "drone_stagnation_scan_completed",
+            "drone_stagnation_scan_exit_reoriented",
+            "drone_stagnation_scan_no_safe_exit",
+            "drone_stagnation_frontier_filter",
+            "drone_stagnation_frontier_path",
+            "drone_stagnation_arrival_reoriented",
+            "drone_stagnation_unresolved",
             "drone_decision",
             "drone_post_rebuild_decision",
             "drone_policy_exhausted",
@@ -2585,6 +2713,7 @@ def summarize(
             "drone_frontier_targets_exhausted",
             "frontier_continuation_retained",
             "frontier_continuation_suppressed",
+            "frontier_wall_tracking_advanced",
             "drone_policy_path_invalid",
             "drone_start_homing_after_exhaustion",
             "sensor_scan",
@@ -2593,6 +2722,91 @@ def summarize(
         for name in interesting:
             if counts[name]:
                 lines.append(f"  {name}: {counts[name]}")
+        if stagnation_scan_dispositions[drone_id]:
+            outcomes = ", ".join(
+                f"{disposition}={count}"
+                for disposition, count in stagnation_scan_dispositions[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(
+                "  directed scan outcomes: "
+                f"{outcomes}; "
+                f"sensor_cells={stagnation_scan_sensor_cells[drone_id]} "
+                "confidence_gain="
+                f"{stagnation_scan_confidence_gain[drone_id]:.2f}"
+            )
+        if heading_selection_modes[drone_id]:
+            modes = ", ".join(
+                f"{mode}={count}"
+                for mode, count in heading_selection_modes[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(f"  heading selection modes: {modes}")
+        cluster_sizes = heading_cluster_sizes[drone_id]
+        if cluster_sizes or heading_cluster_totals[drone_id]["observed"]:
+            totals = heading_cluster_totals[drone_id]
+            size_summary = (
+                f"selected={len(cluster_sizes)} "
+                f"avg_size={sum(cluster_sizes) / len(cluster_sizes):.1f} "
+                f"max_size={max(cluster_sizes)}"
+                if cluster_sizes
+                else "selected=0"
+            )
+            lines.append(
+                "  heading frontier clusters: "
+                f"{size_summary}; observed={totals['observed']} "
+                f"eligible={totals['eligible']} filtered={totals['filtered']} "
+                f"wall_candidates={totals['wall_candidates']} "
+                f"generic_candidates={totals['generic_candidates']}"
+            )
+            score_terms = heading_cluster_scores[drone_id]
+            if score_terms:
+                lines.append(
+                    "  selected cluster score terms: "
+                    f"avg_score={sum(v[0] for v in score_terms) / len(score_terms):.2f} "
+                    f"avg_size_rank={sum(v[1] for v in score_terms) / len(score_terms):.2f} "
+                    f"avg_proximity={sum(v[2] for v in score_terms) / len(score_terms):.2f}"
+                )
+        global_sizes = global_frontier_sizes[drone_id]
+        if global_sizes:
+            global_distances = global_frontier_distances[drone_id]
+            lines.append(
+                "  active global frontier guidance: "
+                f"decisions={len(global_sizes)} "
+                f"avg_size={sum(global_sizes) / len(global_sizes):.1f} "
+                f"max_size={max(global_sizes)} "
+                f"avg_distance={sum(global_distances) / len(global_distances):.1f}px"
+            )
+        cache_times = global_frontier_cache_ms[drone_id]
+        if cache_times:
+            totals = global_frontier_cache_totals[drone_id]
+            lines.append(
+                "  global frontier cache: "
+                f"rebuilds={len(cache_times)} "
+                f"avg_ms={sum(cache_times) / len(cache_times):.2f} "
+                f"max_ms={max(cache_times):.2f} "
+                f"avg_regions={totals['regions'] / len(cache_times):.1f} "
+                f"avg_eligible={totals['eligible'] / len(cache_times):.1f} "
+                f"avg_filtered={totals['filtered'] / len(cache_times):.1f}"
+            )
+        if astar_path_statuses[drone_id]:
+            statuses = ", ".join(
+                f"{status}={count}"
+                for status, count in astar_path_statuses[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(f"  A* path statuses: {statuses}")
+        if partial_segment_outcomes[drone_id]:
+            outcomes = ", ".join(
+                f"{outcome}={count}"
+                for outcome, count in partial_segment_outcomes[
+                    drone_id
+                ].most_common()
+            )
+            lines.append(f"  A* partial segments: {outcomes}")
         if waypoint_route_statuses[drone_id]:
             statuses = ", ".join(
                 f"{status}={count}"
@@ -2637,16 +2851,15 @@ def summarize(
         decision = last_decision.get(drone_id)
         if decision is not None:
             summary = decision.get("decision", {})
-            mcts = decision.get("mcts") or {}
             lines.append(
                 "  last decision: "
                 f"{summary.get('kind')} "
+                f"mode={summary.get('exploration_mode')} "
                 f"target={summary.get('target')} "
                 f"dir={summary.get('direction')} "
                 f"path={summary.get('planned_path_len')} "
                 f"frontiers={summary.get('frontier_count')} "
-                f"mcts={mcts.get('selected_kind')} "
-                f"reward={mcts.get('selected_reward')}"
+                f"primitive={summary.get('local_primitive')}"
             )
 
         lines.append("  last events:")
