@@ -35,8 +35,16 @@ class MissionRenderer:
             window.fill(Colors.BLACK.value)
         dependencies.slam_view.draw()
 
-        # Layer order: historical paths, translucent vision cones, icons, then
-        # the control center.
+        sector_renderer = dependencies.sector_renderer
+        if sector_renderer is not None:
+            sector_renderer.draw(
+                window,
+                dependencies.get_sector_snapshot(),
+                {drone.id: drone.color for drone in drones},
+            )
+
+        # Layer order: SLAM, sectors, historical paths, translucent vision
+        # cones, icons, then the control center.
         for drone, snapshot in zip(drones, drone_snapshots):
             drone.renderer.draw_path(snapshot)
         for rover in rovers:

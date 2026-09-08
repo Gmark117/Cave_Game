@@ -3,7 +3,6 @@
 from collections import deque
 from dataclasses import dataclass
 from itertools import islice
-import math
 import threading
 from typing import Deque, Iterable, Optional, Tuple
 
@@ -13,6 +12,7 @@ from mapping.vision_sensor import RayHit
 UNKNOWN = -1
 FREE = 0
 OCCUPIED = 1
+OCCUPANCY_OBSERVATION_CONFIDENCE = 1.0
 
 Point = Tuple[int, int]
 
@@ -109,7 +109,6 @@ class SlamMap:
         self._collision_newly_known_cells = 0
         self._collision_confidence_gain = 0.0
 
-        self.max_range = max(1.0, float(math.hypot(map_w, map_h)))
         self.max_points = max(0, int(max_points))
 
     @property
@@ -201,7 +200,7 @@ class SlamMap:
         origin: Tuple[float, float],
         ray_hits: Iterable[RayHit],
     ) -> bool:
-        """Update occupancy and point state from rays, returning whether it changed."""
+        """Update occupancy from rays at uniform confidence."""
         _ = origin
 
         with self._lock:
@@ -221,23 +220,17 @@ class SlamMap:
                 if not points:
                     continue
 
-                distance = float(hit.distance)
-                base_confidence = max(
-                    0.15,
-                    1.0 - (distance / self.max_range),
-                )
-
                 if hit.hit:
                     updated |= self._mark_points(
                         points[:-1],
                         FREE,
-                        base_confidence,
+                        OCCUPANCY_OBSERVATION_CONFIDENCE,
                         progress,
                     )
                     updated |= self._mark_points(
                         [points[-1]],
                         OCCUPIED,
-                        min(1.0, base_confidence + 0.25),
+                        OCCUPANCY_OBSERVATION_CONFIDENCE,
                         progress,
                     )
                     updated |= self._add_point(points[-1])
@@ -245,7 +238,7 @@ class SlamMap:
                     updated |= self._mark_points(
                         points,
                         FREE,
-                        base_confidence,
+                        OCCUPANCY_OBSERVATION_CONFIDENCE,
                         progress,
                     )
 
@@ -263,35 +256,24 @@ class SlamMap:
         free_cells: Iterable[Point],
         occupied_cells: Iterable[Point],
     ) -> bool:
-        """Update SLAM from one gap-free visibility observation."""
+        """Update SLAM from one gap-free, uniform-confidence observation."""
+        _ = origin
         free = tuple(dict.fromkeys(
             (int(point[0]), int(point[1])) for point in free_cells
         ))
         occupied = tuple(dict.fromkeys(
             (int(point[0]), int(point[1])) for point in occupied_cells
         ))
-        all_cells = (*free, *occupied)
-        farthest = max(
-            (math.dist(origin, point) for point in all_cells),
-            default=0.0,
-        )
-        base_confidence = max(
-            0.15,
-            1.0 - (farthest / self.max_range),
-        )
-
         with self._lock:
             progress = _ProgressDelta()
-            updated = self._mark_points(
+            updated = self._mark_uniform_points(
                 free,
                 FREE,
-                base_confidence,
                 progress,
             )
-            updated |= self._mark_points(
+            updated |= self._mark_uniform_points(
                 occupied,
                 OCCUPIED,
-                min(1.0, base_confidence + 0.25),
                 progress,
             )
             for point in occupied:
@@ -302,6 +284,106 @@ class SlamMap:
             self._sensor_newly_known_cells += progress.newly_known_cells
             self._sensor_confidence_gain += progress.confidence_gain
             return updated
+
+    def _mark_uniform_points(
+        self,
+        points: tuple[Point, ...],
+        occupancy_value: int,
+        progress: _ProgressDelta,
+    ) -> bool:
+        """Apply saturated uniform evidence to many cells in one array pass."""
+        if not points:
+            return False
+
+        coordinates = np.asarray(points, dtype=np.intp)
+        x = coordinates[:, 0]
+        y = coordinates[:, 1]
+        in_bounds = (
+            (y >= 0)
+            & (y < self._confidence.shape[0])
+            & (x >= 0)
+            & (x < self._confidence.shape[1])
+        )
+        if not np.any(in_bounds):
+            return False
+        x = x[in_bounds]
+        y = y[in_bounds]
+
+        previous_confidence = self._confidence[y, x].copy()
+        previous_occupancy = self._occupancy[y, x].copy()
+        current_confidence = previous_confidence.copy()
+        current_occupancy = previous_occupancy.copy()
+
+        stronger = (
+            OCCUPANCY_OBSERVATION_CONFIDENCE
+            > previous_confidence + 1e-4
+        )
+        current_occupancy[stronger] = occupancy_value
+        current_confidence[stronger] = (
+            OCCUPANCY_OBSERVATION_CONFIDENCE
+        )
+
+        occupied_ties = np.zeros_like(stronger)
+        if occupancy_value == OCCUPIED:
+            occupied_ties = (
+                ~stronger
+                & (previous_occupancy != OCCUPIED)
+                & (
+                    OCCUPANCY_OBSERVATION_CONFIDENCE
+                    >= previous_confidence - 1e-4
+                )
+            )
+            current_occupancy[occupied_ties] = OCCUPIED
+            current_confidence[occupied_ties] = np.minimum(
+                1.0,
+                np.maximum(
+                    previous_confidence[occupied_ties],
+                    OCCUPANCY_OBSERVATION_CONFIDENCE,
+                ),
+            )
+
+        matching = (
+            ~stronger
+            & ~occupied_ties
+            & (previous_occupancy == occupancy_value)
+        )
+        boosted_confidence = np.minimum(
+            1.0,
+            previous_confidence
+            + OCCUPANCY_OBSERVATION_CONFIDENCE * 0.15,
+        )
+        boosting = (
+            matching
+            & (boosted_confidence > previous_confidence + 1e-4)
+        )
+        current_confidence[boosting] = boosted_confidence[boosting]
+
+        confidence_delta = np.maximum(
+            0.0,
+            current_confidence.astype(np.float64)
+            - previous_confidence.astype(np.float64),
+        )
+        changed = (
+            (current_occupancy != previous_occupancy)
+            | (confidence_delta > 1e-4)
+        )
+        if np.any(changed):
+            self._occupancy[y[changed], x[changed]] = (
+                current_occupancy[changed]
+            )
+            self._confidence[y[changed], x[changed]] = (
+                current_confidence[changed]
+            )
+
+        progress.newly_known_cells += int(np.count_nonzero(
+            (previous_occupancy == UNKNOWN)
+            & (current_occupancy != UNKNOWN)
+        ))
+        progress.confidence_gain += float(np.sum(
+            confidence_delta,
+            dtype=np.float64,
+        ))
+        return bool(np.any(changed))
 
     def merge_from(self, source: SlamSnapshot) -> bool:
         """Merge a detached snapshot using confidence dominance."""

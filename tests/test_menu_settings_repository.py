@@ -69,6 +69,7 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 map_dim="LARGE",
                 seed=444,
                 num_drones=6,
+                wall_completion_tolerance_pixels=17,
             ),
             slam=replace(defaults.slam, scan_interval=0.5),
             sharing=replace(defaults.sharing, pair_cooldown=2.5),
@@ -76,12 +77,15 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 defaults.frontier,
                 confidence_threshold=0.75,
                 minimum_cluster_cells=9,
+                minimum_unknown_support_cells=81,
                 distance_band=20.0,
                 wall_continuation_weight=2.5,
                 cluster_size_weight=3.0,
                 cluster_proximity_weight=0.5,
                 global_cell_size=24,
                 global_refresh_interval=3.0,
+                global_ownership_weight=2.75,
+                maximum_path_circuity=3.5,
             ),
             exploration=replace(
                 defaults.exploration,
@@ -91,6 +95,10 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 wall_direction_bias=5.0,
                 unexplored_direction_bias=2.5,
                 separation_direction_bias=1.25,
+                coverage_memory_cell_size=24,
+                coverage_memory_decay_seconds=240.0,
+                coverage_visit_weight=1.75,
+                coverage_edge_weight=2.25,
             ),
             rendering=replace(defaults.rendering, refresh_interval=0.2),
             trace=replace(defaults.trace, enabled=True),
@@ -183,12 +191,15 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "stride",
                 "rebuild_cooldown",
                 "minimum_cluster_cells",
+                "minimum_unknown_support_cells",
                 "distance_band",
                 "wall_continuation_weight",
                 "cluster_size_weight",
                 "cluster_proximity_weight",
                 "global_cell_size",
                 "global_refresh_interval",
+                "global_ownership_weight",
+                "maximum_path_circuity",
             },
         )
         self.assertEqual(
@@ -200,6 +211,10 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "wall_direction_bias",
                 "unexplored_direction_bias",
                 "separation_direction_bias",
+                "coverage_memory_cell_size",
+                "coverage_memory_decay_seconds",
+                "coverage_visit_weight",
+                "coverage_edge_weight",
             },
         )
 
@@ -209,12 +224,18 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         self.assertEqual(defaults.frontier.stride, 4)
         self.assertEqual(defaults.frontier.confidence_threshold, 0.6)
         self.assertEqual(defaults.frontier.minimum_cluster_cells, 12)
+        self.assertEqual(
+            defaults.frontier.minimum_unknown_support_cells,
+            64,
+        )
         self.assertEqual(defaults.frontier.distance_band, 16.0)
         self.assertEqual(defaults.frontier.wall_continuation_weight, 2.0)
         self.assertEqual(defaults.frontier.cluster_size_weight, 2.0)
         self.assertEqual(defaults.frontier.cluster_proximity_weight, 1.0)
         self.assertEqual(defaults.frontier.global_cell_size, 32)
         self.assertEqual(defaults.frontier.global_refresh_interval, 2.0)
+        self.assertEqual(defaults.frontier.global_ownership_weight, 2.0)
+        self.assertEqual(defaults.frontier.maximum_path_circuity, 4.0)
         self.assertEqual(defaults.exploration.policy, "random")
         self.assertEqual(defaults.exploration.stagnation_distance, 120.0)
         self.assertEqual(
@@ -224,6 +245,13 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         self.assertEqual(defaults.exploration.wall_direction_bias, 4.0)
         self.assertEqual(defaults.exploration.unexplored_direction_bias, 2.0)
         self.assertEqual(defaults.exploration.separation_direction_bias, 1.5)
+        self.assertEqual(defaults.exploration.coverage_memory_cell_size, 32)
+        self.assertEqual(
+            defaults.exploration.coverage_memory_decay_seconds,
+            180.0,
+        )
+        self.assertEqual(defaults.exploration.coverage_visit_weight, 1.5)
+        self.assertEqual(defaults.exploration.coverage_edge_weight, 2.0)
 
     def test_legacy_navigation_keys_are_readable_but_ignored(self) -> None:
         temporary_directory, repository = self.make_repository()
@@ -273,12 +301,15 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "stride",
                 "rebuild_cooldown",
                 "minimum_cluster_cells",
+                "minimum_unknown_support_cells",
                 "distance_band",
                 "wall_continuation_weight",
                 "cluster_size_weight",
                 "cluster_proximity_weight",
                 "global_cell_size",
                 "global_refresh_interval",
+                "global_ownership_weight",
+                "maximum_path_circuity",
             },
         )
         self.assertEqual(
@@ -290,6 +321,10 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "wall_direction_bias",
                 "unexplored_direction_bias",
                 "separation_direction_bias",
+                "coverage_memory_cell_size",
+                "coverage_memory_decay_seconds",
+                "coverage_visit_weight",
+                "coverage_edge_weight",
             },
         )
         self.assertFalse(config.has_section("WAYPOINTS"))

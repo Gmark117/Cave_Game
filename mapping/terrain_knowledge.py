@@ -16,6 +16,7 @@ class TerrainSnapshot:
 
     roughness: np.ndarray
     confidence: np.ndarray
+    version: int = 0
 
     def __post_init__(self) -> None:
         """Validate that paired terrain arrays describe the same grid."""
@@ -29,38 +30,79 @@ def fuse_terrain_samples(
     cave_map: np.ndarray,
     samples: Iterable[TerrainSample],
 ) -> bool:
-    """Fuse observations into supplied arrays using confidence weighting."""
-    map_updated = False
-    for x, y, observed_roughness, observed_confidence in samples:
-        xi = int(x)
-        yi = int(y)
-        if (
-            yi < 0
-            or yi >= roughness.shape[0]
-            or xi < 0
-            or xi >= roughness.shape[1]
-        ):
-            continue
-        if cave_map[yi, xi] != 0:
-            continue
+    """Fuse one scan in bulk using confidence-weighted cell aggregates."""
+    materialized = tuple(samples)
+    if not materialized:
+        return False
+    observations = np.asarray(materialized, dtype=np.float64)
+    if observations.ndim != 2 or observations.shape[1] != 4:
+        raise ValueError("terrain samples must contain x, y, value, confidence")
 
-        obs_conf = float(np.clip(observed_confidence, 0.05, 1.0))
-        obs_rough = float(np.clip(observed_roughness, 0.0, 1.0))
-        previous_conf = float(confidence[yi, xi])
-        previous_rough = (
-            float(roughness[yi, xi]) if previous_conf > 0.0 else obs_rough
-        )
-        total_conf = previous_conf + obs_conf
+    x = observations[:, 0].astype(np.intp)
+    y = observations[:, 1].astype(np.intp)
+    valid = (
+        (y >= 0)
+        & (y < roughness.shape[0])
+        & (x >= 0)
+        & (x < roughness.shape[1])
+    )
+    if not np.any(valid):
+        return False
+    x = x[valid]
+    y = y[valid]
+    observed_roughness = np.clip(observations[valid, 2], 0.0, 1.0)
+    observed_confidence = np.clip(
+        observations[valid, 3],
+        0.05,
+        1.0,
+    )
 
-        # Confidence weighting makes repeated measurements gradually dominate
-        # one-off noisy readings while keeping values bounded to 0..1.
-        roughness[yi, xi] = (
-            (previous_rough * previous_conf) + (obs_rough * obs_conf)
-        ) / total_conf
-        confidence[yi, xi] = min(1.0, total_conf)
-        map_updated = True
+    floor = np.asarray(cave_map)[y, x] == 0
+    if not np.any(floor):
+        return False
+    x = x[floor]
+    y = y[floor]
+    observed_roughness = observed_roughness[floor]
+    observed_confidence = observed_confidence[floor]
 
-    return map_updated
+    width = roughness.shape[1]
+    flat_coordinates = y * width + x
+    unique_coordinates, inverse = np.unique(
+        flat_coordinates,
+        return_inverse=True,
+    )
+    scan_confidence = np.bincount(
+        inverse,
+        weights=observed_confidence,
+    )
+    scan_weighted_roughness = np.bincount(
+        inverse,
+        weights=observed_roughness * observed_confidence,
+    )
+    unique_y, unique_x = np.divmod(unique_coordinates, width)
+
+    previous_confidence = confidence[unique_y, unique_x].astype(
+        np.float64,
+    )
+    scan_roughness = scan_weighted_roughness / np.maximum(
+        scan_confidence,
+        1e-12,
+    )
+    previous_roughness = np.where(
+        previous_confidence > 0.0,
+        roughness[unique_y, unique_x].astype(np.float64),
+        scan_roughness,
+    )
+    total_confidence = previous_confidence + scan_confidence
+    roughness[unique_y, unique_x] = (
+        (previous_roughness * previous_confidence)
+        + scan_weighted_roughness
+    ) / np.maximum(total_confidence, 1e-12)
+    confidence[unique_y, unique_x] = np.minimum(
+        1.0,
+        total_confidence,
+    )
+    return True
 
 
 class TerrainKnowledge:
@@ -81,6 +123,7 @@ class TerrainKnowledge:
         self.floor_mask = cave == 0
         self.floor_cells = int(np.count_nonzero(self.floor_mask))
         self.lock = threading.RLock()
+        self._version = 0
         self.roughness = self._initial_array(
             roughness,
             fill=-1.0,
@@ -113,12 +156,21 @@ class TerrainKnowledge:
     def record_samples(self, samples: Iterable[TerrainSample]) -> bool:
         """Fuse sensor samples into this knowledge map."""
         with self.lock:
-            return fuse_terrain_samples(
+            changed = fuse_terrain_samples(
                 self.roughness,
                 self.confidence,
                 self.cave_map,
                 samples,
             )
+            if changed:
+                self._version += 1
+            return changed
+
+    @property
+    def version(self) -> int:
+        """Return the monotonic terrain revision without copying map arrays."""
+        with self.lock:
+            return self._version
 
     def snapshot(self) -> TerrainSnapshot:
         """Return detached copies of roughness and confidence."""
@@ -126,6 +178,7 @@ class TerrainKnowledge:
             return TerrainSnapshot(
                 self.roughness.copy(),
                 self.confidence.copy(),
+                version=self._version,
             )
 
     def merge_from(self, source: TerrainSnapshot) -> bool:
@@ -178,6 +231,7 @@ class TerrainKnowledge:
                 + (incoming_rough_values * incoming_conf_values)
             ) / np.maximum(total_confidence, 1e-6)
             target_confidence[valid] = np.minimum(1.0, total_confidence)
+            self._version += 1
             return True
 
     def known_mask(self, threshold: float = 0.0) -> np.ndarray:

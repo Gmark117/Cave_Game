@@ -112,6 +112,9 @@ class MenuSettingsRepository:
             "map_dimension": self._map_name(mission.map_dim),
             "seed": str(mission.seed),
             "drones": str(mission.num_drones),
+            "wall_completion_tolerance_pixels": str(
+                mission.wall_completion_tolerance_pixels
+            ),
         }
         config["SLAM"] = {
             "scan_interval": str(settings.slam.scan_interval),
@@ -142,6 +145,9 @@ class MenuSettingsRepository:
             "minimum_cluster_cells": str(
                 settings.frontier.minimum_cluster_cells
             ),
+            "minimum_unknown_support_cells": str(
+                settings.frontier.minimum_unknown_support_cells
+            ),
             "distance_band": str(settings.frontier.distance_band),
             "wall_continuation_weight": str(
                 settings.frontier.wall_continuation_weight
@@ -157,6 +163,12 @@ class MenuSettingsRepository:
             ),
             "global_refresh_interval": str(
                 settings.frontier.global_refresh_interval
+            ),
+            "global_ownership_weight": str(
+                settings.frontier.global_ownership_weight
+            ),
+            "maximum_path_circuity": str(
+                settings.frontier.maximum_path_circuity
             ),
         }
         config["EXPLORATION"] = {
@@ -175,6 +187,18 @@ class MenuSettingsRepository:
             ),
             "separation_direction_bias": str(
                 settings.exploration.separation_direction_bias
+            ),
+            "coverage_memory_cell_size": str(
+                settings.exploration.coverage_memory_cell_size
+            ),
+            "coverage_memory_decay_seconds": str(
+                settings.exploration.coverage_memory_decay_seconds
+            ),
+            "coverage_visit_weight": str(
+                settings.exploration.coverage_visit_weight
+            ),
+            "coverage_edge_weight": str(
+                settings.exploration.coverage_edge_weight
             ),
         }
         config["RENDERING"] = {
@@ -280,6 +304,10 @@ class MenuSettingsRepository:
             ),
             seed=int(section.get("seed", defaults.seed)),
             num_drones=int(section.get("drones", defaults.num_drones)),
+            wall_completion_tolerance_pixels=int(section.get(
+                "wall_completion_tolerance_pixels",
+                defaults.wall_completion_tolerance_pixels,
+            )),
         )
 
     @staticmethod
@@ -361,6 +389,10 @@ class MenuSettingsRepository:
                 "minimum_cluster_cells",
                 defaults.minimum_cluster_cells,
             )),
+            minimum_unknown_support_cells=int(section.get(
+                "minimum_unknown_support_cells",
+                defaults.minimum_unknown_support_cells,
+            )),
             distance_band=float(section.get(
                 "distance_band",
                 defaults.distance_band,
@@ -384,6 +416,14 @@ class MenuSettingsRepository:
             global_refresh_interval=float(section.get(
                 "global_refresh_interval",
                 defaults.global_refresh_interval,
+            )),
+            global_ownership_weight=float(section.get(
+                "global_ownership_weight",
+                defaults.global_ownership_weight,
+            )),
+            maximum_path_circuity=float(section.get(
+                "maximum_path_circuity",
+                defaults.maximum_path_circuity,
             )),
         )
 
@@ -414,6 +454,22 @@ class MenuSettingsRepository:
             separation_direction_bias=float(section.get(
                 "separation_direction_bias",
                 defaults.separation_direction_bias,
+            )),
+            coverage_memory_cell_size=int(section.get(
+                "coverage_memory_cell_size",
+                defaults.coverage_memory_cell_size,
+            )),
+            coverage_memory_decay_seconds=float(section.get(
+                "coverage_memory_decay_seconds",
+                defaults.coverage_memory_decay_seconds,
+            )),
+            coverage_visit_weight=float(section.get(
+                "coverage_visit_weight",
+                defaults.coverage_visit_weight,
+            )),
+            coverage_edge_weight=float(section.get(
+                "coverage_edge_weight",
+                defaults.coverage_edge_weight,
             )),
         )
 

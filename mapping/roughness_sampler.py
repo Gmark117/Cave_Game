@@ -29,7 +29,7 @@ class RoughnessSampler:
         if self.map_w <= 0 or self.map_h <= 0:
             return []
 
-        samples: List[Tuple[int, int, float, float]] = []
+        coordinates: list[Tuple[int, int]] = []
         for hit in ray_hits:
             ex, ey = int(hit.end[0]), int(hit.end[1])
             if ex < 0 or ey < 0 or ex >= self.map_w or ey >= self.map_h:
@@ -41,10 +41,30 @@ class RoughnessSampler:
                     break
                 if self.map_matrix[y][x] != 0:
                     break
+                coordinates.append((x, y))
+        if not coordinates:
+            return []
 
-                base = float(self.terrain_roughness[y, x])
-                dist = math.dist(origin, (x, y))
-                confidence = max(0.2, 1.0 - (dist / self.max_range))
-                noise = float(np.random.uniform(-0.03, 0.03))
-                samples.append((x, y, min(1.0, max(0.0, base + noise)), confidence))
-        return samples
+        points = np.asarray(coordinates, dtype=np.intp)
+        x = points[:, 0]
+        y = points[:, 1]
+        base = np.asarray(self.terrain_roughness)[y, x].astype(np.float64)
+        distance = np.hypot(
+            x.astype(np.float64) - float(origin[0]),
+            y.astype(np.float64) - float(origin[1]),
+        )
+        confidence = np.maximum(0.2, 1.0 - distance / self.max_range)
+        roughness = np.clip(
+            base + np.random.uniform(-0.03, 0.03, size=len(points)),
+            0.0,
+            1.0,
+        )
+        return [
+            (int(xi), int(yi), float(value), float(weight))
+            for xi, yi, value, weight in zip(
+                x,
+                y,
+                roughness,
+                confidence,
+            )
+        ]

@@ -6,20 +6,43 @@ import numpy as np
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN
-from rendering.slam_renderer import FULL_MAP_UNDERLAY_ALPHA, SlamRenderer
+from rendering.slam_renderer import (
+    FRONTIER_COLOR,
+    FULL_MAP_UNDERLAY_ALPHA,
+    SlamRenderer,
+)
 
 
 class SlamRendererTests(unittest.TestCase):
-    def test_occupancy_render_distinguishes_unknown_free_and_walls(self) -> None:
-        renderer = SlamRenderer(3, 1)
-        occupancy = np.array([[UNKNOWN, FREE, OCCUPIED]], dtype=np.int8)
-        confidence = np.array([[0.0, 1.0, 1.0]], dtype=np.float32)
+    def test_occupancy_render_distinguishes_map_cell_types(self) -> None:
+        renderer = SlamRenderer(4, 1)
+        occupancy = np.array(
+            [[FREE, FREE, UNKNOWN, OCCUPIED]],
+            dtype=np.int8,
+        )
+        confidence = np.array([[1.0, 1.0, 0.0, 1.0]], dtype=np.float32)
 
         surface = renderer.render(occupancy, confidence, draw_points=False)
 
-        self.assertEqual(surface.get_at((0, 0)).a, 0)
-        self.assertEqual(surface.get_at((1, 0))[:3], (255, 255, 255))
-        self.assertGreater(surface.get_at((2, 0)).r, surface.get_at((2, 0)).g)
+        self.assertEqual(surface.get_at((0, 0))[:3], (255, 255, 255))
+        self.assertEqual(surface.get_at((1, 0))[:3], FRONTIER_COLOR)
+        self.assertEqual(surface.get_at((2, 0)).a, 0)
+        self.assertGreater(surface.get_at((3, 0)).r, surface.get_at((3, 0)).g)
+
+    def test_frontier_render_uses_configured_confidence_threshold(self) -> None:
+        renderer = SlamRenderer(
+            3,
+            1,
+            frontier_confidence_threshold=0.8,
+        )
+        occupancy = np.array([[FREE, FREE, FREE]], dtype=np.int8)
+        confidence = np.array([[1.0, 0.5, 1.0]], dtype=np.float32)
+
+        surface = renderer.render(occupancy, confidence, draw_points=False)
+
+        self.assertEqual(surface.get_at((0, 0))[:3], FRONTIER_COLOR)
+        self.assertNotEqual(surface.get_at((1, 0))[:3], FRONTIER_COLOR)
+        self.assertEqual(surface.get_at((2, 0))[:3], FRONTIER_COLOR)
 
     def test_roughness_render_uses_confidence_for_alpha(self) -> None:
         renderer = SlamRenderer(2, 1)

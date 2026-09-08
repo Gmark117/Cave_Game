@@ -6,6 +6,7 @@ regardless of whether the vision overlay is visible.
 """
 
 from dataclasses import dataclass
+import time
 from typing import Any, Iterable
 
 import numpy as np
@@ -91,10 +92,12 @@ class DroneSensorController:
             return
 
         origin = pose_estimate.position
+        vision_started = time.perf_counter()
         vision_scan = self.vision_sensor.scan_cone(
             origin,
             pose_estimate.heading_deg,
         )
+        vision_finished = time.perf_counter()
         ray_hits = vision_scan.ray_hits
         self._last_scan_pose = pose_signature
         self._last_skip_pose_logged = None
@@ -107,12 +110,14 @@ class DroneSensorController:
             free_cells=vision_scan.free_cells,
             occupied_cells=vision_scan.occupied_cells,
         )
+        slam_finished = time.perf_counter()
 
         terrain_samples = self.scan_terrain(
             ray_hits,
             origin=origin,
             now=now,
         )
+        terrain_finished = time.perf_counter()
         progress_after = drone.slam_map.progress_snapshot()
         newly_known_cells = (
             progress_after.sensor_newly_known_cells
@@ -152,6 +157,10 @@ class DroneSensorController:
                 progress_after.sensor_confidence_gain
             ),
             terrain_samples=terrain_samples,
+            vision_elapsed_ms=(vision_finished - vision_started) * 1000.0,
+            slam_elapsed_ms=(slam_finished - vision_finished) * 1000.0,
+            terrain_elapsed_ms=(terrain_finished - slam_finished) * 1000.0,
+            sensor_elapsed_ms=(terrain_finished - vision_started) * 1000.0,
         )
 
     def scan_terrain(

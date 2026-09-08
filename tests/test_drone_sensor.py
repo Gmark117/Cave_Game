@@ -141,6 +141,15 @@ class DroneSensorTests(unittest.TestCase):
             event["visible_cell_count"],
             event["visible_free_cells"] + event["visible_occupied_cells"],
         )
+        self.assertGreaterEqual(event["vision_elapsed_ms"], 0.0)
+        self.assertGreaterEqual(event["slam_elapsed_ms"], 0.0)
+        self.assertGreaterEqual(event["terrain_elapsed_ms"], 0.0)
+        self.assertAlmostEqual(
+            event["sensor_elapsed_ms"],
+            event["vision_elapsed_ms"]
+            + event["slam_elapsed_ms"]
+            + event["terrain_elapsed_ms"],
+        )
         self.assertEqual(
             event["cumulative_sensor_newly_known_cells"],
             progress.sensor_newly_known_cells,

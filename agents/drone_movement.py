@@ -13,6 +13,16 @@ import numpy as np
 
 from asset_config.helpers import next_cell_coords
 from contracts import DroneMovementDependencies
+from mapping.frontiers import (
+    eight_neighbor_adjacency,
+    known_free_frontier_mask,
+)
+from mapping.exploration_sectors import (
+    SectorAssignment,
+    SectorCheckInResult,
+    SectorOutcomeReport,
+    SectorSuppressionOutcome,
+)
 from mapping.ray_geometry import bresenham_line_points
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN
 from navigation.astar_pathfinder import (
@@ -24,7 +34,12 @@ from navigation.astar_pathfinder import (
 
 
 Position = Tuple[int, int]
+CoverageCell = tuple[int, int]
+CoverageEdge = tuple[CoverageCell, CoverageCell]
 logger = logging.getLogger(__name__)
+_GLOBAL_LAUNCH_SECTOR_TIE_RATIO = 0.25
+_GLOBAL_TARGET_SWITCH_SCORE_MARGIN = 0.5
+_PENDING_FRONTIER_SCAN_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -33,11 +48,14 @@ class _PendingFrontierScan:
 
     position: Position
     heading: int
+    resume_heading: float
     frontier_target: Position
     unknown_target: Position
     reason: str
     minimum_scan_sequence: int
     baseline_geometry: tuple[Position, ...] | None
+    requested_at: float
+    deadline: float
 
 
 @dataclass(frozen=True)
@@ -46,6 +64,14 @@ class _PendingFrontierRoute:
 
     target: Position
     recovery_reason: str
+
+
+@dataclass(frozen=True)
+class _CoverageRecord:
+    """Exponentially decaying traversal pressure for one cell or edge."""
+
+    value: float
+    updated_at: float
 
 
 @dataclass(frozen=True)
@@ -102,6 +128,27 @@ class _GlobalFrontierRegion:
 
 
 @dataclass(frozen=True)
+class _GlobalFrontierSelection:
+    """One globally scored region tile and its diagnostic terms."""
+
+    region: _GlobalFrontierRegion | None
+    position: Position | None
+    score: float
+    size_rank: float
+    proximity: float
+    eligible_region_count: int
+    wall_candidate_count: int
+    generic_candidate_count: int
+    requester_distance: float | None
+    nearest_peer_distance: float | None
+    ownership_margin: float
+    launch_sector_alignment: float
+    ownership_contribution: float
+    retained_previous: bool = False
+    previous_region_overlap: float = 0.0
+
+
+@dataclass(frozen=True)
 class _GlobalFrontierCache:
     """Coarse whole-map regions and one stable strategic selection."""
 
@@ -115,6 +162,13 @@ class _GlobalFrontierCache:
     filtered_region_count: int
     wall_candidate_count: int
     generic_candidate_count: int
+    requester_distance: float | None
+    nearest_peer_distance: float | None
+    ownership_margin: float
+    launch_sector_alignment: float
+    ownership_contribution: float
+    target_retained: bool
+    target_region_overlap: float
     slam_version: int
     built_at: float
 
@@ -138,6 +192,11 @@ class _GlobalFrontierGuidance:
     filtered_region_count: int
     wall_candidate_count: int
     generic_candidate_count: int
+    requester_distance: float | None
+    nearest_peer_distance: float | None
+    ownership_margin: float
+    launch_sector_alignment: float
+    ownership_contribution: float
     slam_version: int
 
 
@@ -150,6 +209,10 @@ class _HeadingBias:
     frontier_support: dict[int, float]
     global_support: dict[int, float]
     separation_support: dict[int, float]
+    coverage_cells: dict[int, CoverageCell]
+    coverage_visit_pressure: dict[int, float]
+    coverage_edge_pressure: dict[int, float]
+    coverage_penalty_factor: dict[int, float]
     mode: str
     peer_count: int
     cluster_count: int
@@ -178,11 +241,16 @@ class _HeadingBias:
     global_filtered_region_count: int
     global_wall_candidate_count: int
     global_generic_candidate_count: int
+    global_requester_distance: float | None
+    global_nearest_peer_distance: float | None
+    global_ownership_margin: float
+    global_launch_sector_alignment: float
+    global_ownership_contribution: float
     global_slam_version: int
 
 
 class DroneMovementController:
-    """Explore locally at random and use A* only for escape or homing."""
+    """Explore locally and use A* for frontier recovery and homing."""
 
     def __init__(
         self,
@@ -226,7 +294,21 @@ class DroneMovementController:
             0.0,
             float(getattr(frontier, "global_refresh_interval", 2.0)),
         )
+        self.global_frontier_ownership_weight = max(
+            0.0,
+            float(getattr(frontier, "global_ownership_weight", 2.0)),
+        )
+        self.maximum_frontier_path_circuity = max(
+            1.0,
+            float(getattr(frontier, "maximum_path_circuity", 4.0)),
+        )
         self._last_raw_frontiers: frozenset[Position] = frozenset()
+        self._last_global_raw_frontiers: frozenset[Position] = frozenset()
+        self._last_frontier_mask: np.ndarray | None = None
+        self._frontier_component_targets: dict[
+            Position,
+            tuple[Position, ...],
+        ] = {}
         self._suppressed_frontier_geometry: dict[
             Position,
             tuple[Position, ...] | None,
@@ -247,6 +329,40 @@ class DroneMovementController:
         self.separation_direction_bias = float(
             exploration.separation_direction_bias
         )
+        self.coverage_memory_cell_size = max(
+            1,
+            int(exploration.coverage_memory_cell_size),
+        )
+        self.coverage_memory_decay_seconds = max(
+            1e-9,
+            float(exploration.coverage_memory_decay_seconds),
+        )
+        self.coverage_visit_weight = max(
+            0.0,
+            float(exploration.coverage_visit_weight),
+        )
+        self.coverage_edge_weight = max(
+            0.0,
+            float(exploration.coverage_edge_weight),
+        )
+        coverage_started_at = self._simulation_time()
+        initial_coverage_cell = self._coverage_cell(
+            drone.snapshot().position
+        )
+        self._coverage_cell_visits: dict[
+            CoverageCell,
+            _CoverageRecord,
+        ] = {
+            initial_coverage_cell: _CoverageRecord(
+                value=1.0,
+                updated_at=coverage_started_at,
+            )
+        }
+        self._coverage_edge_visits: dict[
+            CoverageEdge,
+            _CoverageRecord,
+        ] = {}
+        self._coverage_last_cell = initial_coverage_cell
         progress = drone.slam_map.progress_snapshot()
         self._stagnation_sensor_baseline = (
             progress.sensor_newly_known_cells
@@ -261,6 +377,18 @@ class DroneMovementController:
         self._global_frontier_cache: _GlobalFrontierCache | None = None
         self._shared_slam_changed = threading.Event()
         self._frontier_slam_version = -1
+        self._sector_assignment: SectorAssignment | None = None
+        self._sector_assignment_entered = False
+        self._sector_ingress_failures = 0
+        self._sector_check_in_required = self._sector_policy_enabled()
+        self._completed_sector_id: int | None = None
+        self._sector_path_start_index = 0
+        self._sector_empty_confirmations = 0
+        self._sector_waiting_generation: int | None = None
+        self._sector_wait_started_at: float | None = None
+        self._sector_assignment_ready: threading.Event | None = None
+        self._sector_suppression_reasons: dict[int, set[str]] = {}
+        self._sector_suppression_targets: dict[int, set[Position]] = {}
 
     def mark_shared_slam_changed(self) -> None:
         """Request a frontier refresh on the owning movement thread."""
@@ -273,7 +401,6 @@ class DroneMovementController:
         shared_change = self._shared_slam_changed.is_set()
         if shared_change:
             self._shared_slam_changed.clear()
-            self._global_frontier_cache = None
         if state.done or state.returning_home:
             return
 
@@ -309,14 +436,33 @@ class DroneMovementController:
         if self._pending_frontier_scan is not None:
             self._advance_pending_frontier_scan()
             return
-        done, returning_home = drone.runtime_state.evaluate_mission_state()
-        if done:
+        state = drone.snapshot()
+        if state.done:
             return
-        if returning_home:
+        if state.returning_home:
             self._pending_frontier_route = None
             if self.reach_start_point():
                 drone.runtime_state.mark_done()
             return
+
+        if self._sector_policy_enabled():
+            if self._sector_check_in_required:
+                self._advance_sector_check_in()
+                return
+            if self._sector_exhausted():
+                self._start_sector_check_in(
+                    reason="local_frontiers_exhausted"
+                )
+                return
+        else:
+            done, returning_home = drone.runtime_state.evaluate_mission_state()
+            if done:
+                return
+            if returning_home:
+                self._pending_frontier_route = None
+                if self.reach_start_point():
+                    drone.runtime_state.mark_done()
+                return
 
         pending_route = self._pending_frontier_route
         if pending_route is not None:
@@ -348,14 +494,510 @@ class DroneMovementController:
             )
         except AssertionError:
             self.update_borders()
-            if not self.reach_border():
-                self._trace(
-                    "drone_no_reachable_border",
-                    state=self._snapshot_summary(),
-                )
+            if self.reach_border():
+                return
+            if self._recover_to_assigned_sector():
+                return
+            self._trace(
+                "drone_no_reachable_border",
+                state=self._snapshot_summary(),
+            )
             return
 
         self.explore(valid_directions, border_targets, chosen_target)
+
+    def _sector_policy_enabled(self) -> bool:
+        """Return whether this drone was wired to the rover coordinator."""
+        return callable(self.dependencies.sector_check_in)
+
+    def _start_sector_check_in(self, *, reason: str) -> None:
+        """Retire the current assignment and begin the rover rendezvous."""
+        assignment = self._sector_assignment
+        snapshot = self.drone.snapshot()
+        self._sector_check_in_required = True
+        self._completed_sector_id = (
+            None if assignment is None else assignment.sector_id
+        )
+        self._pending_frontier_route = None
+        self._trace(
+            "drone_sector_exhausted",
+            reason=reason,
+            sector_id=self._completed_sector_id,
+            sector_generation=(
+                None if assignment is None else assignment.generation
+            ),
+            position=snapshot.position,
+            position_in_sector=(
+                False
+                if assignment is None
+                else assignment.contains(snapshot.position)
+            ),
+            sector_was_entered=self._sector_assignment_entered,
+            slam_version=self.drone.slam_map.version,
+        )
+        self._advance_sector_check_in()
+
+    def sector_outcome_report(
+        self,
+        completed_sector_id: int | None,
+    ) -> SectorOutcomeReport | None:
+        """Return local component suppression evidence for rover arrival."""
+        assignment = self._sector_assignment
+        if (
+            assignment is None
+            or completed_sector_id != assignment.sector_id
+        ):
+            return None
+        suppressions = tuple(
+            SectorSuppressionOutcome(
+                component_id=component_id,
+                reasons=tuple(sorted(reasons)),
+                sampled_target_count=len(
+                    self._sector_suppression_targets.get(component_id, ())
+                ),
+            )
+            for component_id, reasons in sorted(
+                self._sector_suppression_reasons.items()
+            )
+        )
+        return SectorOutcomeReport(
+            sector_id=assignment.sector_id,
+            generation=assignment.generation,
+            suppressions=suppressions,
+        )
+
+    def _advance_sector_check_in(self) -> None:
+        """Rendezvous once, then await the rover's assignment notification."""
+        callback = self.dependencies.sector_check_in
+        position_callback = self.dependencies.get_check_in_position
+        if not callable(callback) or not callable(position_callback):
+            return
+
+        drone = self.drone
+        ready = self._sector_assignment_ready
+        if ready is not None:
+            if not ready.is_set():
+                return
+            assignment_callback = self.dependencies.sector_assignment
+            if not callable(assignment_callback):
+                return
+            result = assignment_callback(drone.id)
+            self._apply_sector_check_in_result(result)
+            return
+
+        current = drone.snapshot().position
+        rover_position = tuple(position_callback())
+        result = callback(drone.id, self._completed_sector_id)
+        if not isinstance(result, SectorCheckInResult) or not result.arrived:
+            if current != rover_position:
+                path_result = self._compute_path(current, rover_position)
+                followed = bool(path_result.path) and self._follow_path(
+                    path_result.path,
+                    source="sector_checkin_astar",
+                )
+                self._trace(
+                    "drone_sector_check_in_path",
+                    start=current,
+                    target=rover_position,
+                    source="astar",
+                    path_length=len(path_result.path),
+                    path_status=path_result.status,
+                    completed=followed,
+                )
+                current = drone.snapshot().position
+                if (
+                    current != rover_position
+                    and path_result.status == PATH_PARTIAL_LIMIT
+                    and followed
+                ):
+                    return
+            if current != rover_position:
+                history = drone.snapshot().path_history
+                outbound = history[self._sector_path_start_index:]
+                breadcrumb = tuple(reversed(outbound))
+                followed = bool(breadcrumb) and self._follow_path(
+                    breadcrumb,
+                    source="sector_checkin_breadcrumb_fallback",
+                )
+                self._trace(
+                    "drone_sector_check_in_path",
+                    start=current,
+                    target=rover_position,
+                    source="breadcrumb_fallback",
+                    path_length=len(breadcrumb),
+                    completed=followed,
+                )
+            result = callback(drone.id, self._completed_sector_id)
+
+        self._apply_sector_check_in_result(result)
+
+    def _apply_sector_check_in_result(self, result: Any) -> None:
+        """Enter standby, stop, or install one asynchronously delivered sector."""
+        if not isinstance(result, SectorCheckInResult) or not result.arrived:
+            return
+        drone = self.drone
+        if result.mission_exhausted:
+            self._trace_sector_wait_completed(
+                outcome="mission_exhausted",
+                next_generation=result.generation,
+            )
+            self._trace(
+                "drone_sector_mission_exhausted",
+                generation=result.generation,
+                position=drone.snapshot().position,
+            )
+            drone.runtime_state.mark_done()
+            return
+        if result.assignment is None:
+            waiting_generation = result.waiting_generation
+            if self._sector_waiting_generation != waiting_generation:
+                self._sector_waiting_generation = waiting_generation
+                self._sector_wait_started_at = self._simulation_time()
+                self._trace(
+                    "drone_sector_waiting_for_team",
+                    completed_sector_id=self._completed_sector_id,
+                    generation=waiting_generation,
+                )
+            self._sector_assignment_ready = result.assignment_ready
+            return
+
+        assignment = result.assignment
+        self._trace_sector_wait_completed(
+            outcome="assigned",
+            next_generation=assignment.generation,
+        )
+        self._sector_assignment = assignment
+        self._sector_assignment_entered = assignment.contains(
+            drone.snapshot().position
+        )
+        self._sector_ingress_failures = 0
+        self._sector_check_in_required = False
+        self._completed_sector_id = None
+        self._sector_waiting_generation = None
+        self._sector_wait_started_at = None
+        self._sector_assignment_ready = None
+        self._sector_suppression_reasons.clear()
+        self._sector_suppression_targets.clear()
+        self._sector_empty_confirmations = 0
+        self._sector_path_start_index = max(
+            0,
+            len(drone.snapshot().path_history) - 1,
+        )
+        self._pending_frontier_route = None
+        self._pending_frontier_scan = None
+        self._global_frontier_cache = None
+        self._last_raw_frontiers = frozenset()
+        self._last_global_raw_frontiers = frozenset()
+        self._last_frontier_mask = None
+        self._frontier_component_targets.clear()
+        carried_suppression_count = len(
+            self._suppressed_frontier_geometry
+        )
+        self.border_retry_until.clear()
+        self._partial_route_endpoints.clear()
+        self._reset_stagnation_window()
+        self.rebuild_frontiers(
+            stride=self.frontier_stride,
+            confidence_threshold=self.frontier_confidence_threshold,
+        )
+        self._trace(
+            "drone_sector_assigned",
+            sector_id=assignment.sector_id,
+            generation=assignment.generation,
+            seed=assignment.seed,
+            gateway=assignment.gateway,
+            sector_cell_count=len(assignment.cells),
+            frontier_cells=assignment.frontier_cells,
+            rover_slam_version=assignment.rover_slam_version,
+            bootstrap=assignment.bootstrap,
+            assignment_entered=self._sector_assignment_entered,
+            carried_suppression_count=carried_suppression_count,
+            active_suppression_count=len(
+                self._suppressed_frontier_geometry
+            ),
+            frontier_component_count=len(assignment.frontier_components),
+            frontier_component_ids=tuple(
+                component.component_id
+                for component in assignment.frontier_components
+            ),
+            estimated_effort=assignment.estimated_effort,
+        )
+
+    def _trace_sector_wait_completed(
+        self,
+        *,
+        outcome: str,
+        next_generation: int,
+    ) -> None:
+        """Record one completed barrier wait without per-poll inference."""
+        started_at = self._sector_wait_started_at
+        if started_at is None:
+            return
+        self._trace(
+            "drone_sector_wait_completed",
+            waiting_generation=self._sector_waiting_generation,
+            next_generation=int(next_generation),
+            waited_seconds=max(0.0, self._simulation_time() - started_at),
+            outcome=outcome,
+        )
+
+    def _sector_exhausted(self) -> bool:
+        """Confirm that an entered assignment has no remaining frontier."""
+        assignment = self._sector_assignment
+        if assignment is None:
+            return False
+        snapshot = self.drone.snapshot()
+        position_in_sector = assignment.contains(snapshot.position)
+        if position_in_sector:
+            self._sector_assignment_entered = True
+            self._sector_ingress_failures = 0
+        if not snapshot.explored or not self._sector_assignment_entered:
+            self._sector_empty_confirmations = 0
+            return False
+        if assignment.bootstrap and (
+            math.dist(snapshot.position, assignment.gateway)
+            < assignment.cell_size * 2.0
+        ):
+            self._sector_empty_confirmations = 0
+            return False
+        if (
+            self._pending_frontier_route is not None
+            or self._pending_frontier_scan is not None
+            or self._frontier_slam_version != self.drone.slam_map.version
+        ):
+            self._sector_empty_confirmations = 0
+            return False
+        if snapshot.frontiers:
+            self._sector_empty_confirmations = 0
+            return False
+        self._sector_empty_confirmations += 1
+        return self._sector_empty_confirmations >= 2
+
+    def _in_assigned_sector(self, position: Position) -> bool:
+        assignment = self._sector_assignment
+        return assignment is None or assignment.contains(position)
+
+    def _sector_ingress_targets(
+        self,
+        current: Position,
+        *,
+        maximum_cells: int = 8,
+    ) -> tuple[Position, ...]:
+        """Return nearby collision-free points inside the current assignment."""
+        assignment = self._sector_assignment
+        if assignment is None:
+            return ()
+        width = int(self.drone.game.width)
+        height = int(self.drone.game.height)
+        cell_size = assignment.cell_size
+
+        def bounds(cell: CoverageCell) -> tuple[int, int, int, int]:
+            cell_x, cell_y = cell
+            return (
+                max(0, cell_x * cell_size),
+                max(0, cell_y * cell_size),
+                min(width - 1, (cell_x + 1) * cell_size - 1),
+                min(height - 1, (cell_y + 1) * cell_size - 1),
+            )
+
+        def distance_squared(cell: CoverageCell) -> int:
+            left, top, right, bottom = bounds(cell)
+            nearest_x = min(max(current[0], left), right)
+            nearest_y = min(max(current[1], top), bottom)
+            return (
+                (nearest_x - current[0]) ** 2
+                + (nearest_y - current[1]) ** 2
+            )
+
+        ordered_cells = sorted(
+            assignment.cells,
+            key=lambda cell: (
+                distance_squared(cell),
+                cell[1],
+                cell[0],
+            ),
+        )[:max(1, int(maximum_cells))]
+        targets: list[Position] = []
+        seen: set[Position] = set()
+        for cell in ordered_cells:
+            left, top, right, bottom = bounds(cell)
+            if left > right or top > bottom:
+                continue
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+            candidates = (
+                (
+                    min(max(current[0], left), right),
+                    min(max(current[1], top), bottom),
+                ),
+                (center_x, center_y),
+                ((left + center_x) // 2, center_y),
+                ((right + center_x) // 2, center_y),
+                (center_x, (top + center_y) // 2),
+                (center_x, (bottom + center_y) // 2),
+            )
+            for candidate in candidates:
+                if candidate in seen or not assignment.contains(candidate):
+                    continue
+                seen.add(candidate)
+                if self.drone.runtime_state.graph_is_valid(
+                    candidate,
+                    candidate,
+                ):
+                    targets.append(candidate)
+        return tuple(sorted(
+            targets,
+            key=lambda target: (
+                math.dist(current, target),
+                target[1],
+                target[0],
+            ),
+        ))
+
+    def _recover_to_assigned_sector(self) -> bool:
+        """Route a boxed-in out-of-sector drone back into owned territory."""
+        assignment = self._sector_assignment
+        snapshot = self.drone.snapshot()
+        current = snapshot.position
+        if assignment is None or assignment.contains(current):
+            return False
+
+        targets = self._sector_ingress_targets(current)
+        attempted_statuses: list[str] = []
+        for target in targets[:4]:
+            result = self._compute_path(current, target)
+            attempted_statuses.append(result.status)
+            path = tuple(result.path)
+            if len(path) <= 1:
+                continue
+            source = "sector_ingress_astar"
+            if result.status == PATH_PARTIAL_LIMIT:
+                if not self._accept_partial_endpoint(
+                    current,
+                    target,
+                    path[-1],
+                ):
+                    continue
+                source = "sector_ingress_astar_partial"
+            elif result.status != PATH_COMPLETE:
+                continue
+            followed = self._follow_path(path, source=source)
+            position = self.drone.snapshot().position
+            entered = assignment.contains(position)
+            if entered:
+                self._sector_assignment_entered = True
+            if followed:
+                self._sector_ingress_failures = 0
+            self._trace(
+                "drone_sector_ingress_recovery",
+                start=current,
+                target=target,
+                source=source,
+                path_status=result.status,
+                path_length=len(path),
+                completed=followed,
+                entered_sector=entered,
+                position=position,
+            )
+            return followed
+
+        fallback_target = targets[0] if targets else assignment.seed
+        directions, _borders, step_targets = self._direction_candidates(
+            cone_center=snapshot.heading_deg,
+            half_fov=180.0,
+        )
+        if directions:
+            target_bearing = self._bearing(current, fallback_target)
+            direction = min(
+                directions,
+                key=lambda candidate: (
+                    self._angular_distance(candidate, target_bearing),
+                    candidate,
+                ),
+            )
+            self.drone.runtime_state.reorient(direction)
+            step_target = step_targets[direction]
+            path = bresenham_line_points(
+                current[0],
+                current[1],
+                step_target[0],
+                step_target[1],
+            )
+            followed = self._follow_path(
+                path,
+                source="sector_ingress_step",
+            )
+            position = self.drone.snapshot().position
+            entered = assignment.contains(position)
+            if entered:
+                self._sector_assignment_entered = True
+            if followed:
+                self._sector_ingress_failures = 0
+            self._trace(
+                "drone_sector_ingress_recovery",
+                start=current,
+                target=fallback_target,
+                source="full_circle_step",
+                direction=direction,
+                path_status="direct_step",
+                path_length=len(path),
+                completed=followed,
+                entered_sector=entered,
+                position=position,
+            )
+            return followed
+
+        self._sector_ingress_failures += 1
+        self._trace(
+            "drone_sector_ingress_failed",
+            position=current,
+            candidate_count=len(targets),
+            attempted_path_statuses=tuple(attempted_statuses),
+            consecutive_failures=self._sector_ingress_failures,
+            sector_id=assignment.sector_id,
+            generation=assignment.generation,
+        )
+        if self._sector_ingress_failures >= 2 and snapshot.explored:
+            self._trace(
+                "drone_sector_ingress_abandoned",
+                position=current,
+                consecutive_failures=self._sector_ingress_failures,
+                sector_id=assignment.sector_id,
+                generation=assignment.generation,
+            )
+            self._start_sector_check_in(reason="sector_ingress_unreachable")
+            return True
+        return False
+
+    def _sector_window_mask(
+        self,
+        shape: tuple[int, int],
+        origin: Position,
+    ) -> np.ndarray:
+        """Return assigned-sector membership for a SLAM array/window."""
+        assignment = self._sector_assignment
+        if assignment is None:
+            return np.ones(shape, dtype=bool)
+        height, width = shape
+        mask = np.zeros(shape, dtype=bool)
+        left, top = int(origin[0]), int(origin[1])
+        right = left + width
+        bottom = top + height
+        cell_size = assignment.cell_size
+        first_x = left // cell_size
+        last_x = (max(left, right - 1)) // cell_size
+        first_y = top // cell_size
+        last_y = (max(top, bottom - 1)) // cell_size
+        for cell_y in range(first_y, last_y + 1):
+            for cell_x in range(first_x, last_x + 1):
+                if (cell_x, cell_y) not in assignment.cells:
+                    continue
+                local_left = max(0, cell_x * cell_size - left)
+                local_right = min(width, (cell_x + 1) * cell_size - left)
+                local_top = max(0, cell_y * cell_size - top)
+                local_bottom = min(height, (cell_y + 1) * cell_size - top)
+                mask[local_top:local_bottom, local_left:local_right] = True
+        return mask
 
     def find_new_node(
         self,
@@ -419,6 +1061,29 @@ class DroneMovementController:
             selected_separation_support=(
                 bias.separation_support[chosen_direction]
             ),
+            selected_coverage_cell=(
+                bias.coverage_cells[chosen_direction]
+            ),
+            selected_coverage_visit_pressure=(
+                bias.coverage_visit_pressure[chosen_direction]
+            ),
+            selected_coverage_edge_pressure=(
+                bias.coverage_edge_pressure[chosen_direction]
+            ),
+            selected_coverage_penalty_factor=(
+                bias.coverage_penalty_factor[chosen_direction]
+            ),
+            minimum_coverage_penalty_factor=min(
+                bias.coverage_penalty_factor.values()
+            ),
+            maximum_coverage_visit_pressure=max(
+                bias.coverage_visit_pressure.values()
+            ),
+            maximum_coverage_edge_pressure=max(
+                bias.coverage_edge_pressure.values()
+            ),
+            coverage_known_cell_count=len(self._coverage_cell_visits),
+            coverage_known_edge_count=len(self._coverage_edge_visits),
             maximum_wall_support=max(bias.wall_support.values()),
             maximum_frontier_support=max(bias.frontier_support.values()),
             maximum_global_frontier_support=max(
@@ -478,6 +1143,21 @@ class DroneMovementController:
             global_generic_frontier_candidate_count=(
                 bias.global_generic_candidate_count
             ),
+            global_frontier_requester_distance=(
+                bias.global_requester_distance
+            ),
+            global_frontier_nearest_peer_distance=(
+                bias.global_nearest_peer_distance
+            ),
+            global_frontier_ownership_margin=(
+                bias.global_ownership_margin
+            ),
+            global_frontier_launch_sector_alignment=(
+                bias.global_launch_sector_alignment
+            ),
+            global_frontier_ownership_contribution=(
+                bias.global_ownership_contribution
+            ),
             global_frontier_slam_version=bias.global_slam_version,
         )
         return valid_directions, border_targets, chosen_target
@@ -517,6 +1197,10 @@ class DroneMovementController:
         known_occupied = known & (occupancy == OCCUPIED)
         unknown = (~known) | (occupancy == UNKNOWN)
         frontier_unknown = unknown & self._neighbor_adjacency(known_free)
+        frontier_unknown &= self._sector_window_mask(
+            frontier_unknown.shape,
+            slam.origin,
+        )
         wall_unknown = (
             frontier_unknown & self._neighbor_adjacency(known_occupied)
         )
@@ -568,7 +1252,31 @@ class DroneMovementController:
             and selected_cluster.touches_wall
         )
         frontier_tracking = selected_cluster is not None
-        if global_guidance.active and global_guidance.touches_wall:
+        assignment = self._sector_assignment
+        sector_ingress = bool(
+            assignment is not None and not assignment.contains(current)
+        )
+        sector_support = (
+            self._directional_progress_scores(
+                directions,
+                self._bearing(current, assignment.seed),
+            )
+            if sector_ingress and assignment is not None
+            else {direction: 0.0 for direction in directions}
+        )
+        (
+            coverage_cells,
+            coverage_visit_pressure,
+            coverage_edge_pressure,
+            coverage_penalty_factor,
+        ) = self._coverage_heading_penalties(
+            directions,
+            current=current,
+            apply_penalty=not sector_ingress,
+        )
+        if sector_ingress:
+            mode = "sector_ingress"
+        elif global_guidance.active and global_guidance.touches_wall:
             mode = "global_wall_tracking"
         elif global_guidance.active:
             mode = "global_unexplored_region"
@@ -601,19 +1309,37 @@ class DroneMovementController:
                     0.35 * local_information_bias
                     + global_weight * global_guidance.support[direction]
                 )
-            weights[direction] = max(
+            if sector_ingress:
+                information_bias += (
+                    2.0
+                    * self.unexplored_direction_bias
+                    * sector_support[direction]
+                )
+            weight = max(
                 1e-6,
                 1.0
                 + information_bias
                 + self.separation_direction_bias
                 * separation_support[direction],
             )
+            weight *= coverage_penalty_factor[direction]
+            if (
+                assignment is not None
+                and assignment.contains(current)
+                and not assignment.contains(step_targets[direction])
+            ):
+                weight *= 0.05
+            weights[direction] = max(1e-6, weight)
         return _HeadingBias(
             weights=weights,
             wall_support=wall_support,
             frontier_support=frontier_support,
             global_support=global_guidance.support,
             separation_support=separation_support,
+            coverage_cells=coverage_cells,
+            coverage_visit_pressure=coverage_visit_pressure,
+            coverage_edge_pressure=coverage_edge_pressure,
+            coverage_penalty_factor=coverage_penalty_factor,
             mode=mode,
             peer_count=peer_count,
             cluster_count=len(clusters),
@@ -666,7 +1392,161 @@ class DroneMovementController:
             global_generic_candidate_count=(
                 global_guidance.generic_candidate_count
             ),
+            global_requester_distance=(
+                global_guidance.requester_distance
+            ),
+            global_nearest_peer_distance=(
+                global_guidance.nearest_peer_distance
+            ),
+            global_ownership_margin=global_guidance.ownership_margin,
+            global_launch_sector_alignment=(
+                global_guidance.launch_sector_alignment
+            ),
+            global_ownership_contribution=(
+                global_guidance.ownership_contribution
+            ),
             global_slam_version=global_guidance.slam_version,
+        )
+
+    def _coverage_cell(self, position: Position) -> CoverageCell:
+        """Return the coarse coverage-memory cell for a map position."""
+        return (
+            int(position[0]) // self.coverage_memory_cell_size,
+            int(position[1]) // self.coverage_memory_cell_size,
+        )
+
+    @staticmethod
+    def _coverage_edge(
+        first: CoverageCell,
+        second: CoverageCell,
+    ) -> CoverageEdge:
+        """Return one direction-independent coarse traversal edge."""
+        return (first, second) if first <= second else (second, first)
+
+    def _coverage_record_value(
+        self,
+        record: _CoverageRecord | None,
+        now: float,
+    ) -> float:
+        """Return an exponentially decayed visit pressure."""
+        if record is None:
+            return 0.0
+        elapsed = max(0.0, float(now) - record.updated_at)
+        return record.value * math.exp(
+            -elapsed / self.coverage_memory_decay_seconds
+        )
+
+    def _increment_coverage_record(
+        self,
+        records: dict[Any, _CoverageRecord],
+        key: Any,
+        now: float,
+    ) -> None:
+        """Add one visit after lazily decaying the previous pressure."""
+        records[key] = _CoverageRecord(
+            value=self._coverage_record_value(records.get(key), now) + 1.0,
+            updated_at=float(now),
+        )
+
+    def _coverage_heading_penalties(
+        self,
+        directions: Iterable[int],
+        *,
+        current: Position,
+        apply_penalty: bool,
+    ) -> tuple[
+        dict[int, CoverageCell],
+        dict[int, float],
+        dict[int, float],
+        dict[int, float],
+    ]:
+        """Score projected cells and repeated edges for candidate headings."""
+        now = self._simulation_time()
+        current_cell = self._coverage_cell(current)
+        width = max(1, int(self.drone.game.width))
+        height = max(1, int(self.drone.game.height))
+        cells: dict[int, CoverageCell] = {}
+        visit_pressure: dict[int, float] = {}
+        edge_pressure: dict[int, float] = {}
+        penalty_factor: dict[int, float] = {}
+        for raw_direction in directions:
+            direction = int(raw_direction)
+            projected = next_cell_coords(
+                *current,
+                self.coverage_memory_cell_size,
+                direction,
+            )
+            projected = (
+                min(max(int(projected[0]), 0), width - 1),
+                min(max(int(projected[1]), 0), height - 1),
+            )
+            cell = self._coverage_cell(projected)
+            edge = self._coverage_edge(current_cell, cell)
+            if cell == current_cell:
+                # A coarse cell does not distinguish headings within itself;
+                # penalizing it would arbitrarily overpower other evidence
+                # near map edges and cell centers.
+                visits = 0.0
+                traversals = 0.0
+            else:
+                visits = self._coverage_record_value(
+                    self._coverage_cell_visits.get(cell),
+                    now,
+                )
+                traversals = self._coverage_record_value(
+                    self._coverage_edge_visits.get(edge),
+                    now,
+                )
+            pressure = (
+                self.coverage_visit_weight * math.log1p(visits)
+                + self.coverage_edge_weight * math.log1p(traversals)
+            )
+            cells[direction] = cell
+            visit_pressure[direction] = visits
+            edge_pressure[direction] = traversals
+            penalty_factor[direction] = (
+                1.0 if not apply_penalty else 1.0 / (1.0 + pressure)
+            )
+        return cells, visit_pressure, edge_pressure, penalty_factor
+
+    def _record_coverage_transition(
+        self,
+        previous: Position,
+        current: Position,
+        now: float,
+    ) -> tuple[int, int, int, int]:
+        """Record one coarse cell crossing and return trace counters."""
+        previous_cell = self._coverage_cell(previous)
+        current_cell = self._coverage_cell(current)
+        if self._coverage_last_cell != previous_cell:
+            self._increment_coverage_record(
+                self._coverage_cell_visits,
+                previous_cell,
+                now,
+            )
+            self._coverage_last_cell = previous_cell
+        if current_cell == previous_cell:
+            return 0, 0, 0, 0
+
+        edge = self._coverage_edge(previous_cell, current_cell)
+        revisited = current_cell in self._coverage_cell_visits
+        repeated_edge = edge in self._coverage_edge_visits
+        self._increment_coverage_record(
+            self._coverage_cell_visits,
+            current_cell,
+            now,
+        )
+        self._increment_coverage_record(
+            self._coverage_edge_visits,
+            edge,
+            now,
+        )
+        self._coverage_last_cell = current_cell
+        return (
+            1,
+            0 if revisited else 1,
+            1 if revisited else 0,
+            1 if repeated_edge else 0,
         )
 
     def _global_frontier_guidance(
@@ -702,6 +1582,11 @@ class DroneMovementController:
                 filtered_region_count=cache.filtered_region_count,
                 wall_candidate_count=cache.wall_candidate_count,
                 generic_candidate_count=cache.generic_candidate_count,
+                requester_distance=cache.requester_distance,
+                nearest_peer_distance=cache.nearest_peer_distance,
+                ownership_margin=cache.ownership_margin,
+                launch_sector_alignment=cache.launch_sector_alignment,
+                ownership_contribution=cache.ownership_contribution,
                 slam_version=cache.slam_version,
             )
 
@@ -730,6 +1615,11 @@ class DroneMovementController:
             filtered_region_count=cache.filtered_region_count,
             wall_candidate_count=cache.wall_candidate_count,
             generic_candidate_count=cache.generic_candidate_count,
+            requester_distance=cache.requester_distance,
+            nearest_peer_distance=cache.nearest_peer_distance,
+            ownership_margin=cache.ownership_margin,
+            launch_sector_alignment=cache.launch_sector_alignment,
+            ownership_contribution=cache.ownership_contribution,
             slam_version=cache.slam_version,
         )
 
@@ -754,31 +1644,37 @@ class DroneMovementController:
         if slam is None:
             slam = self.drone.slam_map.snapshot(point_limit=0)
         regions = self._coarse_global_frontier_regions(slam)
-        (
-            target,
-            target_position,
-            target_score,
-            target_size_rank,
-            target_proximity,
-            eligible_count,
-            wall_count,
-            generic_count,
-        ) = self._select_global_frontier_region(
+        selection = self._select_global_frontier_region(
             regions,
             current=current,
             heading=heading,
+            preferred_region=(cache.target if cache is not None else None),
+            preferred_position=(
+                cache.target_position if cache is not None else None
+            ),
         )
         cache = _GlobalFrontierCache(
             regions=regions,
-            target=target,
-            target_position=target_position,
-            target_score=target_score,
-            target_size_rank=target_size_rank,
-            target_proximity=target_proximity,
-            eligible_region_count=eligible_count,
-            filtered_region_count=len(regions) - eligible_count,
-            wall_candidate_count=wall_count,
-            generic_candidate_count=generic_count,
+            target=selection.region,
+            target_position=selection.position,
+            target_score=selection.score,
+            target_size_rank=selection.size_rank,
+            target_proximity=selection.proximity,
+            eligible_region_count=selection.eligible_region_count,
+            filtered_region_count=(
+                len(regions) - selection.eligible_region_count
+            ),
+            wall_candidate_count=selection.wall_candidate_count,
+            generic_candidate_count=selection.generic_candidate_count,
+            requester_distance=selection.requester_distance,
+            nearest_peer_distance=selection.nearest_peer_distance,
+            ownership_margin=selection.ownership_margin,
+            launch_sector_alignment=(
+                selection.launch_sector_alignment
+            ),
+            ownership_contribution=selection.ownership_contribution,
+            target_retained=selection.retained_previous,
+            target_region_overlap=selection.previous_region_overlap,
             slam_version=int(slam.version),
             built_at=now,
         )
@@ -788,18 +1684,39 @@ class DroneMovementController:
             slam_version=cache.slam_version,
             coarse_cell_size=self.global_frontier_cell_size,
             region_count=len(regions),
-            eligible_region_count=eligible_count,
+            eligible_region_count=selection.eligible_region_count,
             filtered_region_count=cache.filtered_region_count,
-            wall_candidate_count=wall_count,
-            generic_candidate_count=generic_count,
-            selected_target=target_position,
-            selected_region_size=(target.size if target is not None else 0),
-            selected_region_touches_wall=(
-                target.touches_wall if target is not None else False
+            wall_candidate_count=selection.wall_candidate_count,
+            generic_candidate_count=selection.generic_candidate_count,
+            selected_target=selection.position,
+            selected_region_size=(
+                selection.region.size
+                if selection.region is not None
+                else 0
             ),
-            selected_score=target_score,
-            selected_size_rank=target_size_rank,
-            selected_proximity=target_proximity,
+            selected_region_touches_wall=(
+                selection.region.touches_wall
+                if selection.region is not None
+                else False
+            ),
+            selected_score=selection.score,
+            selected_size_rank=selection.size_rank,
+            selected_proximity=selection.proximity,
+            selected_requester_distance=selection.requester_distance,
+            selected_nearest_peer_distance=(
+                selection.nearest_peer_distance
+            ),
+            selected_ownership_margin=selection.ownership_margin,
+            selected_launch_sector_alignment=(
+                selection.launch_sector_alignment
+            ),
+            selected_ownership_contribution=(
+                selection.ownership_contribution
+            ),
+            selected_target_retained=selection.retained_previous,
+            selected_target_region_overlap=(
+                selection.previous_region_overlap
+            ),
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
         return cache
@@ -816,6 +1733,10 @@ class DroneMovementController:
         known_occupied = known & (occupancy == OCCUPIED)
         unknown = (~known) | (occupancy == UNKNOWN)
         frontier_unknown = unknown & self._neighbor_adjacency(known_free)
+        frontier_unknown &= self._sector_window_mask(
+            frontier_unknown.shape,
+            (0, 0),
+        )
         rows, columns = np.nonzero(frontier_unknown)
         if len(rows) == 0:
             return ()
@@ -905,23 +1826,27 @@ class DroneMovementController:
             key=lambda region: (region.tiles[0].target, -region.size),
         ))
 
+    def _global_region_key(
+        self,
+        region: _GlobalFrontierRegion,
+    ) -> frozenset[Position]:
+        """Return stable coarse-cell membership for one global region."""
+        cell_size = self.global_frontier_cell_size
+        return frozenset(
+            (tile.target[0] // cell_size, tile.target[1] // cell_size)
+            for tile in region.tiles
+        )
+
     def _select_global_frontier_region(
         self,
         regions: tuple[_GlobalFrontierRegion, ...],
         *,
         current: Position,
         heading: float,
-    ) -> tuple[
-        _GlobalFrontierRegion | None,
-        Position | None,
-        float,
-        float,
-        float,
-        int,
-        int,
-        int,
-    ]:
-        """Use the local policy hierarchy on coarse whole-map regions."""
+        preferred_region: _GlobalFrontierRegion | None = None,
+        preferred_position: Position | None = None,
+    ) -> _GlobalFrontierSelection:
+        """Score regions while retaining a still-competitive prior target."""
         eligible = tuple(
             region
             for region in regions
@@ -935,7 +1860,21 @@ class DroneMovementController:
         )
         tier = wall_regions or generic_regions
         if not tier:
-            return None, None, 0.0, 0.0, 0.0, len(eligible), 0, 0
+            return _GlobalFrontierSelection(
+                region=None,
+                position=None,
+                score=0.0,
+                size_rank=0.0,
+                proximity=0.0,
+                eligible_region_count=len(eligible),
+                wall_candidate_count=0,
+                generic_candidate_count=0,
+                requester_distance=None,
+                nearest_peer_distance=None,
+                ownership_margin=0.0,
+                launch_sector_alignment=0.0,
+                ownership_contribution=0.0,
+            )
 
         sizes = sorted({region.size for region in tier})
         size_ranks = (
@@ -946,79 +1885,294 @@ class DroneMovementController:
                 for index, size in enumerate(sizes)
             }
         )
-        scored = []
+        candidate_regions: list[_GlobalFrontierRegion] = []
+        candidate_positions: list[Position] = []
+        candidate_alignments: list[float] = []
+        candidate_distances: list[float] = []
+        candidate_bearings: list[float] = []
+        candidate_proximities: list[float] = []
+        candidate_size_ranks: list[float] = []
+        current_array = np.asarray(current, dtype=np.float64)
+        normalized_heading = float(heading) % 360.0
+        preferred_region_key = (
+            self._global_region_key(preferred_region)
+            if preferred_region is not None
+            else frozenset()
+        )
+        preferred_cell = (
+            (
+                preferred_position[0] // self.global_frontier_cell_size,
+                preferred_position[1] // self.global_frontier_cell_size,
+            )
+            if preferred_position is not None
+            else None
+        )
         for region in tier:
             representative_tiles = (
                 tuple(tile for tile in region.tiles if tile.touches_wall)
                 if region.touches_wall
                 else region.tiles
             )
-            tile_terms = []
-            for tile in representative_tiles:
-                distance = math.dist(current, tile.target)
-                bearing = self._bearing(current, tile.target)
-                alignment = max(
-                    0.0,
-                    1.0
-                    - self._angular_distance(bearing, heading) / 180.0,
+            targets = np.asarray(
+                [tile.target for tile in representative_tiles],
+                dtype=np.float64,
+            )
+            deltas = targets - current_array
+            distances = np.hypot(deltas[:, 0], deltas[:, 1])
+            bearings = (
+                np.degrees(np.arctan2(deltas[:, 0], -deltas[:, 1]))
+                % 360.0
+            )
+            bearings = np.where(distances <= 1e-12, 0.0, bearings)
+            angular_distances = np.abs(
+                (bearings - normalized_heading + 180.0) % 360.0
+                - 180.0
+            )
+            alignments = np.maximum(
+                0.0,
+                1.0 - angular_distances / 180.0,
+            )
+            tile_sizes = np.fromiter(
+                (tile.size for tile in representative_tiles),
+                dtype=np.int64,
+                count=len(representative_tiles),
+            )
+            retained_tile_indices: list[int] = []
+            if (
+                preferred_cell is not None
+                and preferred_region_key & self._global_region_key(region)
+            ):
+                retained_tile_indices = [
+                    index
+                    for index, tile in enumerate(representative_tiles)
+                    if (
+                        tile.target[0] // self.global_frontier_cell_size,
+                        tile.target[1] // self.global_frontier_cell_size,
+                    ) == preferred_cell
+                ]
+            if retained_tile_indices:
+                retained_targets = targets[retained_tile_indices]
+                preferred_array = np.asarray(
+                    preferred_position,
+                    dtype=np.float64,
                 )
-                tile_terms.append((alignment, distance, tile))
-            if region.touches_wall:
-                alignment, distance, representative = min(
-                    tile_terms,
-                    key=lambda item: (
-                        -item[0],
-                        item[1],
-                        -item[2].size,
-                        item[2].target,
-                    ),
+                retained_deltas = retained_targets - preferred_array
+                retained_distances = np.hypot(
+                    retained_deltas[:, 0],
+                    retained_deltas[:, 1],
                 )
+                retained_order = np.lexsort((
+                    retained_targets[:, 1],
+                    retained_targets[:, 0],
+                    retained_distances,
+                ))
+                selected_index = retained_tile_indices[
+                    int(retained_order[0])
+                ]
             else:
-                alignment, distance, representative = min(
-                    tile_terms,
+                if region.touches_wall:
+                    ordering = np.lexsort((
+                        targets[:, 1],
+                        targets[:, 0],
+                        -tile_sizes,
+                        distances,
+                        -alignments,
+                    ))
+                else:
+                    ordering = np.lexsort((
+                        targets[:, 1],
+                        targets[:, 0],
+                        -tile_sizes,
+                        distances,
+                    ))
+                selected_index = int(ordering[0])
+            distance = float(distances[selected_index])
+            candidate_regions.append(region)
+            candidate_positions.append(
+                representative_tiles[selected_index].target
+            )
+            candidate_alignments.append(float(alignments[selected_index]))
+            candidate_distances.append(distance)
+            candidate_bearings.append(float(bearings[selected_index]))
+            candidate_proximities.append(
+                1.0 / (1.0 + distance / self.frontier_distance_band)
+            )
+            candidate_size_ranks.append(size_ranks[region.size])
+
+        target_array = np.asarray(
+            candidate_positions,
+            dtype=np.float64,
+        )
+        requester_distances = np.asarray(
+            candidate_distances,
+            dtype=np.float64,
+        )
+        proximities = np.asarray(
+            candidate_proximities,
+            dtype=np.float64,
+        )
+        region_size_ranks = np.asarray(
+            candidate_size_ranks,
+            dtype=np.float64,
+        )
+        scores = (
+            self.frontier_cluster_size_weight * region_size_ranks
+            + self.frontier_cluster_proximity_weight * proximities
+        )
+        if wall_regions:
+            scores += self.wall_continuation_weight * np.asarray(
+                candidate_alignments,
+                dtype=np.float64,
+            )
+
+        peer_positions = tuple(
+            position
+            for drone_id, position in self.dependencies.get_drone_positions()
+            if int(drone_id) != int(self.drone.id)
+        )
+        if peer_positions:
+            peer_array = np.asarray(peer_positions, dtype=np.float64)
+            peer_deltas = (
+                target_array[:, np.newaxis, :]
+                - peer_array[np.newaxis, :, :]
+            )
+            nearest_peer_distances = np.min(
+                np.hypot(peer_deltas[:, :, 0], peer_deltas[:, :, 1]),
+                axis=1,
+            )
+            map_height, map_width = self.drone.slam_map.shape
+            map_diagonal = max(
+                1.0,
+                math.hypot(max(0, map_width - 1), max(0, map_height - 1)),
+            )
+            ownership_margins = np.clip(
+                (nearest_peer_distances - requester_distances)
+                / map_diagonal,
+                -1.0,
+                1.0,
+            )
+            requester_peer_deltas = peer_array - current_array
+            nearest_requester_peer = float(np.min(np.hypot(
+                requester_peer_deltas[:, 0],
+                requester_peer_deltas[:, 1],
+            )))
+            overlap_radius = max(1.0, float(self.drone.step))
+            position_overlap = max(
+                0.0,
+                1.0 - nearest_requester_peer / overlap_radius,
+            )
+            launch_radius = max(
+                overlap_radius,
+                float(self.global_frontier_cell_size),
+            )
+            launch_area_strength = max(
+                0.0,
+                1.0
+                - math.dist(current, self.drone.start_pos) / launch_radius,
+            )
+            launch_overlap = position_overlap * launch_area_strength
+            drone_count = max(
+                1,
+                int(self.drone.settings.mission_config.num_drones),
+            )
+            sector_heading = 360.0 * float(self.drone.id) / drone_count
+            sector_distances = np.abs(
+                (
+                    np.asarray(candidate_bearings) - sector_heading + 180.0
+                ) % 360.0
+                - 180.0
+            )
+            launch_sector_alignments = (
+                1.0 + np.cos(np.deg2rad(sector_distances))
+            ) / 2.0
+            ownership_contributions = (
+                self.global_frontier_ownership_weight
+                * (
+                    ownership_margins
+                    + _GLOBAL_LAUNCH_SECTOR_TIE_RATIO
+                    * launch_overlap
+                    * launch_sector_alignments
+                )
+            )
+            scores += ownership_contributions
+        else:
+            nearest_peer_distances = np.full(len(tier), np.nan)
+            ownership_margins = np.zeros(len(tier), dtype=np.float64)
+            launch_sector_alignments = np.zeros(
+                len(tier),
+                dtype=np.float64,
+            )
+            ownership_contributions = np.zeros(
+                len(tier),
+                dtype=np.float64,
+            )
+
+        region_sizes = np.fromiter(
+            (region.size for region in candidate_regions),
+            dtype=np.int64,
+            count=len(candidate_regions),
+        )
+        selected_index = int(np.lexsort((
+            target_array[:, 1],
+            target_array[:, 0],
+            requester_distances,
+            -region_sizes,
+            -scores,
+        ))[0])
+        retained_previous = False
+        previous_region_overlap = 0.0
+        if preferred_region is not None:
+            preferred_key = self._global_region_key(preferred_region)
+            matches: list[tuple[float, int]] = []
+            for index, region in enumerate(candidate_regions):
+                candidate_key = self._global_region_key(region)
+                intersection = len(preferred_key & candidate_key)
+                if intersection == 0:
+                    continue
+                union = len(preferred_key | candidate_key)
+                overlap = intersection / max(1, union)
+                matches.append((overlap, index))
+            if matches:
+                previous_region_overlap, previous_index = max(
+                    matches,
                     key=lambda item: (
-                        item[1],
-                        -item[2].size,
-                        item[2].target,
+                        item[0],
+                        float(scores[item[1]]),
+                        -float(requester_distances[item[1]]),
                     ),
                 )
-            proximity = 1.0 / (
-                1.0 + distance / self.frontier_distance_band
-            )
-            size_rank = size_ranks[region.size]
-            score = (
-                self.frontier_cluster_size_weight * size_rank
-                + self.frontier_cluster_proximity_weight * proximity
-            )
-            if region.touches_wall:
-                score += self.wall_continuation_weight * alignment
-            scored.append((
-                score,
-                size_rank,
-                proximity,
-                distance,
-                region,
-                representative.target,
-            ))
-
-        score, size_rank, proximity, _distance, target, target_position = min(
-            scored,
-            key=lambda item: (
-                -item[0],
-                -item[4].size,
-                item[3],
-                item[5],
-            ),
+                if (
+                    float(scores[previous_index])
+                    >= float(scores[selected_index])
+                    - _GLOBAL_TARGET_SWITCH_SCORE_MARGIN
+                ):
+                    selected_index = previous_index
+                    retained_previous = True
+        nearest_peer_distance = (
+            float(nearest_peer_distances[selected_index])
+            if peer_positions
+            else None
         )
-        return (
-            target,
-            target_position,
-            score,
-            size_rank,
-            proximity,
-            len(eligible),
-            len(wall_regions),
-            len(generic_regions),
+        return _GlobalFrontierSelection(
+            region=candidate_regions[selected_index],
+            position=candidate_positions[selected_index],
+            score=float(scores[selected_index]),
+            size_rank=float(region_size_ranks[selected_index]),
+            proximity=float(proximities[selected_index]),
+            eligible_region_count=len(eligible),
+            wall_candidate_count=len(wall_regions),
+            generic_candidate_count=len(generic_regions),
+            requester_distance=float(requester_distances[selected_index]),
+            nearest_peer_distance=nearest_peer_distance,
+            ownership_margin=float(ownership_margins[selected_index]),
+            launch_sector_alignment=float(
+                launch_sector_alignments[selected_index]
+            ),
+            ownership_contribution=float(
+                ownership_contributions[selected_index]
+            ),
+            retained_previous=retained_previous,
+            previous_region_overlap=previous_region_overlap,
         )
 
     @classmethod
@@ -1252,30 +2406,7 @@ class DroneMovementController:
     @staticmethod
     def _neighbor_adjacency(mask: np.ndarray) -> np.ndarray:
         """Return cells adjacent to at least one true eight-neighbor."""
-        height, width = mask.shape
-        adjacent = np.zeros_like(mask, dtype=bool)
-        for offset_y in (-1, 0, 1):
-            for offset_x in (-1, 0, 1):
-                if offset_x == 0 and offset_y == 0:
-                    continue
-                source_y = slice(
-                    max(0, -offset_y),
-                    height - max(0, offset_y),
-                )
-                target_y = slice(
-                    max(0, offset_y),
-                    height - max(0, -offset_y),
-                )
-                source_x = slice(
-                    max(0, -offset_x),
-                    width - max(0, offset_x),
-                )
-                target_x = slice(
-                    max(0, offset_x),
-                    width - max(0, -offset_x),
-                )
-                adjacent[target_y, target_x] |= mask[source_y, source_x]
-        return adjacent
+        return eight_neighbor_adjacency(mask)
 
     def _cone_point_support_scores(
         self,
@@ -1607,11 +2738,11 @@ class DroneMovementController:
         if selected[1] in self._last_raw_frontiers:
             geometry = self._frontier_geometry_signature(
                 selected[1],
-                self._last_raw_frontiers,
+                self._last_global_raw_frontiers,
             )
-        progress = drone.slam_map.progress_snapshot()
         sensor = getattr(drone, "sensor_controller", None)
         last_scan = getattr(sensor, "last_completed_scan", None)
+        progress = drone.slam_map.progress_snapshot()
         expected_pose = (
             int(snapshot.position[0]),
             int(snapshot.position[1]),
@@ -1620,20 +2751,30 @@ class DroneMovementController:
         reuse_completed_scan = bool(
             last_scan is not None
             and last_scan.pose == expected_pose
-            and last_scan.sequence == progress.completed_scan_sequence
         )
-        minimum_sequence = progress.completed_scan_sequence
+        published_sequence = (
+            max(0, int(last_scan.sequence))
+            if last_scan is not None
+            else 0
+        )
+        minimum_sequence = published_sequence
         if reuse_completed_scan:
             minimum_sequence -= 1
+        requested_at = self._simulation_time()
 
         self._pending_frontier_scan = _PendingFrontierScan(
             position=snapshot.position,
             heading=chosen_direction,
+            resume_heading=float(snapshot.heading_deg),
             frontier_target=selected[1],
             unknown_target=selected[2],
             reason=reason,
             minimum_scan_sequence=minimum_sequence,
             baseline_geometry=geometry,
+            requested_at=requested_at,
+            deadline=(
+                requested_at + _PENDING_FRONTIER_SCAN_TIMEOUT_SECONDS
+            ),
         )
         drone.runtime_state.reorient(chosen_direction)
         self._trace(
@@ -1648,7 +2789,12 @@ class DroneMovementController:
             unknown_support_score=best_score,
             candidate_heading_count=len(best_directions),
             minimum_scan_sequence=minimum_sequence,
+            published_scan_sequence=published_sequence,
+            slam_completed_scan_sequence=(
+                progress.completed_scan_sequence
+            ),
             reused_completed_scan=reuse_completed_scan,
+            timeout_seconds=_PENDING_FRONTIER_SCAN_TIMEOUT_SECONDS,
             slam_version=slam.version,
             reason=reason,
         )
@@ -1671,6 +2817,36 @@ class DroneMovementController:
             or completion.sequence <= pending.minimum_scan_sequence
             or completion.pose != expected_pose
         ):
+            now = self._simulation_time()
+            if now < pending.deadline:
+                return
+            progress = self.drone.slam_map.progress_snapshot()
+            self._pending_frontier_scan = None
+            self._trace(
+                "drone_stagnation_scan_timed_out",
+                position=pending.position,
+                direction=pending.heading,
+                resume_heading=pending.resume_heading,
+                frontier_target=pending.frontier_target,
+                unknown_target=pending.unknown_target,
+                reason=pending.reason,
+                expected_pose=expected_pose,
+                minimum_scan_sequence=pending.minimum_scan_sequence,
+                published_scan_sequence=(
+                    None if completion is None else completion.sequence
+                ),
+                published_scan_pose=(
+                    None if completion is None else completion.pose
+                ),
+                slam_completed_scan_sequence=(
+                    progress.completed_scan_sequence
+                ),
+                waited_seconds=max(0.0, now - pending.requested_at),
+                timeout_seconds=(
+                    _PENDING_FRONTIER_SCAN_TIMEOUT_SECONDS
+                ),
+            )
+            self._restore_movement_heading_after_scan(pending)
             return
 
         sensor_cells = max(0, int(completion.newly_known_cells))
@@ -1679,12 +2855,13 @@ class DroneMovementController:
         self.rebuild_frontiers(
             stride=self.frontier_stride,
             confidence_threshold=self.frontier_confidence_threshold,
+            global_heading=pending.resume_heading,
         )
         current_geometry = None
         if pending.frontier_target in self._last_raw_frontiers:
             current_geometry = self._frontier_geometry_signature(
                 pending.frontier_target,
-                self._last_raw_frontiers,
+                self._last_global_raw_frontiers,
             )
 
         suppressed = False
@@ -1701,6 +2878,7 @@ class DroneMovementController:
                 self._suppress_frontier_target(
                     pending.frontier_target,
                     reason="zero_gain_directed_scan",
+                    whole_component=True,
                 )
                 suppressed = True
                 disposition = "unchanged_geometry_suppressed"
@@ -1727,7 +2905,7 @@ class DroneMovementController:
         self,
         pending: _PendingFrontierScan,
     ) -> bool:
-        """Leave a scan-only pose through a collision-safe full-circle turn."""
+        """Restore the closest safe heading to the pre-scan travel heading."""
         drone = self.drone
         snapshot = drone.snapshot()
         valid_directions, _border_targets, _step_targets = (
@@ -1741,13 +2919,23 @@ class DroneMovementController:
                 "drone_stagnation_scan_no_safe_exit",
                 position=snapshot.position,
                 scan_direction=pending.heading,
+                resume_heading=pending.resume_heading,
                 frontier_target=pending.frontier_target,
             )
             self._reset_stagnation_window()
             return False
 
-        chosen_direction = drone.exploration_policy.choose_direction(
-            valid_directions
+        resume_heading = float(pending.resume_heading) % 360.0
+        chosen_direction = min(
+            valid_directions,
+            key=lambda direction: (
+                self._angular_distance(direction, resume_heading),
+                int(direction),
+            ),
+        )
+        resume_delta = self._angular_distance(
+            chosen_direction,
+            resume_heading,
         )
         drone.runtime_state.reorient(chosen_direction)
         self._trace(
@@ -1756,6 +2944,9 @@ class DroneMovementController:
             incoming_heading=snapshot.heading_deg,
             direction=chosen_direction,
             scan_direction=pending.heading,
+            resume_heading=resume_heading,
+            resume_heading_delta=resume_delta,
+            exact_resume=resume_delta <= 1e-9,
             frontier_target=pending.frontier_target,
             valid_direction_count=len(valid_directions),
         )
@@ -1771,9 +2962,13 @@ class DroneMovementController:
         """Walk one collision-checked straight step without invoking A*."""
         drone = self.drone
         snapshot = drone.snapshot()
+        assigned_borders = tuple(
+            target for target in border_targets
+            if self._in_assigned_sector(target)
+        )
         drone.runtime_state.begin_exploration(
             snapshot.direction,
-            border_targets,
+            assigned_borders,
         )
         path = bresenham_line_points(
             snapshot.position[0],
@@ -1844,6 +3039,13 @@ class DroneMovementController:
                 continue
             current = drone.snapshot().position
             if target == current:
+                self._trace_frontier_arrival(
+                    target,
+                    recovery_reason=recovery_reason,
+                    route_distance=0.0,
+                    direct_distance=0.0,
+                    route_circuity=1.0,
+                )
                 if (
                     recovery_reason == "stagnation"
                     and self._start_frontier_scan(
@@ -1860,6 +3062,25 @@ class DroneMovementController:
 
             result = self._compute_path(current, target)
             path = result.path
+            route_distance = self._path_distance(
+                current,
+                tuple(path),
+                len(path),
+            )
+            direct_distance = math.dist(current, target)
+            segment_direct_distance = math.dist(
+                current,
+                path[-1] if path else current,
+            )
+            segment_circuity = self._route_circuity(
+                route_distance,
+                segment_direct_distance,
+            )
+            route_circuity = (
+                self._route_circuity(route_distance, direct_distance)
+                if result.status == PATH_COMPLETE
+                else None
+            )
             self._trace(
                 "drone_border_path",
                 start=current,
@@ -1870,6 +3091,14 @@ class DroneMovementController:
                 path_remaining_distance=result.remaining_distance,
                 segment_endpoint=path[-1] if path else None,
                 recovery_reason=recovery_reason,
+                route_distance=route_distance,
+                direct_distance=direct_distance,
+                route_circuity=route_circuity,
+                segment_direct_distance=segment_direct_distance,
+                segment_circuity=segment_circuity,
+                maximum_route_circuity=(
+                    self.maximum_frontier_path_circuity
+                ),
             )
             if recovery_reason == "stagnation":
                 self._trace(
@@ -1903,10 +3132,43 @@ class DroneMovementController:
                     now + self.border_retry_cooldown
                 )
                 continue
+            if (
+                route_circuity is not None
+                and route_circuity > self.maximum_frontier_path_circuity
+            ):
+                self._trace(
+                    "drone_frontier_route_rejected",
+                    start=current,
+                    target=target,
+                    route_distance=route_distance,
+                    direct_distance=direct_distance,
+                    route_circuity=route_circuity,
+                    maximum_route_circuity=(
+                        self.maximum_frontier_path_circuity
+                    ),
+                    recovery_reason=recovery_reason,
+                    reason="excessive_path_circuity",
+                )
+                self._suppress_frontier_target(
+                    target,
+                    reason="excessive_path_circuity",
+                    whole_component=True,
+                )
+                continue
             self._clear_partial_route(target)
             self._pending_frontier_route = None
             if not self._follow_path(path, source="border_astar"):
                 return False
+
+            self._trace_frontier_arrival(
+                target,
+                recovery_reason=recovery_reason,
+                route_distance=route_distance,
+                direct_distance=direct_distance,
+                route_circuity=(
+                    1.0 if route_circuity is None else route_circuity
+                ),
+            )
 
             if (
                 recovery_reason == "stagnation"
@@ -1963,32 +3225,91 @@ class DroneMovementController:
         target: Position,
         *,
         reason: str,
+        whole_component: bool = False,
     ) -> None:
-        """Retire one target until its sampled local geometry changes."""
-        geometry = None
-        if target in self._last_raw_frontiers:
-            geometry = self._frontier_geometry_signature(
-                target,
-                self._last_raw_frontiers,
-            )
-        self._suppressed_frontier_geometry[target] = geometry
-        self.drone.runtime_state.remove_frontier(target)
-        self.border_retry_until.pop(target, None)
-        self._clear_partial_route(target)
+        """Retire one target, or its component, until geometry changes."""
+        targets = (target,)
+        if whole_component:
+            targets = self._frontier_component_targets.get(target, ())
+            if not targets and self._last_frontier_mask is not None:
+                targets = self._sampled_frontier_component(
+                    self._last_frontier_mask,
+                    target,
+                    self._last_raw_frontiers,
+                )
+                for candidate in targets:
+                    self._frontier_component_targets[candidate] = targets
+            if not targets:
+                targets = (target,)
+        for candidate in targets:
+            geometry = None
+            if candidate in self._last_raw_frontiers:
+                geometry = self._frontier_geometry_signature(
+                    candidate,
+                    self._last_global_raw_frontiers,
+                )
+            self._suppressed_frontier_geometry[candidate] = geometry
+            self.drone.runtime_state.remove_frontier(candidate)
+            self.border_retry_until.pop(candidate, None)
+            self._clear_partial_route(candidate)
+        assigned_component_id = self._assigned_frontier_component_id(targets)
+        if assigned_component_id is not None:
+            self._sector_suppression_reasons.setdefault(
+                assigned_component_id,
+                set(),
+            ).add(str(reason))
+            self._sector_suppression_targets.setdefault(
+                assigned_component_id,
+                set(),
+            ).update(targets)
         if (
             self._pending_frontier_route is not None
-            and self._pending_frontier_route.target == target
+            and self._pending_frontier_route.target in targets
         ):
             self._pending_frontier_route = None
+        target_geometry = self._suppressed_frontier_geometry.get(target)
         self._trace(
             "drone_border_target_suppressed",
             target=target,
             reason=reason,
             local_geometry_point_count=(
-                0 if geometry is None else len(geometry)
+                0 if target_geometry is None else len(target_geometry)
             ),
+            suppressed_target_count=len(targets),
+            suppressed_target_sample=targets[:12],
+            assigned_component_id=assigned_component_id,
             slam_version=self.drone.slam_map.version,
         )
+
+    def _assigned_frontier_component_id(
+        self,
+        targets: Iterable[Position],
+    ) -> int | None:
+        """Match sampled local targets to the current rover component ID."""
+        assignment = self._sector_assignment
+        if assignment is None or not assignment.frontier_components:
+            return None
+        target_set = frozenset(targets)
+        if not target_set:
+            return None
+        ranked: list[tuple[int, float, int]] = []
+        for component in assignment.frontier_components:
+            overlap = len(target_set & component.cells)
+            nearest = min(
+                (
+                    (target[0] - point[0]) ** 2
+                    + (target[1] - point[1]) ** 2
+                    for target in target_set
+                    for point in component.cells
+                ),
+                default=float("inf"),
+            )
+            ranked.append((overlap, -float(nearest), component.component_id))
+        overlap, negative_distance, component_id = max(ranked)
+        maximum_distance = float(self.frontier_stride * 2) ** 2
+        if overlap <= 0 and -negative_distance > maximum_distance:
+            return None
+        return int(component_id)
 
     def _reorient_after_border(self, target: Position) -> bool:
         """Turn toward a usable exit after A* reaches an escape border."""
@@ -2109,39 +3430,51 @@ class DroneMovementController:
         *,
         stride: int = 4,
         confidence_threshold: float = 0.6,
+        global_heading: float | None = None,
     ) -> None:
         """Extract known-free cells bordering unknown local SLAM cells."""
         slam = self.drone.slam_map.snapshot(point_limit=0)
         occupancy = np.asarray(slam.occupancy)
         confidence = np.asarray(slam.confidence)
-        threshold = float(confidence_threshold)
-        known_free = (occupancy == FREE) & (confidence >= threshold)
-        unknown = (occupancy == UNKNOWN) | (confidence < threshold)
-
-        neighbor_unknown = self._neighbor_adjacency(unknown)
-
-        frontier_mask = known_free & neighbor_unknown
+        frontier_mask = known_free_frontier_mask(
+            occupancy,
+            confidence,
+            confidence_threshold,
+        )
         sampling_stride = max(1, int(stride))
         sampled = frontier_mask[::sampling_stride, ::sampling_stride]
         rows, columns = np.where(sampled)
-        raw_frontiers = tuple(
+        all_raw_frontiers = tuple(
             (
                 int(column * sampling_stride),
                 int(row * sampling_stride),
             )
             for row, column in zip(rows, columns)
         )
+        raw_frontiers = tuple(
+            target
+            for target in all_raw_frontiers
+            if self._in_assigned_sector((
+                target[0],
+                target[1],
+            ))
+        )
+        all_raw_frontier_set = frozenset(all_raw_frontiers)
         raw_frontier_set = frozenset(raw_frontiers)
+        self._last_frontier_mask = frontier_mask
+        self._frontier_component_targets.clear()
         reactivated: list[Position] = []
         for target, stored_geometry in tuple(
             self._suppressed_frontier_geometry.items()
         ):
-            if target not in raw_frontier_set:
+            if target not in all_raw_frontier_set:
                 self._suppressed_frontier_geometry.pop(target, None)
+                continue
+            if target not in raw_frontier_set:
                 continue
             current_geometry = self._frontier_geometry_signature(
                 target,
-                raw_frontier_set,
+                all_raw_frontier_set,
             )
             if stored_geometry is None:
                 self._suppressed_frontier_geometry[target] = current_geometry
@@ -2160,6 +3493,7 @@ class DroneMovementController:
             if target not in self._suppressed_frontier_geometry
         )
         self._last_raw_frontiers = raw_frontier_set
+        self._last_global_raw_frontiers = all_raw_frontier_set
         self._frontier_slam_version = int(slam.version)
         self.drone.runtime_state.replace_frontiers(frontiers)
         self.border_retry_until = {
@@ -2172,6 +3506,7 @@ class DroneMovementController:
             frontier_count=len(frontiers),
             frontier_sample=frontiers[:12],
             raw_frontier_count=len(raw_frontiers),
+            global_raw_frontier_count=len(all_raw_frontiers),
             suppressed_frontier_count=len(suppressed),
             suppressed_frontier_sample=suppressed[:12],
             reactivated_frontier_count=len(reactivated),
@@ -2182,9 +3517,51 @@ class DroneMovementController:
             state = self.drone.snapshot()
             self._ensure_global_frontier_cache(
                 current=state.position,
-                heading=float(state.heading_deg),
+                heading=(
+                    float(state.heading_deg)
+                    if global_heading is None
+                    else float(global_heading)
+                ),
                 slam=slam,
             )
+
+    @staticmethod
+    def _sampled_frontier_component(
+        frontier_mask: np.ndarray,
+        target: Position,
+        sampled_frontiers: frozenset[Position],
+    ) -> tuple[Position, ...]:
+        """Return sampled targets in the target's full-resolution component."""
+        height, width = frontier_mask.shape
+        target_x, target_y = target
+        if (
+            not sampled_frontiers
+            or not (0 <= target_x < width and 0 <= target_y < height)
+            or not bool(frontier_mask[target_y, target_x])
+        ):
+            return ()
+
+        pending = [target]
+        visited = {target}
+        while pending:
+            x, y = pending.pop()
+            for offset_y in (-1, 0, 1):
+                for offset_x in (-1, 0, 1):
+                    if offset_x == 0 and offset_y == 0:
+                        continue
+                    neighbor = (x + offset_x, y + offset_y)
+                    if (
+                        0 <= neighbor[0] < width
+                        and 0 <= neighbor[1] < height
+                        and neighbor not in visited
+                        and bool(frontier_mask[neighbor[1], neighbor[0]])
+                    ):
+                        visited.add(neighbor)
+                        pending.append(neighbor)
+        return tuple(sorted(
+            visited & sampled_frontiers,
+            key=lambda point: (point[1], point[0]),
+        ))
 
     def _frontier_geometry_signature(
         self,
@@ -2210,7 +3587,12 @@ class DroneMovementController:
 
     def mission_completed(self) -> bool:
         """Return whether the drone has completed exploration and homing."""
-        done, _returning_home = self.drone.runtime_state.evaluate_mission_state()
+        if self._sector_policy_enabled():
+            done = self.drone.snapshot().done
+        else:
+            done, _returning_home = (
+                self.drone.runtime_state.evaluate_mission_state()
+            )
         if done:
             logger.info("Drone %s has completed the mission", self.drone.id)
         return done
@@ -2274,6 +3656,48 @@ class DroneMovementController:
         """Forget loop protection after completing or retiring a route."""
         self._partial_route_endpoints.pop(goal, None)
 
+    @staticmethod
+    def _route_circuity(
+        route_distance: float,
+        direct_distance: float,
+    ) -> float:
+        """Return routed distance divided by direct displacement."""
+        if direct_distance <= 1e-9:
+            return 1.0 if route_distance <= 1e-9 else math.inf
+        return max(1.0, float(route_distance) / float(direct_distance))
+
+    def _trace_frontier_arrival(
+        self,
+        target: Position,
+        *,
+        recovery_reason: str,
+        route_distance: float,
+        direct_distance: float,
+        route_circuity: float,
+    ) -> None:
+        """Record a physically reached frontier for reversal diagnostics."""
+        assignment = self._sector_assignment
+        geometry = self._frontier_geometry_signature(
+            target,
+            self._last_global_raw_frontiers,
+        )
+        self._trace(
+            "drone_frontier_reached",
+            target=target,
+            position=self.drone.snapshot().position,
+            recovery_reason=recovery_reason,
+            route_distance=route_distance,
+            direct_distance=direct_distance,
+            route_circuity=route_circuity,
+            sector_id=(None if assignment is None else assignment.sector_id),
+            generation=(
+                None if assignment is None else assignment.generation
+            ),
+            local_geometry_point_count=len(geometry),
+            local_geometry_sample=geometry[:12],
+            slam_version=self.drone.slam_map.version,
+        )
+
     def _simulation_time(self) -> float:
         return float(self.dependencies.simulation_time())
 
@@ -2290,6 +3714,10 @@ class DroneMovementController:
         end = start
         moved_points = 0
         completed = True
+        coverage_cell_entries = 0
+        coverage_new_cell_entries = 0
+        coverage_revisit_entries = 0
+        coverage_repeated_edge_entries = 0
         for node in points:
             if node == self.drone.snapshot().position:
                 continue
@@ -2303,6 +3731,20 @@ class DroneMovementController:
             self.drone.runtime_state.move_to(node)
             end = node
             moved_points += 1
+            (
+                cell_entries,
+                new_cell_entries,
+                revisit_entries,
+                repeated_edge_entries,
+            ) = self._record_coverage_transition(
+                previous,
+                node,
+                self._simulation_time(),
+            )
+            coverage_cell_entries += cell_entries
+            coverage_new_cell_entries += new_cell_entries
+            coverage_revisit_entries += revisit_entries
+            coverage_repeated_edge_entries += repeated_edge_entries
             if not self.dependencies.wait_simulation_delay(
                 self.drone.delay / self.drone.speed_factor
             ):
@@ -2325,6 +3767,14 @@ class DroneMovementController:
             travelled_distance=travelled_distance,
             started_sim_time=started,
             ended_sim_time=self._simulation_time(),
+            coverage_cell_entries=coverage_cell_entries,
+            coverage_new_cell_entries=coverage_new_cell_entries,
+            coverage_revisit_entries=coverage_revisit_entries,
+            coverage_repeated_edge_entries=(
+                coverage_repeated_edge_entries
+            ),
+            coverage_known_cell_count=len(self._coverage_cell_visits),
+            coverage_known_edge_count=len(self._coverage_edge_visits),
         )
         return completed
 

@@ -5,18 +5,29 @@ from typing import Iterable, Tuple
 import numpy as np
 import pygame
 
+from mapping.frontiers import known_free_frontier_mask
 from mapping.slam_map import OCCUPIED
 
 
 FULL_MAP_UNDERLAY_ALPHA = 64
+FRONTIER_COLOR = (0, 255, 0)
 
 
 class SlamRenderer:
     """Renders SLAM occupancy and point data into a pygame surface."""
 
-    def __init__(self, map_w: int, map_h: int) -> None:
+    def __init__(
+        self,
+        map_w: int,
+        map_h: int,
+        *,
+        frontier_confidence_threshold: float = 0.6,
+    ) -> None:
         """Create the transparent surface used for the map overlay."""
         self.surface = pygame.Surface((map_w, map_h), pygame.SRCALPHA)
+        self.frontier_confidence_threshold = float(
+            frontier_confidence_threshold
+        )
         self._full_map_cache_key = None
         self._full_map_cache = None
 
@@ -74,6 +85,11 @@ class SlamRenderer:
             known_mask = confidence > 0.0
             occ_mask = occupancy == OCCUPIED
             free_mask = known_mask & (~occ_mask)
+            frontier_mask = known_free_frontier_mask(
+                occupancy,
+                confidence,
+                self.frontier_confidence_threshold,
+            )
             confidence_curve = np.power(np.clip(confidence, 0.0, 1.0), 6.0)
 
             red = np.zeros((h, w), dtype=np.float32)
@@ -94,6 +110,12 @@ class SlamRenderer:
             green[occ_mask] = 45.0 + (confidence_curve[occ_mask] * 60.0)
             blue[occ_mask] = 40.0
             alpha[occ_mask] = 255.0
+
+            # Navigation frontiers: confident free cells bordering unknown SLAM.
+            red[frontier_mask] = FRONTIER_COLOR[0]
+            green[frontier_mask] = FRONTIER_COLOR[1]
+            blue[frontier_mask] = FRONTIER_COLOR[2]
+            alpha[frontier_mask] = 255.0
 
         red = np.clip(np.rint(red), 0.0, 255.0).astype(np.uint8)
         green = np.clip(np.rint(green), 0.0, 255.0).astype(np.uint8)

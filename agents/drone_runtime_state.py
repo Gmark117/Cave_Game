@@ -162,9 +162,13 @@ class DroneRuntimeState:
                 self._frontiers.remove(normalized)
 
     def evaluate_mission_state(self) -> tuple[bool, bool]:
-        """Return `(done, homing)` and home after explored borders exhaust."""
+        """Return state and turn local exhaustion into homing."""
         with self._lock:
-            if self._explored and not self._frontiers and not self._done:
+            if (
+                self._explored
+                and not self._frontiers
+                and not self._done
+            ):
                 self._returning_home = True
             return self._done, self._returning_home
 

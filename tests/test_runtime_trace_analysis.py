@@ -9,10 +9,336 @@ from tools.analyze_runtime_trace import (
     LEGACY_MCTS_BUDGET_MS,
     analyze_trace,
     format_characterization,
+    summarize,
 )
 
 
 class RuntimeTraceAnalysisTests(unittest.TestCase):
+    def test_summary_reports_arrival_departure_sharing_protocol(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_rover_check_in",
+                "drone_id": 0,
+                "reason": "exchanged",
+            },
+            {
+                "event": "drone_rover_departure_share",
+                "drone_id": 0,
+                "reason": "unchanged_versions",
+            },
+            {
+                "event": "drone_sharing_suppressed",
+                "drone_id": 0,
+                "reason": "rover_arrival_or_standby",
+            },
+        ]))
+
+        self.assertIn("Sharing protocol:", report)
+        self.assertIn("rover arrivals: total=1 exchanged=1", report)
+        self.assertIn(
+            "rover departures: total=1 unchanged_versions=1",
+            report,
+        )
+        self.assertIn("rover-area pair suppressions: total=1", report)
+
+    def test_summary_reports_rover_frontier_significance(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "rover_sector_frontiers_filtered",
+                "generation": 1,
+                "raw_frontier_pixels": 11,
+                "raw_component_count": 2,
+                "significant_frontier_pixels": 0,
+                "significant_component_count": 0,
+                "unknown_supported_component_count": 0,
+                "unknown_supported_candidate_count": 7,
+                "redundant_unknown_supported_component_count": 7,
+                "frontier_unknown_basin_count": 2,
+                "significant_unknown_basin_count": 0,
+                "border_connected_unknown_basin_count": 1,
+                "border_connected_unknown_supported_candidate_count": 3,
+                "discarded_frontier_pixels": 11,
+                "discarded_component_count": 2,
+                "minimum_component_cells": 12,
+                "minimum_unknown_support_cells": 64,
+                "mission_exhausted": True,
+            },
+            {
+                "event": "rover_sector_workload_balanced",
+                "generation": 1,
+                "initial_frontier_workloads": [30, 0, 0],
+                "balanced_frontier_workloads": [10, 10, 10],
+                "initial_workload_spread": 30,
+                "balanced_workload_spread": 0,
+                "initial_estimated_efforts": [45.0, 5.0, 5.0],
+                "balanced_estimated_efforts": [20.0, 18.0, 17.0],
+                "initial_estimated_effort_spread": 40.0,
+                "balanced_estimated_effort_spread": 3.0,
+                "moved_coarse_cell_count": 2,
+            },
+            {
+                "event": "rover_sector_frontier_outcomes",
+                "generation": 2,
+                "previous_generation": 1,
+                "confident_occupied_gain": 0,
+                "remembered_component_count": 2,
+                "suppressed_component_count": 2,
+                "suppressed_frontier_pixels": 11,
+                "remaining_component_count": 0,
+                "remaining_frontier_pixels": 0,
+                "evaluated_component_count": 2,
+                "locally_unchanged_component_count": 1,
+                "reported_zero_gain_component_count": 1,
+                "productive_component_count": 0,
+                "resolved_component_count": 0,
+                "component_outcomes": [{
+                    "component_id": 7,
+                    "previous_size": 6,
+                    "current_size": 6,
+                    "overlap_iou": 1.0,
+                    "local_confident_cell_gain": 0,
+                    "local_confident_occupied_gain": 0,
+                    "local_confidence_gain": 0.0,
+                    "suppression_reasons": ["zero_gain_directed_scan"],
+                    "disposition": "reported_zero_gain",
+                }],
+                "mission_exhausted": True,
+            },
+        ]))
+
+        self.assertIn("Rover frontier significance:", report)
+        self.assertIn("generation 1: raw=11px/2 components", report)
+        self.assertIn("discarded=11px/2 components", report)
+        self.assertIn("rescue_candidates=7", report)
+        self.assertIn("duplicate_gateways=7", report)
+        self.assertIn("unknown_basins=0/2", report)
+        self.assertIn("border_unknown_basins=1", report)
+        self.assertIn("border_rescues_rejected=3", report)
+        self.assertIn("thresholds=12px-or-64unknown", report)
+        self.assertIn("mission_exhausted=True", report)
+        self.assertIn("Rover sector workload balance:", report)
+        self.assertIn("spread=30->0", report)
+        self.assertIn(
+            "estimated_effort=[45.0, 5.0, 5.0]->[20.0, 18.0, 17.0]",
+            report,
+        )
+        self.assertIn("effort_spread=40.00->3.00", report)
+        self.assertIn("moved_cells=2", report)
+        self.assertIn("Rover frontier outcome memory:", report)
+        self.assertIn("occupied_gain=0", report)
+        self.assertIn("suppressed=11px/2 components", report)
+        self.assertIn("unchanged=1", report)
+        self.assertIn("reported_zero_gain=1", report)
+        self.assertIn("component 7: reported_zero_gain", report)
+
+    def test_summary_reports_frontier_arrivals_and_route_circuity(
+        self,
+    ) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_border_path",
+                "drone_id": 1,
+                "path_status": "complete",
+                "route_circuity": 7.99,
+            },
+            {
+                "event": "drone_frontier_route_rejected",
+                "drone_id": 1,
+            },
+            {
+                "event": "drone_frontier_reached",
+                "drone_id": 1,
+                "target": [10, 20],
+            },
+        ]))
+
+        self.assertIn("drone_frontier_reached: 1", report)
+        self.assertIn("drone_frontier_route_rejected: 1", report)
+        self.assertIn("frontier route circuity:", report)
+        self.assertIn("max=7.99x", report)
+        self.assertIn("over_4x=1", report)
+
+    def test_summary_reports_sector_epoch_yield_and_wait_time(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_sector_assigned",
+                "drone_id": 0,
+                "generation": 1,
+                "frontier_cells": 12,
+                "sim_time": 10.0,
+            },
+            {
+                "event": "drone_motion",
+                "drone_id": 0,
+                "travelled_distance": 20.0,
+                "sim_time": 11.0,
+            },
+            {
+                "event": "sensor_scan",
+                "drone_id": 0,
+                "newly_known_cells": 5,
+                "confidence_gain": 5.0,
+                "sim_time": 12.0,
+            },
+            {
+                "event": "drone_sector_wait_completed",
+                "drone_id": 0,
+                "waited_seconds": 4.5,
+                "sim_time": 13.0,
+            },
+            {
+                "event": "mission_shutdown_started",
+                "sim_time": 14.0,
+            },
+        ]))
+
+        self.assertIn("Sector epoch yield:", report)
+        self.assertIn("generation 1: duration=4.00s", report)
+        self.assertIn("assigned_frontiers=12", report)
+        self.assertIn("sensor_gain=5", report)
+        self.assertIn("gain_per_px=0.2500", report)
+        self.assertIn("sector barrier waits:", report)
+        self.assertIn("total=4.50s", report)
+
+    def test_summary_reports_coverage_memory_and_ingress_recovery(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_random_direction_selected",
+                "drone_id": 0,
+                "selection_mode": "wall_tracking",
+                "selected_coverage_visit_pressure": 2.0,
+                "selected_coverage_edge_pressure": 1.0,
+                "selected_coverage_penalty_factor": 0.25,
+            },
+            {
+                "event": "drone_motion",
+                "drone_id": 0,
+                "travelled_distance": 40.0,
+                "coverage_cell_entries": 4,
+                "coverage_new_cell_entries": 1,
+                "coverage_revisit_entries": 3,
+                "coverage_repeated_edge_entries": 2,
+                "coverage_known_cell_count": 8,
+                "coverage_known_edge_count": 7,
+            },
+            {
+                "event": "drone_sector_ingress_recovery",
+                "drone_id": 0,
+                "path_status": "complete",
+            },
+        ]))
+
+        self.assertIn("drone_sector_ingress_recovery: 1", report)
+        self.assertIn("coverage memory:", report)
+        self.assertIn("penalized=1", report)
+        self.assertIn("avg_factor=0.250", report)
+        self.assertIn("revisits=3/4 (75.0%)", report)
+        self.assertIn("repeated_edges=2/4 (50.0%)", report)
+        self.assertIn("sector_ingress:complete=1", report)
+
+    def test_summary_reports_pre_scan_heading_restoration(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_stagnation_scan_exit_reoriented",
+                "drone_id": 1,
+                "exact_resume": True,
+                "resume_heading_delta": 0.0,
+            },
+            {
+                "event": "drone_stagnation_scan_exit_reoriented",
+                "drone_id": 1,
+                "exact_resume": False,
+                "resume_heading_delta": 30.0,
+            },
+            {
+                "event": "drone_stagnation_scan_timed_out",
+                "drone_id": 1,
+            },
+        ]))
+
+        self.assertIn("drone_stagnation_scan_timed_out: 1", report)
+        self.assertIn("directed scan exits:", report)
+        self.assertIn("exact_resume=1/2", report)
+        self.assertIn("fallback=1", report)
+        self.assertIn("avg_delta=15.0deg", report)
+        self.assertIn("max_delta=30.0deg", report)
+
+    def test_summary_reports_sensor_timings_and_tolerated_completion(
+        self,
+    ) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "sensor_scan",
+                "drone_id": 0,
+                "vision_elapsed_ms": 10.0,
+                "slam_elapsed_ms": 4.0,
+                "terrain_elapsed_ms": 6.0,
+                "sensor_elapsed_ms": 20.0,
+            },
+            {
+                "event": "team_wall_mapping_tolerance_reached",
+                "mapped_wall_pixels": 9414,
+                "total_wall_pixels": 9444,
+                "missing_wall_pixels": 30,
+            },
+        ]))
+
+        self.assertIn("Completion trigger:", report)
+        self.assertIn("missing=30", report)
+        self.assertIn("sensor scan timings:", report)
+        self.assertIn("avg_total=20.00ms", report)
+
+    def test_summary_reports_global_commitment_and_endgame_routes(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_global_frontiers_rebuilt",
+                "drone_id": 0,
+                "elapsed_ms": 10.0,
+                "region_count": 4,
+                "eligible_region_count": 2,
+                "filtered_region_count": 2,
+                "selected_target_retained": True,
+                "forced": True,
+                "suppressed_region_count": 1,
+            },
+            {
+                "event": "drone_local_frontier_exhaustion_deferred",
+                "drone_id": 0,
+            },
+            {
+                "event": "drone_global_frontier_path",
+                "drone_id": 0,
+                "path_status": "complete",
+            },
+        ]))
+
+        self.assertIn("drone_local_frontier_exhaustion_deferred: 1", report)
+        self.assertIn("drone_global_frontier_path: 1", report)
+        self.assertIn("retained=1/1", report)
+        self.assertIn("forced=1", report)
+        self.assertIn("avg_suppressed=1.0", report)
+        self.assertIn("global:complete=1", report)
+
+    def test_summary_reports_active_global_target_ownership(self) -> None:
+        report = "\n".join(summarize([{
+            "event": "drone_random_direction_selected",
+            "drone_id": 0,
+            "global_frontier_active": True,
+            "global_frontier_region_size": 100,
+            "global_frontier_region_distance": 80.0,
+            "global_frontier_ownership_margin": 0.25,
+            "global_frontier_launch_sector_alignment": 0.75,
+            "global_frontier_ownership_contribution": 0.5,
+            "global_frontier_requester_distance": 80.0,
+            "global_frontier_nearest_peer_distance": 100.0,
+        }]))
+
+        self.assertIn("active global target ownership:", report)
+        self.assertIn("owned=100.0%", report)
+        self.assertIn("avg_margin=0.250", report)
+        self.assertIn("avg_requester_distance=80.0px", report)
+        self.assertIn("avg_nearest_peer_distance=100.0px", report)
+
     def test_replacement_trace_reports_every_final_acceptance_signal(self) -> None:
         events = [
             {
@@ -660,7 +986,7 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         self.assertEqual(retention.segment_followups, 1)
         self.assertEqual(retention.retained_after_segment, 1)
 
-    def test_trace_relative_window_end_excludes_later_runtime_events(self) -> None:
+    def test_trace_analysis_uses_the_complete_runtime(self) -> None:
         events = [
             {
                 "event": "mission_constructed",
@@ -688,22 +1014,16 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
             },
         ]
 
-        metrics = analyze_trace(
-            events,
-            normalized_window_end_s=15.0,
-        )
+        metrics = analyze_trace(events)
 
-        self.assertEqual(metrics.event_count, 3)
+        self.assertEqual(metrics.event_count, 4)
         self.assertEqual(metrics.mcts.budget_ms, 25.0)
-        self.assertEqual(metrics.information_efficiency.completed_scans, 1)
-        self.assertEqual(metrics.information_efficiency.newly_known_cells, 4)
+        self.assertEqual(metrics.information_efficiency.completed_scans, 2)
+        self.assertEqual(metrics.information_efficiency.newly_known_cells, 104)
         self.assertEqual(
             metrics.information_efficiency.newly_known_cells_per_travelled_px,
-            2.0,
+            52.0,
         )
-
-        with self.assertRaises(ValueError):
-            analyze_trace(events, normalized_window_end_s=-1.0)
 
     def test_frontier_fallbacks_expose_repeated_and_regenerated_targets(self) -> None:
         events = [

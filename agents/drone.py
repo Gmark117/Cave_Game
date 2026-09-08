@@ -100,6 +100,17 @@ class Drone:
                     (peer.id, peer.snapshot().position)
                     for peer in getattr(control, "drones", ())
                 ),
+                sector_check_in=getattr(control, "sector_check_in", None),
+                sector_assignment=getattr(
+                    control,
+                    "sector_assignment",
+                    None,
+                ),
+                get_check_in_position=getattr(
+                    control,
+                    "get_check_in_position",
+                    None,
+                ),
             ),
         )
         self.sensor_controller = DroneSensorController(

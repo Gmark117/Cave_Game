@@ -10,6 +10,7 @@ from unittest.mock import patch
 from config.simulation_config import (
     ExplorationConfig,
     FrontierConfig,
+    MissionConfig,
     SimulationConfig,
     SlamConfig,
     TraceConfig,
@@ -58,6 +59,8 @@ class HelperAndModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             FrontierConfig(minimum_cluster_cells=0)
         with self.assertRaises(ValueError):
+            FrontierConfig(minimum_unknown_support_cells=0)
+        with self.assertRaises(ValueError):
             FrontierConfig(distance_band=0.0)
         with self.assertRaises(ValueError):
             FrontierConfig(cluster_size_weight=-1.0)
@@ -65,6 +68,20 @@ class HelperAndModelTests(unittest.TestCase):
             FrontierConfig(global_cell_size=0)
         with self.assertRaises(ValueError):
             FrontierConfig(global_refresh_interval=-1.0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(global_ownership_weight=-1.0)
+        with self.assertRaises(ValueError):
+            FrontierConfig(maximum_path_circuity=0.99)
+        with self.assertRaises(ValueError):
+            ExplorationConfig(coverage_memory_cell_size=0)
+        with self.assertRaises(ValueError):
+            ExplorationConfig(coverage_memory_decay_seconds=0.0)
+        with self.assertRaises(ValueError):
+            ExplorationConfig(coverage_visit_weight=-1.0)
+        with self.assertRaises(ValueError):
+            ExplorationConfig(coverage_edge_weight=-1.0)
+        with self.assertRaises(ValueError):
+            MissionConfig(wall_completion_tolerance_pixels=-1)
 
     def test_runtime_trace_writes_jsonl_events(self) -> None:
         self.assertEqual(RuntimeTraceLogger.SCHEMA_VERSION, 3)

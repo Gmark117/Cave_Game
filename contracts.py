@@ -78,6 +78,7 @@ class TerrainSharingDependencies:
     presentation: PresentationInvalidator
     simulation_time: Callable[[], float]
     runtime_trace: Any | None = None
+    periodic_rover_sharing_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,8 @@ class MissionRendererDependencies:
     presentation: PresentationInvalidator
     is_paused: Callable[[], bool]
     is_music_enabled: Callable[[], bool]
+    sector_renderer: Any | None = None
+    get_sector_snapshot: Callable[[], Any] = lambda: None
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,9 @@ class DroneMovementDependencies:
         [], Sequence[tuple[int, Position]]
     ] = lambda: ()
     compute_path_segment: Callable[[Position, Position], Any] | None = None
+    sector_check_in: Callable[[int, int | None], Any] | None = None
+    sector_assignment: Callable[[int], Any] | None = None
+    get_check_in_position: Callable[[], Position] | None = None
 
 
 @dataclass(frozen=True)

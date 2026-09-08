@@ -13,6 +13,7 @@ class MissionConfig:
     map_dim: str = "MEDIUM"
     seed: int = 0
     num_drones: int = 3
+    wall_completion_tolerance_pixels: int = 30
 
     def __post_init__(self) -> None:
         """Validate values that are unsafe or ambiguous at runtime."""
@@ -22,6 +23,10 @@ class MissionConfig:
             raise ValueError("map_dim must not be empty")
         if self.num_drones <= 0:
             raise ValueError("num_drones must be positive")
+        if self.wall_completion_tolerance_pixels < 0:
+            raise ValueError(
+                "wall_completion_tolerance_pixels must be non-negative"
+            )
 
 
 @dataclass(frozen=True)
@@ -78,12 +83,15 @@ class FrontierConfig:
     stride: int = 4
     rebuild_cooldown: float = 0.25
     minimum_cluster_cells: int = 12
+    minimum_unknown_support_cells: int = 64
     distance_band: float = 16.0
     wall_continuation_weight: float = 2.0
     cluster_size_weight: float = 2.0
     cluster_proximity_weight: float = 1.0
     global_cell_size: int = 32
     global_refresh_interval: float = 2.0
+    global_ownership_weight: float = 2.0
+    maximum_path_circuity: float = 4.0
 
     def __post_init__(self) -> None:
         """Validate border extraction controls."""
@@ -97,6 +105,10 @@ class FrontierConfig:
             raise ValueError("rebuild_cooldown must be non-negative")
         if self.minimum_cluster_cells <= 0:
             raise ValueError("minimum_cluster_cells must be positive")
+        if self.minimum_unknown_support_cells <= 0:
+            raise ValueError(
+                "minimum_unknown_support_cells must be positive"
+            )
         if self.distance_band <= 0.0:
             raise ValueError("frontier distance_band must be positive")
         if self.global_cell_size <= 0:
@@ -105,12 +117,17 @@ class FrontierConfig:
             raise ValueError(
                 "frontier global_refresh_interval must be non-negative"
             )
+        if self.maximum_path_circuity < 1.0:
+            raise ValueError(
+                "frontier maximum_path_circuity must be at least one"
+            )
         if min(
             self.wall_continuation_weight,
             self.cluster_size_weight,
             self.cluster_proximity_weight,
+            self.global_ownership_weight,
         ) < 0.0:
-            raise ValueError("frontier cluster weights must be non-negative")
+            raise ValueError("frontier scoring weights must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -123,6 +140,10 @@ class ExplorationConfig:
     wall_direction_bias: float = 4.0
     unexplored_direction_bias: float = 2.0
     separation_direction_bias: float = 1.5
+    coverage_memory_cell_size: int = 32
+    coverage_memory_decay_seconds: float = 180.0
+    coverage_visit_weight: float = 1.5
+    coverage_edge_weight: float = 2.0
 
     def __post_init__(self) -> None:
         """Validate and normalize legacy policy names."""
@@ -137,10 +158,18 @@ class ExplorationConfig:
             raise ValueError(
                 "stagnation_min_sensor_cells_per_px must be non-negative"
             )
+        if self.coverage_memory_cell_size <= 0:
+            raise ValueError("coverage_memory_cell_size must be positive")
+        if self.coverage_memory_decay_seconds <= 0.0:
+            raise ValueError(
+                "coverage_memory_decay_seconds must be positive"
+            )
         if min(
             self.wall_direction_bias,
             self.unexplored_direction_bias,
             self.separation_direction_bias,
+            self.coverage_visit_weight,
+            self.coverage_edge_weight,
         ) < 0.0:
             raise ValueError("exploration direction biases must be non-negative")
         object.__setattr__(self, "policy", "random")

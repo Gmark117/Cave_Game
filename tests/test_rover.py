@@ -89,6 +89,13 @@ class RoverTests(unittest.TestCase):
             )
         )
 
+    def test_rover_owns_team_slam_checkpoint(self) -> None:
+        snapshot = self.rover.slam_map.snapshot()
+
+        self.assertEqual(snapshot.occupancy.shape, (4, 4))
+        self.assertTrue(np.all(snapshot.occupancy == -1))
+        self.assertTrue(np.all(snapshot.confidence == 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

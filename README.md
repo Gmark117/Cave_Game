@@ -104,10 +104,18 @@ controller groups local unknown boundaries into connected components. It
 weights collision-free headings toward sufficiently large wall-touching
 components first, generic components second, and separation from nearby
 teammates throughout. A cached 32-pixel coarse index periodically summarizes
-frontiers across the drone's complete SLAM map. When its selected region lies
+frontiers inside the rover-assigned portion of the drone's SLAM map. When its selected region lies
 beyond the local scoring window, that bearing becomes the strategic signal
-and local geometry remains a lower-weight tactical correction. Tiny components do not bias normal movement but remain
-available to bounded stagnation cleanup. It then walks a ten-pixel raster step. If no
+and local geometry remains a lower-weight tactical correction. The previous
+global region remains committed while it still overlaps current geometry and
+is competitively scored. Tiny components do not bias normal movement but remain
+available to bounded stagnation cleanup. A per-drone 32-pixel coverage memory
+records coarse cell entries and undirected edge traversals. Its exponentially
+decaying visit and edge pressure softly reduces ordinary heading weights toward
+recently repeated ground without constraining sector ingress, rover check-in,
+or homing routes. A confirmed zero-gain scan retires
+the whole connected sampled component until its geometry changes. It then
+walks a ten-pixel raster step. If no
 radius-length heading is open, it extracts border cells from the drone's local
 SLAM and uses A* to reach the nearest viable border. Reaching an
 escape border suppresses that exact target until its local frontier geometry
@@ -115,12 +123,23 @@ changes, then performs a recovery-only full-circle turn toward a physically
 usable heading. A distance-based sensor-gain window also redirects stagnant
 random walks toward local unknown SLAM boundaries. Its scan-only heading may
 face a wall even though translation in that direction is invalid; movement
-waits for one completed scan, then restores a collision-safe heading. It falls
-back to a frontier outside the recent trail when A* is needed. A* is also used
-to return home.
+waits for one completed scan, then restores the pre-scan travel heading when it
+is safe or the closest safe alternative. It falls back to a frontier outside
+the recent trail when A* is needed. Sector exhaustion triggers a physical
+rover return using A* by default; the flown breadcrumb trail remains a safety
+fallback when a route cannot be planned or completed.
+Once a drone has entered its assignment, sector exhaustion remains valid even
+if its final step drifted across a coarse ownership boundary. A boxed-in drone
+that has not exhausted first uses A* to reach the nearest viable owned cell,
+then a full-circle direct step; two complete ingress failures abandon the
+assignment and begin rover check-in instead of spinning indefinitely.
+Team wall completion uses A* homing independently of the sector cycle.
 Every physical point is appended to the path history consumed by the renderer.
 
-`agents/rover.py` serves as a support agent. In the current architecture it is primarily valuable as a rendezvous and accumulation point for terrain knowledge, which makes it useful for centralizing observations without replacing the distributed model.
+`agents/rover.py` serves as a stationary support agent and physical team
+checkpoint. It accumulates both terrain and occupancy SLAM from arriving
+drones, returns the rover's current team snapshot, and anchors synchronized
+exploration-sector transitions.
 
 ### Support Systems
 
@@ -139,21 +158,46 @@ The simulation works as a feedback loop:
 1. The map is generated.
 2. Agents are placed into the world.
 3. Drones move and scan every visible cell in their current cone.
-4. Dense visibility updates local SLAM, while sparse sample rays update the
-   separate rover-oriented terrain knowledge.
-5. Nearby agents exchange data when the mission rules allow it.
+4. Dense visibility updates every observed local-SLAM occupancy cell at
+   uniform confidence, while sparse sample rays update the separate
+   rover-oriented terrain knowledge with distance-weighted confidence.
+5. Nearby agents exchange data when the mission rules allow it. A sector
+   transition requires a physical rendezvous with the primary rover. Each
+   drone exchanges SLAM and terrain once on arrival, stands by for an
+   assignment-ready signal, and exchanges once more immediately before
+   departure so it receives knowledge uploaded by later arrivals.
 6. The UI reports exposed wall-surface coverage from combined occupied SLAM;
    roughness remains an optional terrain heatmap.
-7. Ordinary movement makes a seeded weighted-random choice inside the current
-   vision cone. Connected wall-frontier components outrank generic components.
+7. The rover assigns disjoint 32-pixel exploration sectors. Ordinary movement
+   makes a seeded weighted-random choice inside the current vision cone, but
+   local and cached whole-map frontier evidence is restricted to the assigned
+   sector. Connected wall-frontier components outrank generic components.
    Wall candidates combine continuation, size rank, and proximity with 2:2:1
    weights; generic candidates combine size rank and proximity with 2:1
    weights. A coarse whole-map cache applies the same tiering every two seconds
    and steers toward remote regions without rescoring every frontier pixel on
-   every step. Positional separation spreads nearby drones.
-8. If a drone is boxed in, local-SLAM border cells are rebuilt and A* selects
-   an escape. Exact team wall completion starts coordinated homing; local
-   border exhaustion remains a compatibility fallback.
+   every step. Positional separation spreads nearby drones. Decaying coarse
+   cell and edge memory reduces the weight of recently revisited directions
+   while leaving mandatory transit paths available.
+8. When its sector is exhausted, a drone uses A* to return to the rover, with
+   its flown breadcrumb path retained as a safety fallback. Once the whole
+   team has checked in, the rover signals each waiting drone rather than
+   requiring repeated check-in polls, and a new contiguous partition is built
+   from accumulated rover SLAM. Before partitioning, frontier
+   components smaller than 12 pixels are discarded unless they open into at
+   least 64 connected unknown cells in an interior basin. Unknown basins
+   connected to the map boundary cannot rescue a small component. Only one
+   small gateway is retained per eligible basin. Sector seeds and safe boundary
+   transfers minimize estimated scan, approach, component-dispersion, and
+   terrain effort while keeping territories connected. Each assignment carries
+   stable frontier-component IDs. On arrival, the drone reports its local
+   suppression outcomes with the existing check-in; an unchanged component is
+   suppressed immediately when its own local region gained no confident cells
+   or when a directed scan confirmed zero gain.
+   If no significant novel frontier work remains, exploration ends.
+   Coordinated homing can
+   also start at exact team wall
+   completion or when no more than the configured 30 wall pixels remain.
 9. Mission completion requires every drone to finish its return.
 
 That flow is important because the game does not use a single global terrain oracle. Instead, knowledge is built from observations and exchanged through explicit events. This makes the heatmap, the agent behavior, and the mission state all consistent with one another.
@@ -174,8 +218,10 @@ rule.
 
 Local occupancy mapping follows the same ownership pattern. Each `SlamMap`
 privately owns its occupancy grid, confidence grid, point cloud, lock, and
-monotonic version. Sensing updates it through methods; sharing, frontier
-selection, and rendering consume detached `SlamSnapshot` values. Rendering
+monotonic version. `TerrainKnowledge` likewise exposes a monotonic revision so
+sharing can reject unchanged pairs before copying arrays. Sensing updates both
+stores through methods; sharing, frontier selection, and rendering consume
+detached snapshots. Rendering
 tracks consumed versions so an update arriving during frame composition
 remains pending for the next refresh.
 
@@ -184,8 +230,10 @@ Vision and terrain sampling deliberately have different resolutions.
 every grid cell in the cone; those free and occupied observations are the only
 sensor inputs to SLAM exploration gain and mission completion. The fixed ray
 set remains available for the overlay and samples roughness every second ray
-cell. Terrain may therefore remain interpolably sparse without creating
-frontiers or delaying wall-mapping completion.
+cell. Uniform occupancy and scan-local terrain samples are fused with bulk
+array operations, and each `sensor_scan` trace event reports vision, SLAM,
+terrain, and total elapsed time. Terrain may therefore remain interpolably
+sparse without creating frontiers or delaying wall-mapping completion.
 
 The distributed-semantics contract is:
 
@@ -193,13 +241,16 @@ The distributed-semantics contract is:
 - Mission-global terrain is telemetry and UI aggregation only.
 - Exploration progress is occupied-SLAM coverage of exposed wall surfaces;
   buried solid rock is excluded.
-- Exact team wall completion is a mission-level homing trigger. The exposed
-  ground-truth wall mask remains confined to mission evaluation and is never
-  supplied to a drone's heading scorer.
+- Exact team wall completion or the configured 30-pixel residual tolerance is
+  a mission-level homing trigger. The tolerance is capped at one percent of
+  the exposed wall total, and the UI still reserves 100% for exact coverage.
+  The exposed ground-truth wall mask remains confined to mission evaluation
+  and is never supplied to a drone's heading scorer.
 - SLAM-derived border selection is local. The physical cave map is consulted
   by collision checks, sensor simulation, communication line of sight, and
   the deliberately simple A* escape/homing service.
-- Sharing is the only mechanism that transfers local knowledge between agents.
+- Sharing is the only mechanism that transfers local knowledge between agents;
+  sector assignment itself carries no hidden occupancy data.
 - Rover movement remains disabled. Its existing target and route code is
   disabled until it uses rover-local received knowledge before activation.
 
@@ -207,10 +258,13 @@ The distributed-semantics contract is:
 
 The sharing model is intentionally limited.
 
-- Drone-to-drone exchange is triggered by proximity and throttled so the system does not spend all of its time copying arrays.
+- Drone-to-drone exchange is triggered by proximity and revision-gated, but is
+  suppressed while either drone is at a rover.
 - SLAM is shared, but derived frontier coordinates are not. A recipient
   invalidates and rebuilds its own borders before mission-exhaustion checks.
-- Rover sharing acts as a support mechanism for collecting knowledge near a persistent reference point.
+- Rover sharing is bidirectional for both terrain and SLAM and belongs to the
+  sector rendezvous protocol: once on arrival and once before departure.
+  Waiting for the team performs no map exchange.
 - The heatmap refresh is also throttled so rendering stays responsive.
 
 This makes the simulation feel distributed rather than centralized. Agents learn locally first, then synchronize when they actually meet.
@@ -240,32 +294,45 @@ The agent typically does the following:
   radius-length look-ahead and ten-pixel short step,
 - group local unknown boundaries into eight-connected components and exclude
   components below the configured 12-cell normal-heading size threshold,
-- periodically aggregate the complete local SLAM into 32-pixel coarse
+- periodically aggregate the assigned portion of local SLAM into 32-pixel coarse
   frontier regions, retain one remote strategic target for two seconds, and
   bias the current collision-safe cone toward its bearing,
 - keep wall-touching components as the strict first tier and score them from
   continuation alignment, normalized size rank, and proximity at 2:2:1; when
   none are actionable, score generic components from size rank and proximity
   at 2:1,
-- add a positional separation score that repels nearby teammates and assigns
-  deterministic launch sectors while the drones still overlap,
+- add a positional separation score that repels nearby teammates; a rover
+  assignment filters out-of-sector local and global targets and strongly
+  penalizes steps that leave an already-entered sector,
+- multiply ordinary heading weights by a decaying coarse coverage factor based
+  on prior cell entries and repeated undirected edge traversals; ingress,
+  check-in, and homing ignore this preference,
 - choose by the resulting weights with a per-drone seeded random generator,
 - walk the chosen line directly and record every point for path rendering,
 - after 120 travelled pixels, keep weighted-random movement when sensor-local
   gain is productive; otherwise rotate directly toward an unknown cell beside a
   reachable SLAM border and hold position for exactly one completed scan,
 - retain refreshed work after sensor gain, or suppress unchanged local
-  frontier geometry after a zero-gain directed scan, then restore a
-  collision-safe movement heading,
+  frontier components after a zero-gain directed scan, then restore a
+  collision-safe movement heading; scan requests use the last fully published
+  sensor completion as their sequence baseline, and a three-second
+  simulation-time watchdog restores movement if no matching completion arrives,
 - when no local border can be viewed, use A* to reach a border outside the
   recent breadcrumb trail,
 - when no local heading is available, rebuild known-free/unknown boundaries
   from local SLAM and use A* to reach the nearest viable border,
 - after escape A*, retire the reached border while its local geometry is
-  unchanged and rotate in place toward a usable outgoing heading,
-- use the same A* service for homing after exact team wall completion or local
-  border exhaustion; capped searches return a useful partial route and replan
-  from its endpoint instead of being reported as unreachable.
+  unchanged, including across sector assignments, and rotate in place toward
+  a usable outgoing heading; reject a complete frontier route when its routed
+  distance exceeds the configured multiple of direct displacement,
+- use A* by default for the mandatory rover check-in after sector exhaustion,
+  and retrace the flown breadcrumb path only as its safety fallback,
+- preserve the fact that an assignment was entered after a boundary crossing;
+  if an out-of-sector drone is boxed in, route it to a nearby viable owned cell
+  or abandon after two failed ingress recoveries and check in,
+- use the A* service for homing after accepted team wall completion; capped
+  searches return a useful partial route and replan from its endpoint instead
+  of being reported as unreachable.
 
 Border extraction consumes local SLAM only. The true map remains the physical
 simulation boundary for collision checks, sensor observations, communication
@@ -276,7 +343,10 @@ line of sight, and A* escape/homing routes.
 The rendering path is deliberately separated from mission logic.
 
 `rendering/mission_renderer.py` owns complete frame composition and the
-stop-button visual. `rendering/slam_view.py` builds the selected SLAM or terrain
+stop-button visual. A cached sector layer tints each rover-assigned 32-pixel
+territory with its drone color, draws only ownership boundaries, marks each
+seed and the rover rendezvous, and dims drones waiting at the team barrier.
+`rendering/slam_view.py` builds the selected SLAM or terrain
 view. Each agent renderer owns paths, vision, and icons; the drone breadcrumb
 path is the only navigation overlay. The control-center facade builds immutable frame
 data, its controller owns timer/tab/input state, and its renderer owns all
@@ -300,9 +370,11 @@ The project keeps its runtime settings and visual assets in predictable location
 
 - `GameConfig/options.default.ini` and `GameConfig/simulation.default.ini`
   store committed defaults. Navigation exposes local-SLAM border confidence,
-  sampling stride, rebuild cooldown, frontier component threshold/proximity
-  scale/score weights, coarse global cell size/refresh interval, the weighted `random` policy, its
-  wall/unexplored/separation biases, and its
+  sampling stride, rebuild cooldown, frontier component and unknown-support
+  thresholds/proximity scale/score weights, coarse global cell size/refresh
+  interval, maximum frontier-route circuity, the weighted `random` policy, its
+  wall/unexplored/separation biases, its coarse coverage-memory cell size,
+  decay, visit weight, and edge weight, and its
   stagnation distance/gain threshold. Older waypoint and MCTS INI keys are ignored when loading
   existing files.
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
@@ -336,7 +408,8 @@ Simulation settings available in-game:
 |---|---|---|
 | Terrain roughness map | Implemented | Available in current simulation flow |
 | Known map visualization | Implemented | Available in current simulation flow |
-| Distributed terrain sharing | Implemented | Drone-to-drone and rover terrain sharing are active |
+| Distributed map sharing | Implemented | Drone pairs and physical rover rendezvous exchange terrain and SLAM |
+| Dynamic exploration sectors | Implemented | Rover SLAM drives contiguous sector epochs after mandatory check-ins |
 | POI and path sharing | Planned | POI model exists; runtime integration is deferred |
 | Drone path rendering | Implemented | Each drone's complete travelled breadcrumb path is rendered incrementally |
 | Battery management | Planned | Not yet implemented |

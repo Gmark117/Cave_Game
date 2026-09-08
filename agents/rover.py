@@ -8,6 +8,7 @@ import random as rand
 from typing import Tuple, List, Optional, TYPE_CHECKING
 
 from agents.graph import Graph
+from mapping.slam_map import SlamMap
 from mapping.terrain_knowledge import TerrainKnowledge
 from contracts import RoverNavigationDependencies
 from rendering.agent_renderer import RoverRenderer
@@ -65,6 +66,13 @@ class Rover:
         # Rovers maintain their own knowledge store even though movement is
         # currently disabled; this is the place future rover policy should read.
         self.terrain_knowledge = TerrainKnowledge(cave)
+        map_h = len(cave)
+        map_w = len(cave[0]) if map_h else 0
+        max_points = self.settings.slam.point_cloud_max_points
+        # The rover is the durable team checkpoint. Drones upload their local
+        # occupancy belief here and download the accumulated team belief only
+        # during a physical rendezvous.
+        self.slam_map = SlamMap(map_h, map_w, max_points=max_points)
         self.renderer  = RoverRenderer(self)
 
     # Define the radius based on the map size

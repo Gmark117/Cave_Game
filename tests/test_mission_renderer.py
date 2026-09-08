@@ -64,6 +64,12 @@ class MissionRendererTests(unittest.TestCase):
             ),
             is_paused=lambda: getattr(control, "is_paused", False),
             is_music_enabled=lambda: getattr(control, "music_enabled", True),
+            sector_renderer=getattr(control, "sector_renderer", None),
+            get_sector_snapshot=lambda: getattr(
+                control,
+                "sector_snapshot",
+                None,
+            ),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -128,6 +134,10 @@ class MissionRendererTests(unittest.TestCase):
             ),
             is_paused=True,
             music_enabled=False,
+            sector_snapshot=object(),
+        )
+        control.sector_renderer = SimpleNamespace(
+            draw=lambda *args: events.append("sectors"),
         )
         renderer = MissionRenderer(self.make_dependencies(control))
 
@@ -138,6 +148,7 @@ class MissionRendererTests(unittest.TestCase):
             [
                 "clear",
                 "slam",
+                "sectors",
                 "drone_path",
                 "rover_path",
                 "drone_vision",

@@ -161,7 +161,7 @@ class SlamMapTests(unittest.TestCase):
         self.assertEqual(snapshot.version, 1)
         self.assertTrue(np.all(snapshot.occupancy[2, :4] == FREE))
         self.assertEqual(int(snapshot.occupancy[2, 4]), OCCUPIED)
-        self.assertGreater(float(snapshot.confidence[2, 4]), 0.0)
+        self.assertTrue(np.all(snapshot.confidence[2, :5] == 1.0))
         self.assertIn((4, 2), snapshot.point_cloud)
 
     def test_dense_observations_mark_all_seen_cells_in_one_scan(self) -> None:
@@ -180,7 +180,72 @@ class SlamMapTests(unittest.TestCase):
         self.assertEqual(progress.sensor_newly_known_cells, 6)
         self.assertTrue(np.all(snapshot.occupancy[3, 1:3] == FREE))
         self.assertEqual(int(snapshot.occupancy[2, 2]), OCCUPIED)
+        observed = ((1, 4), (2, 4), (3, 4), (2, 3), (1, 3), (2, 2))
+        self.assertTrue(
+            all(snapshot.confidence[y, x] == 1.0 for x, y in observed)
+        )
+        self.assertEqual(progress.sensor_confidence_gain, 6.0)
         self.assertIn((2, 2), snapshot.point_cloud)
+
+    def test_repeated_dense_observation_does_not_change_saturated_map(self) -> None:
+        slam = SlamMap(5, 5)
+        observation = {
+            "free_cells": ((1, 4), (2, 4), (3, 4), (2, 3)),
+            "occupied_cells": ((2, 2),),
+        }
+
+        self.assertTrue(slam.update_from_observations((2, 4), **observation))
+        version = slam.version
+        first_progress = slam.progress_snapshot()
+        self.assertFalse(slam.update_from_observations((2, 4), **observation))
+        second_progress = slam.progress_snapshot()
+
+        self.assertEqual(slam.version, version)
+        self.assertEqual(second_progress.completed_scan_sequence, 2)
+        self.assertEqual(second_progress.sensor_newly_known_cells, 5)
+        self.assertEqual(second_progress.sensor_confidence_gain, 5.0)
+        self.assertEqual(
+            second_progress.sensor_confidence_gain,
+            first_progress.sensor_confidence_gain,
+        )
+
+    def test_uniform_batch_preserves_occupied_ties_and_progress(self) -> None:
+        slam = SlamMap(2, 5)
+        slam.merge_from(make_snapshot(
+            (2, 5),
+            cells=[
+                (1, 0, FREE, 1.0),
+                (2, 0, OCCUPIED, 1.0),
+                (3, 0, FREE, 0.99995),
+            ],
+        ))
+
+        changed = slam.update_from_observations(
+            (0, 0),
+            free_cells=(
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (3, 0),
+                (-1, 0),
+            ),
+            occupied_cells=((0, 0), (1, 0), (2, 0), (4, 0), (4, 0)),
+        )
+
+        snapshot = slam.snapshot()
+        progress = slam.progress_snapshot()
+        self.assertTrue(changed)
+        np.testing.assert_array_equal(
+            snapshot.occupancy[0],
+            np.array(
+                [OCCUPIED, OCCUPIED, OCCUPIED, FREE, OCCUPIED],
+                dtype=np.int8,
+            ),
+        )
+        self.assertAlmostEqual(float(snapshot.confidence[0, 3]), 0.99995)
+        self.assertEqual(progress.sensor_newly_known_cells, 2)
+        self.assertAlmostEqual(progress.sensor_confidence_gain, 2.0)
 
     def test_ray_hit_uses_supplied_points(self) -> None:
         slam = SlamMap(5, 5)

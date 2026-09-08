@@ -100,26 +100,26 @@ class VisionSensor:
             return VisionScan(ray_hits, (), ())
 
         cone_cells = self._dense_visible_cells(origin, heading_deg)
-        free_cells = tuple(
-            point for point in cone_cells
-            if not wall_hit(self.map_matrix, point)
-        )
-        occupied_cells = tuple(
-            point for point in cone_cells
-            if wall_hit(self.map_matrix, point)
-        )
+        if cone_cells.size == 0:
+            return VisionScan(ray_hits, (), ())
+        occupied = self._map_array[
+            cone_cells[:, 1],
+            cone_cells[:, 0],
+        ] == 1
+        free_cells = tuple(map(tuple, cone_cells[~occupied].tolist()))
+        occupied_cells = tuple(map(tuple, cone_cells[occupied].tolist()))
         return VisionScan(ray_hits, free_cells, occupied_cells)
 
     def _dense_visible_cells(
         self,
         origin: Tuple[float, float],
         heading_deg: float,
-    ) -> Tuple[Tuple[int, int], ...]:
-        """Rasterize every cell within the collision-bounded polar depth."""
+    ) -> np.ndarray:
+        """Return XY rows inside the collision-bounded polar depth."""
         center_x = int(round(origin[0]))
         center_y = int(round(origin[1]))
         if not (0 <= center_x < self.map_w and 0 <= center_y < self.map_h):
-            return ()
+            return np.empty((0, 2), dtype=np.int32)
 
         field_of_view = min(360.0, max(0.0, self.fov_deg))
         dense_ray_count = max(
@@ -222,9 +222,9 @@ class VisionSensor:
         visible_local_y, visible_local_x = np.nonzero(inside)
         visible_x = visible_local_x + left
         visible_y = visible_local_y + top
-        return tuple(
-            (int(x), int(y))
-            for x, y in zip(visible_x, visible_y)
+        return np.column_stack((visible_x, visible_y)).astype(
+            np.int32,
+            copy=False,
         )
 
     def _cast_single_ray(self, origin: Tuple[float, float], angle_deg: float) -> RayHit:

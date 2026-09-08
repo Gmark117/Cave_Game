@@ -14,6 +14,7 @@ class TerrainKnowledgeTests(unittest.TestCase):
         self.assertTrue(np.all(knowledge.roughness == -1.0))
         self.assertTrue(np.all(knowledge.confidence == 0.0))
         self.assertEqual(knowledge.floor_cells, 3)
+        self.assertEqual(knowledge.version, 0)
 
         with self.assertRaises(ValueError):
             TerrainKnowledge(cave, roughness=np.zeros((3, 3)))
@@ -35,6 +36,27 @@ class TerrainKnowledgeTests(unittest.TestCase):
         self.assertAlmostEqual(float(knowledge.roughness[0, 0]), 0.6)
         self.assertAlmostEqual(float(knowledge.confidence[0, 0]), 1.0)
         self.assertEqual(float(knowledge.confidence[0, 1]), 0.0)
+        self.assertEqual(knowledge.version, 1)
+
+    def test_scan_batch_aggregates_duplicate_cells_independently_of_order(
+        self,
+    ) -> None:
+        cave = np.zeros((2, 2), dtype=np.uint8)
+        samples = [
+            (0, 0, 0.9, 0.2),
+            (0, 0, 0.3, 0.6),
+            (0, 0, 0.6, 0.4),
+        ]
+        forward = TerrainKnowledge(cave)
+        reverse = TerrainKnowledge(cave)
+
+        forward.record_samples(samples)
+        reverse.record_samples(reversed(samples))
+
+        np.testing.assert_allclose(forward.roughness, reverse.roughness)
+        np.testing.assert_allclose(forward.confidence, reverse.confidence)
+        self.assertAlmostEqual(float(forward.roughness[0, 0]), 0.5)
+        self.assertEqual(float(forward.confidence[0, 0]), 1.0)
 
     def test_snapshot_is_detached_from_live_state(self) -> None:
         knowledge = TerrainKnowledge(np.zeros((2, 2), dtype=np.uint8))
@@ -46,6 +68,7 @@ class TerrainKnowledgeTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(knowledge.roughness[0, 0]), 0.5)
         self.assertAlmostEqual(float(knowledge.confidence[0, 0]), 0.5)
+        self.assertEqual(snapshot.version, 1)
 
     def test_merge_is_weighted_and_supports_smaller_source_extent(self) -> None:
         target = TerrainKnowledge(np.zeros((3, 3), dtype=np.uint8))
@@ -62,6 +85,7 @@ class TerrainKnowledgeTests(unittest.TestCase):
         self.assertAlmostEqual(float(target.confidence[0, 0]), 1.0)
         self.assertAlmostEqual(float(target.roughness[0, 1]), 0.6)
         self.assertEqual(float(target.confidence[2, 2]), 0.0)
+        self.assertEqual(target.version, 2)
 
     def test_known_mask_and_explored_ratio_cover_floor_only(self) -> None:
         cave = np.array([[0, 1], [0, 0]], dtype=np.uint8)
