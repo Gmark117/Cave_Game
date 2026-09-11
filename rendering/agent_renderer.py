@@ -163,9 +163,15 @@ class RoverRenderer:
     def draw_icon(self) -> None:
         """Blit the rover icon centered at its current position."""
         rover = self.rover
+        snapshot_method = getattr(rover, "snapshot", None)
+        position = (
+            snapshot_method().position
+            if callable(snapshot_method)
+            else rover.pos
+        )
         icon_width, icon_height = rover.icon.get_size()
         icon_position = (
-            int(rover.pos[0] - icon_width // 2),
-            int(rover.pos[1] - icon_height // 2),
+            int(position[0] - icon_width // 2),
+            int(position[1] - icon_height // 2),
         )
         rover.game.window.blit(rover.icon, icon_position)

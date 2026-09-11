@@ -15,6 +15,7 @@ from ui.control_center.view_model import (
 class ControlCenterViewModelTests(unittest.TestCase):
     def test_frame_view_model_is_immutable_and_detached(self) -> None:
         debug_lines = ["line"]
+        system_lines = ["system"]
         view = ControlCenterViewModel(
             elapsed_time="01:02",
             explored_percent=25,
@@ -24,11 +25,16 @@ class ControlCenterViewModelTests(unittest.TestCase):
             show_terrain_heatmap=False,
             selected_drone_heatmap_id=None,
             debug_lines=debug_lines,
+            system_lines=system_lines,
         )
         debug_lines.append("later")
+        system_lines.append("later")
 
         self.assertEqual(view.debug_lines, ("line",))
+        self.assertEqual(view.system_lines, ("system",))
         self.assertFalse(view.show_full_map)
+        self.assertFalse(view.exploration_complete)
+        self.assertIsNone(view.selected_rover_heatmap_id)
         with self.assertRaises(FrozenInstanceError):
             view.active_tab = "system"
 
@@ -72,6 +78,32 @@ class ControlCenterViewModelTests(unittest.TestCase):
         self.assertEqual(homing[0].status, "Homing")
         self.assertEqual(completed[0].status, "Done")
 
+    def test_drone_view_uses_component_policy_phase_and_target(self) -> None:
+        activity = SimpleNamespace(
+            state="DFS backtrack",
+            detail="directive 5 component 4 depth 15 target 1115,403",
+            target=(1115, 403),
+        )
+        drone = SimpleNamespace(
+            id=2,
+            color=(1, 2, 3),
+            movement_controller=SimpleNamespace(
+                activity_snapshot=lambda: activity,
+            ),
+        )
+        state = DroneRuntimeState(
+            start_position=(0, 0),
+            cave=np.zeros((2, 2), dtype=np.uint8),
+            direction=0,
+            frontier_rebuild_cooldown=0.25,
+        )
+
+        view = build_drone_status_views([drone], [state.snapshot()])[0]
+
+        self.assertEqual(view.status, "DFS backtrack")
+        self.assertEqual(view.target, (1115, 403))
+        self.assertIn("component 4", view.detail)
+
     def test_rover_views_are_detached_and_reflect_live_status(self) -> None:
         rover = SimpleNamespace(
             id=0,
@@ -96,6 +128,8 @@ class ControlCenterViewModelTests(unittest.TestCase):
         moving = build_rover_status_views([rover])
 
         self.assertEqual(moving[0].status, "Moving")
+        self.assertEqual(moving[0].target, None)
+        self.assertEqual(moving[0].detail, "target none")
 
 
 if __name__ == "__main__":

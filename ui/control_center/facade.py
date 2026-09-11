@@ -87,6 +87,9 @@ class ControlCenter:
         is_paused: bool = False,
         music_enabled: bool = True,
         show_full_map: bool = False,
+        selected_rover_heatmap_id: Optional[int] = None,
+        system_lines: Optional[Iterable[str]] = None,
+        exploration_complete: bool = False,
     ) -> None:
         """Build one detached frame model, render it, and retain its hit map."""
         self._num_drones = len(drone_statuses)
@@ -100,9 +103,12 @@ class ControlCenter:
             show_terrain_heatmap=show_terrain_heatmap,
             selected_drone_heatmap_id=selected_drone_heatmap_id,
             debug_lines=debug_lines or (),
+            system_lines=system_lines or (),
             is_paused=is_paused,
             music_enabled=music_enabled,
             show_full_map=show_full_map,
+            selected_rover_heatmap_id=selected_rover_heatmap_id,
+            exploration_complete=exploration_complete,
         )
         self._hit_map = self._renderer.render(view)
 

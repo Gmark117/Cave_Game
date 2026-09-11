@@ -28,6 +28,7 @@ class PresentationAdapter:
         self.show_terrain_heatmap = False
         self.show_full_map = False
         self.selected_drone_heatmap_id: Optional[int] = None
+        self.selected_rover_heatmap_id: Optional[int] = None
 
         # SLAM map rendering state
         self.terrain_heatmap_dirty = True
@@ -37,6 +38,7 @@ class PresentationAdapter:
         self.show_terrain_heatmap = False
         self.show_full_map = False
         self.selected_drone_heatmap_id = None
+        self.selected_rover_heatmap_id = None
         self.terrain_heatmap_dirty = True
         for drone in drone_objects:
             drone.set_overlay_visibility(
@@ -67,6 +69,24 @@ class PresentationAdapter:
             self.selected_drone_heatmap_id = None
         else:
             self.selected_drone_heatmap_id = drone_id
+            self.selected_rover_heatmap_id = None
+        self.terrain_heatmap_dirty = True
+        self._apply_heatmap_visibility(drone_objects)
+
+    def toggle_rover_heatmap(
+        self,
+        rover_id: int,
+        drone_objects: List[Any],
+        rover_objects: List[Any],
+    ) -> None:
+        """Toggle one rover's received SLAM/terrain knowledge view."""
+        if not 0 <= int(rover_id) < len(rover_objects):
+            return
+        if self.selected_rover_heatmap_id == rover_id:
+            self.selected_rover_heatmap_id = None
+        else:
+            self.selected_rover_heatmap_id = int(rover_id)
+            self.selected_drone_heatmap_id = None
         self.terrain_heatmap_dirty = True
         self._apply_heatmap_visibility(drone_objects)
 
@@ -91,6 +111,13 @@ class PresentationAdapter:
     def _apply_heatmap_visibility(self, drone_objects: List[Any]) -> None:
         """Derive every drone overlay from the current heatmap selection."""
         selected_id = self.selected_drone_heatmap_id
+        if self.selected_rover_heatmap_id is not None:
+            for drone in drone_objects:
+                drone.set_overlay_visibility(
+                    show_path=False,
+                    show_vision=False,
+                )
+            return
         if selected_id is None:
             show_overlays = not self.show_terrain_heatmap
             for drone in drone_objects:
@@ -117,7 +144,8 @@ class PresentationAdapter:
         self,
         mouse_pos: Tuple[int, int],
         control_center: Any,
-        drone_objects: List[Any]
+        drone_objects: List[Any],
+        rover_objects: Optional[List[Any]] = None,
     ) -> None:
         """Dispatch click event from control-center and update internal UI state.
 
@@ -130,12 +158,17 @@ class PresentationAdapter:
         if click_result is None:
             return
 
-        self.handle_control_action(click_result, drone_objects)
+        self.handle_control_action(
+            click_result,
+            drone_objects,
+            rover_objects or [],
+        )
 
     def handle_control_action(
         self,
         click_result: Tuple[str, Optional[int]],
         drone_objects: List[Any],
+        rover_objects: Optional[List[Any]] = None,
     ) -> None:
         """Apply a semantic control-center action to presentation state."""
         action, drone_id = click_result
@@ -145,6 +178,12 @@ class PresentationAdapter:
             self.toggle_full_map()
         elif action == "drone_heatmap" and drone_id is not None:
             self.toggle_drone_heatmap(drone_id, drone_objects)
+        elif action == "rover_heatmap" and drone_id is not None:
+            self.toggle_rover_heatmap(
+                drone_id,
+                drone_objects,
+                rover_objects or [],
+            )
         elif action == "drone_path" and drone_id is not None:
             self.toggle_drone_path(drone_id, drone_objects)
         elif action == "drone_vision" and drone_id is not None:

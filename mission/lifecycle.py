@@ -29,6 +29,9 @@ class MissionControlLifecycleMixin:
         self.mission_event.set()
         self.pause_event.set()
         self.pause_coordinator.stop()
+        coordinator = getattr(self, "exploration_coordinator", None)
+        if coordinator is not None:
+            coordinator.stop()
 
         for thread in threads:
             thread.join()
@@ -106,17 +109,34 @@ class MissionControlLifecycleMixin:
                     self.presentation.handle_control_action(
                         click_result,
                         self.drones,
+                        self.rovers,
                     )
             events_finished = time.perf_counter()
 
             if self.completed:
                 break
 
-            if not self.is_paused:
-                self.terrain_sharing.share_with_rovers()
             sharing_finished = time.perf_counter()
-            if not self.is_paused:
-                self.completed = self.is_mission_over()
+            if not self.is_paused and not self.exploration_complete:
+                if self.is_mission_over():
+                    self.exploration_complete = True
+                    self.is_paused = True
+                    self.pause_event.clear()
+                    self.simulation_clock.pause()
+                    if self.control_center is not None:
+                        self.control_center.pause_timer()
+                    self.pause_coordinator.pause()
+                    runtime_trace = getattr(self, "runtime_trace", None)
+                    if runtime_trace is not None:
+                        runtime_trace.record(
+                            "exploration_complete_presented",
+                            sim_time=self.simulation_time(),
+                            floor_exploration_ratio=getattr(
+                                self,
+                                "floor_exploration_ratio",
+                                0.0,
+                            ),
+                        )
             status_finished = time.perf_counter()
             if not self.is_paused:
                 self.update_sensors()
@@ -152,6 +172,7 @@ class MissionControlLifecycleMixin:
                             drone,
                             drone.snapshot(),
                             drone.slam_map.progress_snapshot(),
+                            drone.movement_controller.activity_snapshot(),
                         )
                         for drone in self.drones
                     ]
@@ -159,6 +180,7 @@ class MissionControlLifecycleMixin:
                         "frame_summary",
                         sim_time=sim_time,
                         completed=self.completed,
+                        exploration_complete=self.exploration_complete,
                         paused=self.is_paused,
                         fps=timing.fps,
                         frame_ms=timing.frame_ms,
@@ -170,7 +192,7 @@ class MissionControlLifecycleMixin:
                             drone_snapshots
                             and all(
                                 snapshot.returning_home or snapshot.done
-                                for _drone, snapshot, _progress
+                                for _drone, snapshot, _progress, _activity
                                 in drone_snapshots
                             )
                         ),
@@ -187,6 +209,11 @@ class MissionControlLifecycleMixin:
                                 self.wall_mapping_progress.slam_versions
                             ),
                         },
+                        floor_exploration_ratio=getattr(
+                            self,
+                            "floor_exploration_ratio",
+                            0.0,
+                        ),
                         drone_states=[
                             {
                                 "id": drone.id,
@@ -195,6 +222,15 @@ class MissionControlLifecycleMixin:
                                 "frontiers": len(snapshot.frontiers),
                                 "returning_home": snapshot.returning_home,
                                 "done": snapshot.done,
+                                "activity": activity.state,
+                                "activity_detail": activity.detail,
+                                "activity_target": activity.target,
+                                "directive_id": activity.directive_id,
+                                "directive_kind": activity.directive_kind,
+                                "task_id": activity.task_id,
+                                "component_id": activity.component_id,
+                                "work_unit_id": activity.work_unit_id,
+                                "dfs_depth": activity.dfs_depth,
                                 "slam_version": progress.version,
                                 "completed_scan_sequence": (
                                     progress.completed_scan_sequence
@@ -221,7 +257,23 @@ class MissionControlLifecycleMixin:
                                     progress.collision_confidence_gain
                                 ),
                             }
-                            for drone, snapshot, progress in drone_snapshots
+                            for drone, snapshot, progress, activity
+                            in drone_snapshots
+                        ],
+                        rover_states=[
+                            {
+                                "id": rover.id,
+                                "position": rover_snapshot.position,
+                                "target": rover_snapshot.target,
+                                "status": rover_snapshot.status,
+                                "path_remaining": (
+                                    rover_snapshot.path_remaining
+                                ),
+                                "slam_version": rover.slam_map.version,
+                            }
+                            for rover in self.rovers
+                            if rover is not None
+                            for rover_snapshot in (rover.snapshot(),)
                         ],
                     )
 

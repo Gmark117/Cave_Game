@@ -38,6 +38,7 @@ class PresentationInvalidator(Protocol):
 
     terrain_heatmap_dirty: bool
     selected_drone_heatmap_id: int | None
+    selected_rover_heatmap_id: int | None
     show_terrain_heatmap: bool
     show_full_map: bool
 
@@ -79,11 +80,13 @@ class TerrainSharingDependencies:
     simulation_time: Callable[[], float]
     runtime_trace: Any | None = None
     periodic_rover_sharing_enabled: bool = True
+    on_drone_contact: Callable[[int, int], None] | None = None
+    on_drone_rover_contact: Callable[[int], None] | None = None
 
 
 @dataclass(frozen=True)
 class RoverTargetDependencies:
-    """Inputs required by rover target scoring and reservation."""
+    """Inputs required by rover frontier staging and reservation."""
 
     cave_map: np.ndarray
     terrain_knowledge: TerrainKnowledgeStore
@@ -92,11 +95,13 @@ class RoverTargetDependencies:
     completed_targets: set[Position]
     norm_width: int
     norm_height: int
+    get_frontier_candidates: Callable[[], Sequence[Any]] = lambda: ()
+    should_hold_position: Callable[[int], bool] = lambda _rover_id: False
 
 
 @dataclass(frozen=True)
 class SlamViewDependencies:
-    """Inputs required to render combined or per-drone SLAM views."""
+    """Inputs required to render combined or per-agent SLAM views."""
 
     rendering: RenderingConfig
     terrain_knowledge: TerrainKnowledgeStore
@@ -104,6 +109,7 @@ class SlamViewDependencies:
     slam_renderer: SlamRendererLike
     get_drones: Callable[[], Sequence[Any]]
     get_window: Callable[[], Any]
+    get_rovers: Callable[[], Sequence[Any]] = lambda: ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,7 @@ class MissionDebugDependencies:
     simulation_time: Callable[[], float]
     frame_profiler: Any | None = None
     runtime_trace: Any | None = None
+    get_rovers: Callable[[], Sequence[Any]] = lambda: ()
 
 
 @dataclass(frozen=True)
@@ -133,6 +140,7 @@ class MissionRendererDependencies:
     is_music_enabled: Callable[[], bool]
     sector_renderer: Any | None = None
     get_sector_snapshot: Callable[[], Any] = lambda: None
+    is_exploration_complete: Callable[[], bool] = lambda: False
 
 
 @dataclass(frozen=True)
@@ -151,6 +159,14 @@ class DroneMovementDependencies:
     sector_check_in: Callable[[int, int | None], Any] | None = None
     sector_assignment: Callable[[int], Any] | None = None
     get_check_in_position: Callable[[], Position] | None = None
+    rendezvous_endpoint_missed: Callable[
+        [int, Position], Position
+    ] | None = None
+    exploration_check_in: Callable[[int, Any | None], Any] | None = None
+    exploration_assignment: Callable[[int], Any] | None = None
+    exploration_energy_return: Callable[
+        [int, float, float, float], Any
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,4 +184,13 @@ class RoverNavigationDependencies:
     """Callbacks used by rover navigation without retaining mission control."""
 
     rover_targets: Any
-    compute_rover_path: Callable[[Position, Position], list[Position]]
+    compute_rover_path: Callable[
+        [int, Position, Position], list[Position]
+    ]
+    simulation_time: Callable[[], float] = lambda: 0.0
+    runtime_trace: Any | None = None
+    announce_rendezvous: Callable[[Position], Any] = lambda _position: None
+    rendezvous_departure_ready: Callable[[Position], bool] = (
+        lambda _position: True
+    )
+    rendezvous_arrived: Callable[[Position], bool] = lambda _position: True

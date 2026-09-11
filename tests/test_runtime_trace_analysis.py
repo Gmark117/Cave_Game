@@ -14,6 +14,153 @@ from tools.analyze_runtime_trace import (
 
 
 class RuntimeTraceAnalysisTests(unittest.TestCase):
+    def test_summary_reports_component_rounds_lineage_and_quiescence(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "rover_discovery_round_started",
+                "round_id": 1,
+                "round_kind": "rover_scan",
+            },
+            {
+                "event": "rover_discovery_round_completed",
+                "round_id": 1,
+                "round_kind": "rover_scan",
+            },
+            {
+                "event": "rover_frontier_registry_reconciled",
+                "revision": 3,
+                "active_component_count": 2,
+                "ready_work_unit_count": 4,
+                "dormant_component_count": 1,
+                "resolved_component_count": 5,
+                "exploration_modes": {
+                    "focused": 1,
+                    "wall_follow": 0,
+                    "sweep": 1,
+                },
+            },
+            {
+                "event": "rover_frontier_lineage_changed",
+                "transition_kind": "split",
+            },
+            {
+                "event": "rover_task_claimed",
+                "drone_id": 0,
+                "claim_token": 10,
+            },
+            {
+                "event": "rover_task_completed",
+                "drone_id": 0,
+                "suspended": True,
+                "suspension_reason": "energy_reserve",
+                "work_unit_outcomes": [{"disposition": "zero_gain"}],
+            },
+            {
+                "event": "drone_component_directive_started",
+                "drone_id": 0,
+                "waited_seconds": 2.5,
+            },
+            {
+                "event": "drone_component_target_adjusted_after_share",
+                "drone_id": 0,
+            },
+            {
+                "event": "drone_component_target_retired_after_share",
+                "drone_id": 1,
+            },
+            {
+                "event": "drone_component_sweep_advanced",
+                "drone_id": 0,
+            },
+            {
+                "event": "drone_dfs_backtrack_replanned",
+                "drone_id": 0,
+                "recovered": True,
+            },
+            {
+                "event": "drone_component_check_in_queued",
+                "drone_id": 0,
+            },
+            {
+                "event": "rover_component_check_in_processed",
+                "drone_id": 0,
+                "queue_wait_ms": 3.0,
+                "processing_ms": 7.0,
+            },
+            {
+                "event": "rover_frontier_target_acquired",
+                "rover_id": 0,
+            },
+            {
+                "event": "rover_frontier_staging_reached",
+                "rover_id": 0,
+            },
+            {
+                "event": "rover_exploration_quiescence_evaluated",
+                "reason": "wall_goal_and_no_tasks",
+                "ready_task_count": 0,
+                "live_claim_count": 0,
+            },
+        ]))
+
+        self.assertIn("Component exploration:", report)
+        self.assertIn(
+            "discovery rounds: started=1 completed=1 rover_scan=1 radial_probe=0",
+            report,
+        )
+        self.assertIn("revision=3 active_components=2 ready_units=4", report)
+        self.assertIn("outcomes={'zero_gain': 1}", report)
+        self.assertIn("suspensions={'energy_reserve': 1}", report)
+        self.assertIn("lineage: {'split': 1}", report)
+        self.assertIn(
+            "local autonomy: shared_adjustments=1 shared_retirements=1 "
+            "sweep_advances=1 backtrack_replans=1",
+            report,
+        )
+        self.assertIn(
+            "async rover check-ins: queued=1 processed=1 "
+            "queue_wait_avg=3.00ms queue_wait_max=3.00ms "
+            "processing_avg=7.00ms processing_max=7.00ms",
+            report,
+        )
+        self.assertIn(
+            (
+                "moving rovers: targets=1 departures_authorized=0 "
+                "reached=1 invalidated=0 routes=0"
+            ),
+            report,
+        )
+        self.assertIn("completed wait by drone: 0=2.50s", report)
+        self.assertIn("max_ready_tasks=0 max_live_claims=0", report)
+
+    def test_epoch_publication_reports_standby_and_open_wait_at_completion(self) -> None:
+        report = "\n".join(summarize([
+            {"event": "rover_sector_epoch_published", "generation": 2, "sim_time": 10.0,
+             "assignments": [
+                 {"drone_id": 0, "frontier_cells": 1, "standby": False,
+                  "scope_pixels": 100, "estimated_effort": 8.0},
+                 {"drone_id": 1, "frontier_cells": 0, "standby": True},
+             ]},
+            {"event": "drone_sector_standby", "drone_id": 1, "generation": 2, "sim_time": 10.0},
+            {"event": "drone_sector_assigned", "drone_id": 0, "generation": 2,
+             "frontier_cells": 1, "sim_time": 12.0},
+            {"event": "drone_frontiers_rebuilt", "drone_id": 0, "sim_time": 13.0,
+             "scope_excluded_frontier_count": 7},
+            {"event": "drone_motion", "drone_id": 0, "sim_time": 14.0, "travelled_distance": 20.0},
+            {"event": "drone_sector_waiting_for_team", "drone_id": 0,
+             "generation": 2, "sim_time": 15.0},
+            {"event": "team_wall_mapping_tolerance_reached", "sim_time": 20.0},
+            {"event": "trace_closed", "sim_time": 22.0},
+        ]))
+        self.assertIn("generation 2: duration=10.00s", report)
+        self.assertIn("assigned_frontiers=1", report)
+        self.assertIn("active=[0] standby=[1]", report)
+        self.assertIn("scope_pixels=100 estimated_effort=8.00", report)
+        self.assertIn("excluded_frontier_samples=7", report)
+        self.assertIn("barrier_wait=5.00s standby_time=10.00s", report)
+        self.assertIn("standby_distance=0.00px", report)
+        self.assertIn("sector standby: count=1 total=10.00s", report)
+
     def test_summary_reports_arrival_departure_sharing_protocol(self) -> None:
         report = "\n".join(summarize([
             {
@@ -197,8 +344,18 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         self.assertIn("assigned_frontiers=12", report)
         self.assertIn("sensor_gain=5", report)
         self.assertIn("gain_per_px=0.2500", report)
+        self.assertIn("scope_pixels=N/A", report)
+        self.assertIn("effort_terms=[N/A]", report)
         self.assertIn("sector barrier waits:", report)
         self.assertIn("total=4.50s", report)
+
+    def test_unfinished_epoch_uses_last_observation_as_end(self) -> None:
+        report = "\n".join(summarize([
+            {"event": "drone_sector_assigned", "drone_id": 0,
+             "generation": 1, "frontier_cells": 12, "sim_time": 10.0},
+            {"event": "sensor_scan", "drone_id": 0, "sim_time": 25.0},
+        ]))
+        self.assertIn("generation 1: duration=15.00s", report)
 
     def test_summary_reports_coverage_memory_and_ingress_recovery(self) -> None:
         report = "\n".join(summarize([
@@ -287,6 +444,56 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         self.assertIn("missing=30", report)
         self.assertIn("sensor scan timings:", report)
         self.assertIn("avg_total=20.00ms", report)
+
+    def test_component_policy_treats_wall_events_as_diagnostics(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "mission_constructed",
+                "sim_time": 0.0,
+                "exploration_completion": (
+                    "physical_team_quiescence_after_component_exhaustion"
+                ),
+            },
+            {"event": "mission_run_started", "sim_time": 0.0},
+            {
+                "event": "team_wall_mapping_complete",
+                "sim_time": 10.0,
+                "mapped_wall_pixels": 100,
+                "total_wall_pixels": 100,
+            },
+            {
+                "event": "exploration_complete_presented",
+                "sim_time": 20.0,
+                "floor_exploration_ratio": 0.987,
+            },
+        ]))
+
+        self.assertIn("completion=20.00s", report)
+        self.assertIn(
+            "Completion trigger: exploration_complete_presented floor=98.70%",
+            report,
+        )
+        self.assertNotIn("mapped=100/100", report)
+
+        stopped_early = "\n".join(summarize([
+            {
+                "event": "mission_constructed",
+                "sim_time": 0.0,
+                "exploration_completion": (
+                    "physical_team_quiescence_after_component_exhaustion"
+                ),
+            },
+            {"event": "mission_run_started", "sim_time": 0.0},
+            {
+                "event": "team_wall_mapping_complete",
+                "sim_time": 10.0,
+                "mapped_wall_pixels": 100,
+                "total_wall_pixels": 100,
+            },
+            {"event": "mission_shutdown_complete", "sim_time": 12.0},
+        ]))
+        self.assertNotIn("completion=", stopped_early)
+        self.assertNotIn("Completion trigger:", stopped_early)
 
     def test_summary_reports_global_commitment_and_endgame_routes(self) -> None:
         report = "\n".join(summarize([

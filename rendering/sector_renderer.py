@@ -1,4 +1,4 @@
-"""Cached visualization of rover-coordinated exploration sectors."""
+"""Cached exploration overlay with legacy sector compatibility."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from mapping.exploration_sectors import ExplorationSectorSnapshot
 
 
 class SectorRenderer:
-    """Draw stable sector ownership without rebuilding it every frame."""
+    """Draw component work, or a legacy sector snapshot in old tests."""
 
     ACTIVE_FILL_ALPHA = 24
     ACTIVE_EDGE_ALPHA = 150
@@ -31,10 +31,12 @@ class SectorRenderer:
     def draw(
         self,
         window: Any,
-        snapshot: ExplorationSectorSnapshot | None,
+        snapshot: ExplorationSectorSnapshot | Any | None,
         drone_colors: Mapping[int, tuple[int, int, int]],
     ) -> bool:
         """Blit the current epoch and report whether anything was drawn."""
+        if snapshot is not None and hasattr(snapshot, "components"):
+            return self._draw_components(window, snapshot, drone_colors)
         if snapshot is None or not snapshot.assignments:
             return False
 
@@ -55,6 +57,62 @@ class SectorRenderer:
         window.blit(self.surface, (0, 0))
         return True
 
+    def _draw_components(
+        self,
+        window: Any,
+        snapshot: Any,
+        drone_colors: Mapping[int, tuple[int, int, int]],
+    ) -> bool:
+        """Draw claimed work pixels and anchors without territorial fills."""
+        visible_units = tuple(
+            unit for unit in snapshot.work_units
+            if getattr(unit.state, "value", unit.state)
+            in {"ready", "claimed", "active", "blocked"}
+        )
+        if not visible_units:
+            return False
+        owner_by_unit = {
+            unit_id: claim.owner_drone_id
+            for claim in snapshot.claims
+            for unit_id in claim.work_unit_ids
+        }
+        normalized_colors = tuple(sorted(
+            (int(owner), tuple(int(channel) for channel in color[:3]))
+            for owner, color in drone_colors.items()
+        ))
+        cache_key = (
+            "components",
+            snapshot.revision,
+            tuple(
+                (
+                    unit.work_unit_id,
+                    getattr(unit.state, "value", unit.state),
+                    owner_by_unit.get(unit.work_unit_id),
+                )
+                for unit in visible_units
+            ),
+            normalized_colors,
+        )
+        if cache_key != self._cache_key:
+            self.surface.fill((0, 0, 0, 0))
+            colors = dict(normalized_colors)
+            for unit in visible_units:
+                owner = owner_by_unit.get(unit.work_unit_id)
+                color = colors.get(owner, (210, 190, 80))
+                for x, y in unit.cells:
+                    if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                        self.surface.set_at((x, y), (*color, 155))
+                pygame.draw.circle(
+                    self.surface,
+                    (*color, 235),
+                    unit.anchor_position,
+                    4,
+                    width=1,
+                )
+            self._cache_key = cache_key
+        window.blit(self.surface, (0, 0))
+        return True
+
     def _rebuild(
         self,
         snapshot: ExplorationSectorSnapshot,
@@ -64,6 +122,8 @@ class SectorRenderer:
         waiting = snapshot.waiting_drone_ids
 
         for assignment in snapshot.assignments:
+            if assignment.standby:
+                continue
             owner = assignment.owner_drone_id
             color = drone_colors.get(owner, (180, 180, 180))
             is_waiting = owner in waiting or snapshot.mission_exhausted

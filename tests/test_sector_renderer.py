@@ -1,5 +1,6 @@
 import os
 import unittest
+from types import SimpleNamespace
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
@@ -79,6 +80,28 @@ class SectorRendererTests(unittest.TestCase):
         empty = ExplorationSectorSnapshot(-1, (), frozenset(), False)
 
         self.assertFalse(renderer.draw(window, empty, {}))
+
+    def test_component_snapshot_draws_work_without_territory_fill(self) -> None:
+        renderer = SectorRenderer(32, 32)
+        window = pygame.Surface((32, 32), pygame.SRCALPHA)
+        snapshot = SimpleNamespace(
+            revision=3,
+            components=(),
+            work_units=(SimpleNamespace(
+                work_unit_id=9,
+                state="claimed",
+                cells=frozenset({(10, 10), (11, 10)}),
+                anchor_position=(10, 10),
+            ),),
+            claims=(SimpleNamespace(
+                owner_drone_id=0,
+                work_unit_ids=(9,),
+            ),),
+        )
+
+        self.assertTrue(renderer.draw(window, snapshot, {0: (255, 0, 0)}))
+        self.assertGreater(renderer.surface.get_at((10, 10)).a, 0)
+        self.assertEqual(renderer.surface.get_at((25, 25)).a, 0)
 
 
 if __name__ == "__main__":

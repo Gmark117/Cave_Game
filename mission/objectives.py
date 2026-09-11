@@ -28,7 +28,7 @@ class MissionObjective(Protocol):
 
 @dataclass(frozen=True)
 class ExplorationObjective:
-    """Complete when every drone has finished exploration and returned home."""
+    """Complete when every drone finishes at its learned rover endpoint."""
 
     name: str = "Exploration"
 

@@ -30,6 +30,17 @@ python -m unittest tests.test_menu tests.test_menu_controller tests.test_menu_se
 
 ## Where Tests Belong
 
+The component-policy regressions cover stable continuation, split and merge
+lineage, targeted wide-component retirement, wall-follow versus sweep
+classification, token-fenced claims, rover-known-free eligibility with
+drone-owned exact routing, bounded discovery rounds, scan-footprint local DFS,
+failed-backtrack replanning, energy suspension, service-cost rover staging,
+contact-carried rendezvous acknowledgement, per-agent state projection,
+rover-local map selection, and component quiescence. Legacy sector tests remain to protect the compatibility surface
+while production composition bypasses it. A live trace remains necessary to
+assess completion time and wall yield; passing unit tests does not establish a
+runtime speedup.
+
 Tests live in `tests/` and are named after the module or cohesive subsystem
 they protect.
 
@@ -39,20 +50,24 @@ they protect.
 | Movement geometry | `test_graph.py`, `test_helpers_and_models.py` | Unit | Coordinate conventions and wall crossing are foundational to every agent. |
 | Vision and roughness sampling | `test_vision_sensor.py`, `test_roughness_sampler.py` | Unit | Dense cone coverage, wall occlusion, sparse ray endpoints, two-cell terrain stride, and confidence decay are deterministic sensor rules. |
 | Local SLAM state | `test_slam_map.py` | Unit/concurrency | Private-state snapshots, versions, confidence dominance, point-cloud bounds, and concurrent reads/updates belong to `SlamMap`. |
-| SLAM visualization | `test_slam_renderer.py`, `test_slam_view.py` | Surface/service | Pixel data, local-versus-combined selection, version throttling, and updates racing with rendering can be tested without opening a window. |
+| SLAM visualization | `test_slam_renderer.py`, `test_slam_view.py` | Surface/service | Pixel data, drone/rover-local versus combined selection, version throttling, and updates racing with rendering can be tested without opening a window. |
 | Terrain knowledge model | `test_terrain_knowledge.py` | Unit | Shape validation, snapshots, floor masking, observation fusion, explored ratios, and merging belong to one domain object. |
 | Focused service dependencies | `test_terrain_fusion.py`, `test_terrain_sharing.py`, `test_rover_targets.py`, `test_debug_info.py`, `test_slam_view.py`, `test_mission_renderer.py` | Unit/service/interaction | Services receive explicit dependency objects from mission setup; tests build those objects directly to protect narrow collaborator boundaries. |
 | Terrain fusion | `test_terrain_fusion.py` | Unit/service | Confidence-weighted updates, injected simulation time, and mission progress are terrain-domain rules. |
 | Distributed knowledge semantics | `test_drone_movement.py`, `test_terrain_fusion.py`, `test_terrain_sharing.py` | Characterization | Drone decisions stay local, telemetry stays isolated, and sharing is the explicit transfer boundary. |
 | Terrain and SLAM sharing | `test_terrain_sharing.py` | Characterization/concurrency | Proximity, line of sight, service-owned cooldowns, duplicate pair suppression, and transfer direction span multiple agents. |
-| Rover target reservation | `test_rover_targets.py` | Unit/service | Scoring, reservation, and completion must remain independent of rendering or threads. |
+| Rover target reservation | `test_rover_targets.py` | Unit/service | Service-cost and asperity scoring, reservation, exact staging identity, and material retargeting remain independent of rendering or threads. |
 | A* algorithms | `test_astar_pathfinder.py` | Unit/integration | Tests use real NumPy maps and shared memory, but no worker pool. |
 | Pathfinding resources | `test_pathfinding_service.py` | Service | Pool creation, bounded submission, fallback, and cleanup belong to the resource owner. |
 | Weighted-random movement and A* escape | `test_drone_movement.py`, `test_exploration_policy.py`, `test_astar_pathfinder.py` | Unit/concurrency/interaction | Seeded weighted choice, wall-continuation priority, generic unknown fallback, teammate separation, direct raster steps, sensor-local stagnation windows, scan-only wall-facing turns, exact-pose scan waits, zero-gain suppression, local-SLAM borders, cul-de-sac A*, homing, pause barriers, and path history are protected without a live mission. |
+| Frontier registry and lineage | `test_frontier_registry.py` | Unit | Significant eight-connected components, stable continuation, explicit split/merge identity, wide-work classification, normalized effort, and anchor-local retirement are deterministic registry rules. |
+| Component coordination and energy | `test_exploration_coordination.py` | Unit/state-machine | Full-circle and bootstrap-only radial rounds, component-phase monotonicity, follower assignment, known-free connected eligibility, claim fencing, suspension/reassignment, quiescence, and unlimited/finite policy boundaries are coordinator rules. |
+| Local component DFS execution | `test_component_explorer.py` | Unit/interaction | Exact sensor completion, deterministic follower branch claims, LIFO successor traversal, actual-path reversal and bounded replan recovery, anchor-local zero gain, and energy/route return reports cross the movement/coordinator boundary. |
 | Drone runtime state | `test_drone_runtime_state.py` | Unit/concurrency | Immutable snapshots, atomic movement/path updates, frontier timing, and concurrent read consistency belong to the synchronized state owner. |
 | Drone behavior | `test_drone_movement.py`, `test_drone_sensor.py` | Characterization/unit | Mission-facing actions use the small `Drone` API; detailed movement, sensing, terrain, and SLAM behavior is tested through owned collaborators with injected pathfinding, pause, clock, and terrain callbacks. |
-| Rover behavior | `test_rover.py` | Characterization | Planning, advancing, and target release form one rover workflow through explicit navigation dependencies. |
-| Agent construction | `test_agent_factory.py` | Interaction | Asset loading is mocked while constructor arguments, initialized agent state, and the first-aid/charging rover count policy are verified. |
+| Rover behavior | `test_rover.py` | Characterization | Local-SLAM reachability, acknowledgement-gated departure, advancing, rendezvous hold, and target release form one rover workflow through explicit navigation dependencies. |
+| Rendezvous protocol | `test_rendezvous.py` | Unit/state-machine | Endpoint announcements, direct and relayed acknowledgements, universal rover receipt, and arrival commit are deterministic without radio broadcasts. |
+| Agent construction | `test_agent_factory.py` | Interaction | Asset loading is mocked while constructor arguments, initialized agent state, and the single-rover policy are verified. |
 | Agent rendering | `test_agent_renderer.py` | Surface | Renderer-owned surfaces consume detached agent snapshots; non-empty drawing output is more stable than screenshots. |
 | Mission construction and loop | `test_mission_lifecycle.py`, `test_pause_control.py` | Interaction/concurrency | Tests protect setup-only construction, explicit run lifecycle, stop/restart behavior, pause barriers, pause-aware time, cave reuse, and cleanup. |
 | Frame performance telemetry | `test_frame_timing.py`, `test_mission_lifecycle.py` | Unit/interaction | Smoothing and lifecycle stage boundaries are deterministic and should not require real-time sleeps. |
@@ -158,7 +173,7 @@ audio, or full-frame layout:
 2. Navigate every menu and confirm selector, slider, seed, and audio behavior.
 3. Start a small mission with three drones.
 4. Confirm cave generation completes without worker or shared-memory warnings.
-5. Toggle global terrain, per-drone terrain, path, and vision controls; confirm each drone breadcrumb path remains aligned with the cave map.
+5. Toggle global terrain, per-drone and per-rover terrain/SLAM, path, and vision controls; confirm each selected map is local to that agent and every drone breadcrumb path remains aligned with the cave map.
 6. Confirm drones move, sense, share, return home, and remain visually aligned.
 7. Confirm rover information changes after nearby terrain sharing.
 8. Press `PAUSE` and verify agents, mission updates, and the timer freeze while

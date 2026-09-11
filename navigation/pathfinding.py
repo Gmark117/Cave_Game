@@ -183,10 +183,16 @@ class PathfindingService:
         confidence_map: np.ndarray,
         start: Tuple[int, int],
         goal: Tuple[int, int],
+        *,
+        traversability_map: np.ndarray | None = None,
     ) -> List[Tuple[int, int]]:
         """Compute a rover path using terrain roughness and confidence."""
         return astar_pathfinder.compute_weighted_path(
-            self.cave_map,
+            (
+                self.cave_map
+                if traversability_map is None
+                else np.asarray(traversability_map, dtype=np.uint8)
+            ),
             roughness_map,
             confidence_map,
             start,

@@ -263,6 +263,10 @@ class TerrainSharingService:
                 )
                 continue
 
+            contact_callback = dependencies.on_drone_contact
+            if callable(contact_callback):
+                contact_callback(int(drone_id), int(other_id))
+
             if not self._reserve_pair(pair_key, now):
                 self._trace(
                     "drone_sharing_pair",
@@ -499,6 +503,28 @@ class TerrainSharingService:
             trace_event="drone_rover_check_in",
         )
 
+    def drone_at_rover(
+        self,
+        drone_id: int,
+        rover_id: int = 0,
+    ) -> bool:
+        """Return whether a drone can currently rendezvous with a rover."""
+        drones = self.dependencies.get_drones()
+        rovers = self.dependencies.get_rovers()
+        if not (0 <= int(drone_id) < len(drones)):
+            return False
+        if not (0 <= int(rover_id) < len(rovers)):
+            return False
+        rover = rovers[int(rover_id)]
+        if rover is None:
+            return False
+        drone = drones[int(drone_id)]
+        position = drone.snapshot().position
+        distance = math.dist(tuple(rover.pos), position)
+        if distance >= min(rover.radius, drone.radius):
+            return False
+        return self.has_line_of_sight(tuple(rover.pos), position)
+
     def share_on_departure(
         self,
         drone_id: int,
@@ -548,6 +574,10 @@ class TerrainSharingService:
             )
             return False
 
+        contact_callback = self.dependencies.on_drone_rover_contact
+        if callable(contact_callback):
+            contact_callback(int(drone.id))
+
         pair_key = (int(drone.id), int(rover_id))
         exchange_started = time.perf_counter()
         with self._rover_exchange_lock:
@@ -587,6 +617,30 @@ class TerrainSharingService:
             ),
         )
         return True
+
+    def visible_drone_positions(
+        self,
+        observer_id: int,
+    ) -> tuple[tuple[int, tuple[int, int]], ...]:
+        """Return peers directly observable under the radio contact rules."""
+        drones = self.dependencies.get_drones()
+        normalized = int(observer_id)
+        if not 0 <= normalized < len(drones):
+            return ()
+        observer = drones[normalized]
+        observer_position = tuple(observer.snapshot().position)
+        visible = [(normalized, observer_position)]
+        for peer_id, peer in enumerate(drones):
+            if peer_id == normalized:
+                continue
+            peer_position = tuple(peer.snapshot().position)
+            threshold = 2 * min(observer.radius, peer.radius)
+            if math.dist(observer_position, peer_position) >= threshold:
+                continue
+            if not self.has_line_of_sight(observer_position, peer_position):
+                continue
+            visible.append((int(peer_id), peer_position))
+        return tuple(visible)
 
     def _exchange_drone_rover_data(self, drone: Any, rover: Any) -> bool:
         """Upload drone knowledge and download the rover's team checkpoint."""

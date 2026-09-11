@@ -26,7 +26,7 @@ class MissionDebugInfoTests(unittest.TestCase):
             simulation_time=lambda: 10.0,
         )
 
-        lines = MissionDebugInfo(dependencies).build_lines(snapshots)
+        lines = MissionDebugInfo(dependencies).build_system_lines(snapshots)
 
         self.assertEqual(
             lines,
@@ -57,7 +57,7 @@ class MissionDebugInfoTests(unittest.TestCase):
             frame_profiler=profiler,
         )
 
-        lines = MissionDebugInfo(dependencies).build_lines()
+        lines = MissionDebugInfo(dependencies).build_system_lines()
 
         self.assertEqual(
             lines[-3:],
@@ -66,6 +66,59 @@ class MissionDebugInfoTests(unittest.TestCase):
                 "Frame work/wait: 60.0 / 40.0 ms",
                 "Stages ms: share 10.0, sense 20.0, render 30.0",
             ],
+        )
+
+    def test_build_lines_exposes_drone_phase_and_rover_hold_reason(self) -> None:
+        drone = SimpleNamespace(
+            id=2,
+            movement_controller=SimpleNamespace(
+                activity_snapshot=lambda: SimpleNamespace(
+                    state="DFS backtrack",
+                    detail="directive 5 component 4 depth 15 target 1115,403",
+                ),
+            ),
+        )
+        rover = SimpleNamespace(
+            id=0,
+            snapshot=lambda: SimpleNamespace(
+                position=(428, 436),
+                target=None,
+                status="Rendezvous",
+            ),
+        )
+        dependencies = MissionDebugDependencies(
+            get_drones=lambda: [drone],
+            get_rovers=lambda: [rover],
+            presentation=SimpleNamespace(
+                selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=0,
+            ),
+            dirty_map_count=lambda: 0,
+            simulation_time=lambda: 10.0,
+        )
+        snapshots = [SimpleNamespace(
+            frontiers=(),
+            frontier_rebuild_cooldown=1.0,
+            last_frontier_rebuild=10.0,
+        )]
+
+        info = MissionDebugInfo(dependencies)
+        lines = info.build_debug_lines(snapshots)
+
+        self.assertIn(
+            "D2 DFS backtrack: directive 5 component 4 depth 15 "
+            "target 1115,403",
+            lines,
+        )
+        self.assertIn(
+            "R0 Rendezvous: pos 428,436 target none; "
+            "holding for drone rendezvous",
+            lines,
+        )
+        self.assertNotIn("SLAM view: rover 0", lines)
+        self.assertIn(
+            "SLAM view: rover 0",
+            info.build_system_lines(snapshots),
         )
 
 if __name__ == "__main__":

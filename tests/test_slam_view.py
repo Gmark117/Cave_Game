@@ -48,6 +48,7 @@ class SlamViewServiceTests(unittest.TestCase):
         )
         control = SimpleNamespace(
             drones=[],
+            rovers=[],
             floor_mask=np.ones((3, 3), dtype=bool),
             settings=SimulationConfig(
                 rendering=RenderingConfig(
@@ -58,6 +59,7 @@ class SlamViewServiceTests(unittest.TestCase):
             presentation=SimpleNamespace(
                 terrain_heatmap_dirty=True,
                 selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
                 show_terrain_heatmap=False,
                 show_full_map=False,
             ),
@@ -80,6 +82,7 @@ class SlamViewServiceTests(unittest.TestCase):
             slam_renderer=control.slam_renderer,
             get_drones=lambda: control.drones,
             get_window=lambda: control.game.window,
+            get_rovers=lambda: control.rovers,
         )
         return control
 
@@ -168,6 +171,35 @@ class SlamViewServiceTests(unittest.TestCase):
             drone.terrain_knowledge.confidence,
         )
 
+    def test_selected_rover_uses_rover_local_slam_and_terrain(self) -> None:
+        control = self.make_control()
+        rover = make_drone()
+        seed_slam(rover, 2, 1, 1, 0.8)
+        rover.terrain_knowledge.roughness[1, 2] = 0.6
+        rover.terrain_knowledge.confidence[1, 2] = 1.0
+        control.rovers = [rover]
+        control.presentation.selected_rover_heatmap_id = 0
+
+        service = SlamViewService(control.dependencies)
+        service.refresh()
+
+        args = control.slam_renderer.render.call_args.args
+        self.assertEqual(int(args[0][1, 2]), 1)
+        self.assertAlmostEqual(float(args[1][1, 2]), 0.8)
+        self.assertEqual(
+            service.rendered_versions[("rover", 0)],
+            rover.slam_map.version,
+        )
+        self.assertEqual(service.dirty_map_count(), 0)
+
+        control.presentation.show_terrain_heatmap = True
+        service.refresh()
+        kwargs = control.slam_renderer.render.call_args.kwargs
+        np.testing.assert_array_equal(
+            kwargs["roughness"],
+            rover.terrain_knowledge.roughness,
+        )
+
     def test_draw_refreshes_dirty_map_then_blits_cached_surface(self) -> None:
         control = self.make_control()
         drone = make_drone()
@@ -193,7 +225,7 @@ class SlamViewServiceTests(unittest.TestCase):
         control.presentation.show_terrain_heatmap = False
         control.game.window = SimpleNamespace(blit=Mock())
         service = SlamViewService(control.dependencies)
-        service.rendered_versions[0] = drone.slam_map.version
+        service.rendered_versions[("drone", 0)] = drone.slam_map.version
         service.refresh = Mock()
 
         service.draw()

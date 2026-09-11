@@ -60,19 +60,39 @@ class MissionRenderer:
             if i < len(rovers):
                 rovers[i].renderer.draw_icon()
 
-        debug_lines = dependencies.debug_info.build_lines(drone_snapshots)
+        debug_lines = dependencies.debug_info.build_debug_lines(
+            drone_snapshots
+        )
+        system_lines = dependencies.debug_info.build_system_lines(
+            drone_snapshots
+        )
         drone_statuses = build_drone_status_views(
             drones,
             drone_snapshots,
         )
         rover_statuses = build_rover_status_views(rovers)
         control_center.draw_control_center(
-            drone_statuses,
-            rover_statuses,
-            dependencies.presentation.show_terrain_heatmap,
-            dependencies.presentation.selected_drone_heatmap_id,
-            debug_lines,
-            dependencies.is_paused(),
-            dependencies.is_music_enabled(),
-            getattr(dependencies.presentation, "show_full_map", False),
+            drone_statuses=drone_statuses,
+            rover_statuses=rover_statuses,
+            show_terrain_heatmap=(
+                dependencies.presentation.show_terrain_heatmap
+            ),
+            selected_drone_heatmap_id=(
+                dependencies.presentation.selected_drone_heatmap_id
+            ),
+            debug_lines=debug_lines,
+            system_lines=system_lines,
+            is_paused=dependencies.is_paused(),
+            music_enabled=dependencies.is_music_enabled(),
+            show_full_map=getattr(
+                dependencies.presentation,
+                "show_full_map",
+                False,
+            ),
+            selected_rover_heatmap_id=getattr(
+                dependencies.presentation,
+                "selected_rover_heatmap_id",
+                None,
+            ),
+            exploration_complete=dependencies.is_exploration_complete(),
         )

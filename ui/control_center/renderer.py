@@ -37,6 +37,8 @@ class ControlCenterRenderer(
     TAB_BUTTON_W = 40
     TAB_BUTTON_H = 40
     TAB_BUTTON_GAP = 12
+    STATUS_FONT_SIZE = 18
+    DEBUG_FONT_SIZE = 18
 
     def __init__(self, game: Any) -> None:
         """Create surfaces, caches, and static text for one control panel."""
@@ -73,6 +75,9 @@ class ControlCenterRenderer(
         self._drone_toggles: list[
             tuple[int, str, tuple[int, int, int, int]]
         ] = []
+        self._rover_toggles: list[
+            tuple[int, str, tuple[int, int, int, int]]
+        ] = []
         self._map_toggle: Optional[tuple[int, int, int, int]] = None
         self._heatmap_toggle: Optional[tuple[int, int, int, int]] = None
         self._button_sprites: dict[str, pygame.Surface] = {}
@@ -86,6 +91,7 @@ class ControlCenterRenderer(
         self._tabs = []
         self._mission_controls = []
         self._drone_toggles = []
+        self._rover_toggles = []
         self._map_toggle = None
         self._heatmap_toggle = None
 
@@ -106,11 +112,17 @@ class ControlCenterRenderer(
                 view.selected_drone_heatmap_id,
             )
         elif view.active_tab == "rovers":
-            self.draw_rover_section(view.rover_statuses)
+            self.draw_rover_section(
+                view.rover_statuses,
+                view.selected_rover_heatmap_id,
+            )
         elif view.active_tab == "debug":
             self.draw_debug_panel(view.debug_lines)
         else:
-            self.draw_system_panel(view)
+            self.draw_system_panel(view.system_lines)
+
+        if view.exploration_complete:
+            self.draw_completion_message()
 
         self.game.window.blit(self.control_surf, self.origin)
         return ControlHitMap(
@@ -119,6 +131,7 @@ class ControlCenterRenderer(
             mission_controls=self._mission_controls,
             tabs=self._tabs,
             drone_toggles=self._drone_toggles,
+            rover_toggles=self._rover_toggles,
         )
 
     def draw_title(self) -> None:
@@ -166,7 +179,7 @@ class ControlCenterRenderer(
         )
 
         explored_texts = [
-            ("Walls mapped: ", Colors.GREY.value, 255),
+            ("Floor explored: ", Colors.GREY.value, 255),
             (
                 f"{view.explored_percent}%",
                 self.percent_color(view.explored_percent),
@@ -185,6 +198,19 @@ class ControlCenterRenderer(
             self.EXPLORED_Y,
             RectHandle.MIDLEFT.value,
         )
+
+    def draw_completion_message(self) -> None:
+        """Keep the completed mission visible while controls remain active."""
+        font_obj = self._get_font(Fonts.BIG.value, 20)
+        surface = font_obj.render(
+            "Exploration Complete",
+            True,
+            Colors.GREEN.value,
+        ).convert_alpha()
+        rect = surface.get_rect()
+        rect.centerx = Display.LEGEND_WIDTH // 2
+        rect.bottom = Display.FULL_H - 8
+        self.control_surf.blit(surface, rect)
 
     def _pre_render_statics(self) -> None:
         """Cache labels that do not change between frames."""

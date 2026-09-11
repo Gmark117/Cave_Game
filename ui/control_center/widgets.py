@@ -304,6 +304,31 @@ class ControlCenterWidgetMixin:
             )
         )
 
+    def _draw_rover_toggle(
+        self,
+        status: Any,
+        y_center: int,
+        selected_rover_heatmap_id: Optional[int],
+    ) -> None:
+        """Draw the rover-local SLAM/terrain selection button."""
+        rect = pygame.Rect(
+            Display.LEGEND_WIDTH - DRONE_BUTTON_SIZE - 12,
+            y_center - DRONE_BUTTON_SIZE // 2,
+            DRONE_BUTTON_SIZE,
+            DRONE_BUTTON_SIZE,
+        )
+        self.draw_toggle_button(
+            rect,
+            "T",
+            selected_rover_heatmap_id == status.id,
+            status.color,
+        )
+        self._rover_toggles.append((
+            status.id,
+            "selected",
+            self._absolute_rect(rect),
+        ))
+
     def draw_toggle_button(
         self,
         rect: pygame.Rect,

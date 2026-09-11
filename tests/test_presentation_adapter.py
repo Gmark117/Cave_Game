@@ -67,6 +67,7 @@ class PresentationAdapterTests(unittest.TestCase):
         adapter.show_terrain_heatmap = True
         adapter.show_full_map = True
         adapter.selected_drone_heatmap_id = 2
+        adapter.selected_rover_heatmap_id = 1
         adapter.terrain_heatmap_dirty = False
         for drone in drones:
             drone.show_path = False
@@ -77,6 +78,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.show_terrain_heatmap)
         self.assertFalse(adapter.show_full_map)
         self.assertIsNone(adapter.selected_drone_heatmap_id)
+        self.assertIsNone(adapter.selected_rover_heatmap_id)
         self.assertTrue(adapter.terrain_heatmap_dirty)
         self.assertTrue(all(drone.show_path for drone in drones))
         self.assertTrue(all(drone.show_vision for drone in drones))
@@ -144,6 +146,27 @@ class PresentationAdapterTests(unittest.TestCase):
         drones[1].toggle_vision.assert_called_once_with()
         self.assertFalse(drones[1].show_path)
         self.assertFalse(drones[1].show_vision)
+
+    def test_selected_rover_shows_its_map_and_clears_drone_selection(self) -> None:
+        adapter = PresentationAdapter(10, 10)
+        drones = make_drones()
+        rovers = [object(), object()]
+        adapter.selected_drone_heatmap_id = 2
+        control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("rover_heatmap", 1)),
+        )
+
+        adapter.handle_click(
+            (1, 1),
+            control_center,
+            drones,
+            rovers,
+        )
+
+        self.assertEqual(adapter.selected_rover_heatmap_id, 1)
+        self.assertIsNone(adapter.selected_drone_heatmap_id)
+        self.assertTrue(all(not drone.show_path for drone in drones))
+        self.assertTrue(all(not drone.show_vision for drone in drones))
 
     def test_invalid_drone_action_leaves_state_unchanged(self) -> None:
         adapter = PresentationAdapter(10, 10)

@@ -1,7 +1,7 @@
 # Cave Game Codeflow Guide
 
-This guide describes the current random-exploration baseline and the runtime
-boundaries around it.
+This guide describes the current frontier-component discovery and local DFS
+policy plus the runtime boundaries around it.
 
 ## Big Picture
 
@@ -12,12 +12,17 @@ flowchart TD
     Game --> Mission["MissionControl: runtime composition"]
     Mission --> Factory["AgentFactory"]
     Factory --> Drone["Drone"]
-    Factory --> Rover["Rover: movement disabled"]
+    Factory --> Rover["Rover: frontier staging worker"]
     Drone --> Movement["DroneMovementController"]
+    Mission --> Coordinator["FrontierTaskCoordinator"]
+    Coordinator --> Registry["FrontierComponentRegistry"]
+    Coordinator --> Energy["EnergyPolicy"]
+    Coordinator --> Movement
+    Movement --> DFS["LocalDFSStack"]
     Drone --> Sensor["DroneSensorController"]
     Drone --> State["DroneRuntimeState"]
-    Movement --> Random["RandomDirectionPolicy"]
-    Movement --> AStar["PathfindingService: escape and home A*"]
+    Movement --> AStar["PathfindingService: task and home A*"]
+    Rover --> RoverAStar["rover-local weighted A*"]
     Sensor --> Slam["private SlamMap"]
     Sensor --> Terrain["private TerrainKnowledge"]
     Mission --> Sharing["TerrainSharingService"]
@@ -26,12 +31,16 @@ flowchart TD
     Mission --> Render["MissionRenderer"]
     State --> Render
     Slam --> Render
+    Movement --> UIState["Drone activity snapshot"]
+    Rover --> UIState
+    UIState --> Render
 ```
 
-The main thread handles events, sensing, mission status, and rendering. Its
-legacy rover-sharing cadence is disabled for sector missions; rover exchange
-belongs to arrival and departure. Each drone has a worker thread for movement
-and nearby field exchange.
+The main thread handles events, sensing, mission status, and rendering. Each
+drone has a worker for directive execution and nearby field exchange. Each
+rover has a separate movement worker; the primary rover worker drains queued
+component check-ins and performs periodic rover exchange so reconciliation and
+map merges cannot block the display loop.
 Cave generation and drone A* use process-based workers.
 
 ## Startup and Shutdown
@@ -41,7 +50,8 @@ Cave generation and drone A* use process-based workers.
 3. `Game` generates a cave and constructs `MissionControl`.
 4. `MissionControl.run()` creates the window-facing runtime, agents,
    pathfinding shared memory, and worker threads.
-5. The mission loop updates events, sharing, status, sensors, and rendering.
+5. The mission loop updates events, status, sensors, and rendering; sharing and
+   rover coordination remain on agent workers.
 6. Stop, restart, or exit sets the mission event, releases paused workers,
    joins threads, and shuts down the pathfinding process pool/shared memory.
 
@@ -50,42 +60,47 @@ runtime are not started until `_initialize_runtime()`.
 
 ## Drone Movement
 
-The current policy deliberately has only two movement mechanisms:
-
-- direct weighted-random exploration in locally open space;
-- A* routing for cul-de-sac escape and homing.
+The production policy executes bounded rover directives. A* handles task,
+probe, check-in, and homing transit; exact flown paths are stored for DFS
+backtracking and return fallback.
 
 ```mermaid
 flowchart TD
     Tick["Drone.move()"] --> State{"done or homing?"}
     State -->|done| Stop["return"]
-    State -->|homing| Home["A* to start"]
-    State -->|exploring| Gain{"120 px sensor-gain window stagnant?"}
-    Gain -->|no| Headings["test headings inside current vision cone"]
-    Gain -->|yes| Refresh["rebuild local-SLAM borders"]
-    Refresh --> Local{"directly reachable local border?"}
-    Local -->|yes| WallScan["rotate directly toward strongest unknown cell"]
-    Local -->|no| TrailRoute["A* to border outside recent trail"]
-    TrailRoute --> WallScan
-    WallScan --> WaitScan["hold position for one completed sensor scan"]
-    WaitScan --> ScanGain{"sensor-local gain?"}
-    ScanGain -->|yes| SafeTurn["restore collision-safe heading"]
-    ScanGain -->|no| ScanSuppress["suppress unchanged local geometry"]
-    ScanSuppress --> SafeTurn
-    SafeTurn --> History
-    Headings --> Open{"radius look-ahead and 10 px step clear?"}
-    Open -->|some| Bias["combine cached global target, local geometry, and separation"]
-    Bias --> Choose["seeded weighted-random choice"]
-    Choose --> Direct["Bresenham raster step"]
-    Direct --> History["move_to(): position, heading, path history"]
-    Open -->|none| Borders["rebuild local-SLAM borders"]
-    Borders --> Route["A* to nearest viable border"]
-    Route --> Suppress["suppress reached target while local geometry is unchanged"]
-    Suppress --> Turn["full-circle recovery reorientation"]
-    Turn --> History
+    State -->|homing| Home["A* to learned rover endpoint"]
+    State -->|active directive| Energy{"must_return checkpoint?"}
+    Energy -->|yes| Suspend["serialize DFS and return to rover"]
+    Energy -->|no| Kind{"scan, probe, or component?"}
+    Kind -->|scan| WaitScan["wait for exact scheduled sensor completion"]
+    Kind -->|probe| Probe["A* out, 360 scan, A* or breadcrumb back"]
+    Kind -->|component| Route["A* to claimed anchor or follow leader"]
+    Route --> WaitScan
+    WaitScan --> Successors["extract significant local successors"]
+    Successors --> DFS["push child or reverse recorded path"]
+    DFS --> Recover{"recorded reverse still valid?"}
+    Recover -->|no| Replan["A* to DFS continuation; suspend after two failures"]
+    Replan --> DFS
+    Recover -->|yes| CheckIn["continue DFS or physical rover upload"]
+    Suspend --> CheckIn
+    Probe --> CheckIn
 ```
 
-### Normal exploration
+`DroneMovementController.activity_snapshot()` projects this state machine into
+immutable control-center values. The drone tab shows the active phase (task
+transit, frontier scan, DFS backtrack, return, reporting, or assignment wait),
+and the debug tab includes directive/task/component identity, depth, and target.
+Rover snapshots similarly expose position, route remainder, target, battery,
+and hold/staging state. Selecting `T` on either agent tab switches the main map
+to that agent's own SLAM or terrain knowledge; drone and rover selections are
+mutually exclusive.
+
+### Legacy local exploration primitives
+
+The weighted-random, stagnation, and sector-scoping routines below remain as a
+compatibility surface for existing characterization tests. They are bypassed
+whenever the component coordinator callbacks are wired, which is the normal
+mission composition.
 
 `DroneMovementController.find_new_node()` tests integer headings within half
 the sensor FOV on either side of the current heading. With the current sensor,
@@ -280,34 +295,87 @@ The mission-wide terrain store remains telemetry/UI state, not a drone
 decision source. Sharing is the explicit path by which one drone's local
 knowledge reaches another.
 
-The primary rover also owns an accumulated `SlamMap`. A sector transition is
-an explicit physical rendezvous: the drone uploads terrain and SLAM, downloads
-the rover's team checkpoint, and joins an epoch barrier. Drone-to-drone sharing
-is suppressed at the rover. After every drone has arrived, the coordinator
-signals assignments without further check-in polling, and
-`ExplorationSectorCoordinator` selects separated frontier seeds and
-uses a coarse multi-source flood fill over rover-known occupancy/unknown costs
-to produce contiguous, disjoint assignments. It first labels eight-connected
-frontier and unknown components. A frontier component smaller than the
-configured 12 pixels remains eligible when its boundary reaches at least 64
-connected unknown cells in a basin that does not touch the map boundary, but
-only one such small gateway is retained per eligible basin. This keeps narrow
-entrances into real unexplored space without promoting gateways into exterior
-unknown space. Stable component IDs are included in each assignment. At the
-existing one-time arrival check-in, a drone also reports which assigned
-components its local scans suppressed. The rover compares every prior component
-with the next checkpoint in a component-sized region. Substantially unchanged
-geometry is immediately excluded when that local region gained no confident
-cells or the drone reported a confirmed zero-gain directed scan; unrelated map
-gain elsewhere cannot preserve it. With no significant novel rover frontier
-work, the coordinator ends sector exploration. The trace event
-`rover_sector_frontiers_filtered` records raw, retained, rescued, duplicate,
-and discarded component counts plus per-component bounds, centroids, basin
-IDs, support sizes, boundary connectivity, and dispositions.
-`rover_sector_frontier_outcomes` records per-component overlap, local gain,
-reported suppressions, and final disposition.
-`rover_sector_workload_balanced` records frontier counts, estimated effort, and
-the connected boundary transfers used to reduce assignment skew.
+### Rover discovery and component coordination
+
+The primary rover owns the authoritative accumulated `SlamMap` and a
+`FrontierTaskCoordinator`. At bootstrap, all drones physically check in and
+receive disjoint heading subsets whose union is one full 360-degree scan. A
+round is bounded by an explicit participant set: every participant must return
+one tokened report before the rover reconciles the merged map. If significant
+work is insufficient, idle drones receive fixed, separated spokes. Each radial
+probe is selected from the rover's known-free connected region, advances by
+0.75 sensor range per ring, performs a full-circle scan at its distinct target,
+and returns before the next ring. Its exact A* route is computed by the assigned
+drone, not by the rover coordinator.
+The configured map diagonal bounds the total rings.
+Radial rounds exist only in bootstrap. The first reconciled significant
+component moves the coordinator permanently into component exploration. Spare
+drones then follow assigned leaders; deterministic branch reservations keep
+the leader off the child a follower claims when the lineage separates.
+
+`FrontierComponentRegistry` applies the existing significant-frontier filter
+to eight-connected geometry. Components below the ordinary size threshold
+retain the existing narrow-gateway eligibility when they expose enough
+interior unknown support; basin geometry is evidence, never component identity
+or a suppression key. Matching precedence is causal report, exact overlap,
+then mutually unique proximity. One-to-one matches preserve identity. Splits,
+merges, and many-to-many resegmentation create new child identities and retain
+explicit parent/child edges; unmatched geometry becomes a root, while missing
+geometry becomes dormant before resolution.
+
+Each active geometry is covered with sensor-footprint-spaced anchors. One anchor is
+focused work. Multiple anchors become wall-follow sub-arcs only when minimum
+wall-contact count, contact ratio, and longest connected wall-run ratio all
+pass; otherwise they are open-space sweep anchors. A scan outcome retires only
+its claimed work unit. A locally visited DFS successor is reconciled to its
+nearest matching anchor, so it cannot suppress an entire wide component.
+
+`FrontierTaskCoordinator` bundles every ready anchor of one component into one
+task and assigns the idle team with deterministic maximum-cardinality matching.
+One eight-connected pass over rover SLAM rejects targets outside the currently
+known traversable region. Deeper lineage and the drone that returned its parent
+are preferred before the rover-to-target distance lower bound. The directive
+contains no route: the drone computes exact A*, and a failed route is deferred
+for that drone and component revision.
+Claims carry monotonic tokens and have no wall-clock expiry. A stale directive,
+report ID, owner, or token cannot release work. Claims block duplicate work but
+do not restrict transit geography. When a claimed parent splits or merges while
+another drone still owns it, successor units remain blocked until every causal
+parent claim is reported or suspended.
+
+The executor discovers causally related significant frontiers from its own
+SLAM and the last sensor footprint, then explores them with `LocalDFSStack`.
+A zero-delta directed scan still follows an already visible successor because
+the ordinary sensor scheduler may have exposed it moments earlier. Every DFS
+frame stores the actual outbound path. Children are visited depth-first, siblings remain LIFO-local,
+and backtracking reverses the stored route. The depth and node count are
+bounded. The rover converts returned causal geometry into authoritative
+lineage; it does not expose global occupancy to local decisions.
+
+The energy boundary is defined before drain and charging: `EnergyState`,
+route-to-task, next-action, route-home, safety reserve, `can_accept`,
+`must_return`, and `TaskSuspension`. The current `UnlimitedEnergyPolicy` passes
+all work through those hooks. A future finite policy can suspend a claim with
+its DFS frames, local SLAM version, remaining work, and actual return path;
+reassignment always receives a fresh claim token.
+
+Wall coverage is diagnostic only and never changes the coordinator phase.
+After bootstrap, homing begins only when every drone is physically waiting at
+the rover and no ready, blocked, claimed, active, suspended, or follower-held
+component work remains. Sensors retain their existing schedule.
+The analyzer reports discovery rounds, registry state and modes, lineage,
+claims, per-unit outcomes, suspensions, wait time, and quiescence.
+
+One rover reserves active component staging work and plans through its own
+confidently free SLAM. Its body-clear connected region bounds candidates and
+routes; service distance, terrain asperity, and wall clearance rank staging.
+Each new endpoint is immutable until reached. Endpoint announcements and
+acknowledgements move only on verified drone-drone or drone-rover contact, and
+the rover cannot depart until all drone acknowledgements have reached it.
+Drones distinguish a known proposal from their last physically confirmed
+rendezvous target. A report first returns to the confirmed endpoint so its
+acknowledgement can reach the stationary rover; if that endpoint is physically
+empty, the drone falls forward to its newer contact-carried proposal.
 
 ## Pathfinding
 
@@ -317,9 +385,9 @@ only complete unweighted 8-neighbor A* routes. Drones use the structured
 segment API, which distinguishes complete, capped-progress, unreachable,
 invalid-endpoint, and unavailable-resource outcomes. A capped result contains
 the best useful path to the current search fringe; escape and homing follow it
-before submitting the next segment. `compute_weighted_path()` remains
-available to the disabled rover flow and adds roughness/unknown-confidence
-costs.
+before submitting the next segment. `compute_weighted_path()` is used by rover
+workers with roughness and confidence costs while every cell outside that
+rover's known-free SLAM remains blocked.
 
 Both algorithms prevent diagonal movement through a pair of touching wall
 corners. `PathfindingService.shutdown()` closes the pool and unlinks shared
@@ -391,12 +459,19 @@ schema.
 - `mission/control.py`: runtime composition and agent-thread entry points.
 - `mission/lifecycle.py`: main loop and teardown.
 - `agents/drone.py`: per-drone collaborator composition.
-- `agents/exploration_policy.py`: seeded weighted-random heading choice.
-- `agents/drone_movement.py`: direct steps, border extraction, A* escape/home.
+- `agents/component_explorer.py`: local scan progress and bounded DFS frames.
+- `agents/drone_movement.py`: directive execution, exact scans, transit, and
+  breadcrumb return.
 - `agents/drone_runtime_state.py`: synchronized mutable drone state.
 - `mapping/drone_sensor.py`: dense vision-to-SLAM and sparse terrain sampling.
 - `mapping/terrain_sharing.py`: proximity-based explicit exchange.
-- `mapping/exploration_sectors.py`: rover check-in barrier and dynamic sectors.
+- `mapping/frontier_registry.py`: component identity, lineage, classifier, and
+  work units.
+- `mission/exploration_coordination.py`: discovery rounds, claims, assignment,
+  suspension, and quiescence.
+- `mission/energy.py`: unlimited and reserve-aware energy contracts.
+- `mapping/exploration_sectors.py`: legacy compatibility implementation used by
+  characterization tests, not production composition.
 - `navigation/pathfinding.py`: pathfinding resource lifecycle.
 - `navigation/astar_pathfinder.py`: unweighted and weighted A* algorithms.
 - `rendering/agent_renderer.py`: breadcrumb paths, vision, and icons.

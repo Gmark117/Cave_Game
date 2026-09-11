@@ -4,7 +4,6 @@ This module centralizes the creation and initialization of drones and
 rovers so MissionControl can remain focused on mission orchestration.
 """
 
-import math
 import random as rand
 from typing import Tuple
 
@@ -65,8 +64,7 @@ class AgentFactory:
         rover_colors = list(RoverColors)
         control.rovers = []
         for i in range(control.num_rovers):
-            # Rovers are still built for display/telemetry even though their
-            # movement threads are disabled by MissionControl.
+            # Every rover receives its own movement worker after construction.
             color = AgentFactory.choose_rover_color(rover_colors)
             rover = Rover(
                 control.game,
@@ -81,8 +79,9 @@ class AgentFactory:
 
     @staticmethod
     def get_rover_count(num_drones: int) -> int:
-        """Return one first-aid rover plus charging carriers for four drones."""
-        return 1 + math.ceil(num_drones / 4)
+        """Return the single mobile rendezvous rover used by exploration."""
+        _ = num_drones
+        return 1
 
     @staticmethod
     def choose_rover_color(rover_colors) -> Tuple[int, int, int]:

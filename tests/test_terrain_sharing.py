@@ -144,6 +144,38 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertEqual(service.last_pair_share[(0, 1)], 10.0)
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
 
+    def test_peer_protocol_contact_requires_proximity_and_line_of_sight(self) -> None:
+        control = make_control()
+        contact = Mock()
+        object.__setattr__(control.dependencies, "on_drone_contact", contact)
+        first = make_agent(0, (0, 0))
+        second = make_agent(1, (2, 0))
+        control.drones = [first, second]
+        service = TerrainSharingService(control.dependencies)
+
+        service.share_with_nearby_drones(0)
+        contact.assert_called_once_with(0, 1)
+
+        contact.reset_mock()
+        second.runtime_state.move_to((3, 3))
+        control.map_matrix[1, 1] = 1
+        service.share_with_nearby_drones(0)
+        contact.assert_not_called()
+
+    def test_visible_peer_positions_use_the_contact_envelope(self) -> None:
+        control = make_control()
+        first = make_agent(0, (0, 0))
+        visible = make_agent(1, (2, 0))
+        hidden = make_agent(2, (3, 3))
+        control.map_matrix[1, 1] = 1
+        control.drones = [first, visible, hidden]
+
+        positions = TerrainSharingService(
+            control.dependencies
+        ).visible_drone_positions(0)
+
+        self.assertEqual(positions, ((0, (0, 0)), (1, (2, 0))))
+
     def test_sparse_unsampled_slam_delta_is_still_shared(self) -> None:
         control = make_control()
         source = make_agent(0, (1, 1))

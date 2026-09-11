@@ -19,11 +19,13 @@ from config.simulation_config import (
 )
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.exploration_sectors import (
+    ExplorationSectorCoordinator,
+    SectorAssignment,
     SectorCheckInResult,
     SectorOutcomeReport,
     SectorSuppressionOutcome,
 )
-from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
+from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.wall_mapping import WallMappingSnapshot, exposed_wall_mask
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
@@ -64,6 +66,59 @@ class FakeGame:
 
 
 class MissionLifecycleTests(unittest.TestCase):
+    def test_epoch_with_standby_exchanges_only_for_actual_arrivals_and_departures(self) -> None:
+        shape = (64, 96)
+        coordinator = ExplorationSectorCoordinator(shape, 3, (16, 16))
+        snapshot = Mock(return_value=SlamSnapshot(
+            np.full(shape, UNKNOWN, dtype=np.int8), np.zeros(shape, dtype=np.float32),
+        ))
+        control = SimpleNamespace(
+            rovers=[SimpleNamespace(slam_map=SimpleNamespace(snapshot=snapshot))],
+            drones=[], exploration_completion_event=threading.Event(),
+            exploration_sectors=coordinator, runtime_trace=SimpleNamespace(record=Mock()),
+            simulation_time=lambda: 10.0,
+            terrain_sharing=SimpleNamespace(
+                check_in_with_rover=Mock(return_value=True),
+                share_on_departure=Mock(return_value=True),
+            ),
+        )
+        for drone_id in range(3):
+            MissionControl.sector_check_in(control, drone_id, None)
+        bootstrap = [MissionControl.sector_assignment(control, i).assignment for i in range(3)]
+        occupancy = np.full(shape, OCCUPIED, dtype=np.int8)
+        confidence = np.ones(shape, dtype=np.float32)
+        occupancy[18:28, 18:28] = UNKNOWN
+        confidence[18:28, 18:28] = 0.0
+        occupancy[17, 17] = FREE
+        snapshot.return_value = SlamSnapshot(occupancy, confidence, version=2)
+        for assignment in bootstrap:
+            MissionControl.sector_check_in(control, assignment.owner_drone_id, assignment.sector_id)
+        assignments = [MissionControl.sector_assignment(control, i).assignment for i in range(3)]
+        self.assertEqual([item.standby for item in assignments], [False, True, True])
+        self.assertEqual(control.terrain_sharing.check_in_with_rover.call_count, 6)
+        self.assertEqual(control.terrain_sharing.share_on_departure.call_count, 4)
+        result = MissionControl.sector_check_in(control, 0, assignments[0].sector_id)
+        self.assertTrue(result.mission_exhausted)
+        for drone_id in range(3):
+            self.assertTrue(MissionControl.sector_assignment(control, drone_id).mission_exhausted)
+        self.assertEqual(control.terrain_sharing.check_in_with_rover.call_count, 7)
+        self.assertEqual(control.terrain_sharing.share_on_departure.call_count, 4)
+
+    def test_standby_delivery_skips_departure_exchange(self) -> None:
+        assignment = SectorAssignment(
+            sector_id=4, generation=1, owner_drone_id=1, cell_size=32,
+            cells=frozenset(), seed=(16, 16), gateway=(16, 16),
+            frontier_cells=0, rover_slam_version=1, standby=True,
+        )
+        result = SectorCheckInResult(arrived=True, assignment=assignment)
+        control = SimpleNamespace(
+            exploration_completion_event=threading.Event(),
+            exploration_sectors=SimpleNamespace(claim_assignment=Mock(return_value=result)),
+            terrain_sharing=SimpleNamespace(share_on_departure=Mock()),
+        )
+        self.assertIs(MissionControl.sector_assignment(control, 1), result)
+        control.terrain_sharing.share_on_departure.assert_not_called()
+
     def test_arrival_forwards_local_sector_outcome_to_coordinator(self) -> None:
         rover_slam = SlamSnapshot(
             occupancy=np.full((8, 8), UNKNOWN, dtype=np.int8),
@@ -120,7 +175,7 @@ class MissionLifecycleTests(unittest.TestCase):
             report,
         )
 
-    def test_sensor_update_publishes_wall_mapping_not_terrain_coverage(self) -> None:
+    def test_sensor_update_publishes_discovered_floor_coverage(self) -> None:
         mission = MissionControl(FakeGame())
         cave = np.ones((8, 8), dtype=np.uint8)
         cave[1:7, 1:7] = 0
@@ -150,10 +205,11 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.update_sensors()
 
         drone.update_sensors.assert_called_once_with()
-        mission.control_center.set_explored_percent.assert_called_once_with(50)
+        mission.control_center.set_explored_percent.assert_called_once_with(100)
         self.assertAlmostEqual(mission.wall_mapping_progress.ratio, 0.5)
+        self.assertAlmostEqual(mission.floor_exploration_ratio, 1.0)
 
-    def test_incomplete_wall_mapping_never_displays_one_hundred(self) -> None:
+    def test_incomplete_floor_mapping_never_displays_one_hundred(self) -> None:
         mission = MissionControl(FakeGame())
         runtime_state = SimpleNamespace(start_returning_home=Mock())
         drone = SimpleNamespace(
@@ -165,6 +221,8 @@ class MissionLifecycleTests(unittest.TestCase):
             set_explored_percent=Mock(),
         )
         mission.simulation_time = Mock(return_value=1.0)
+        mission.terrain_knowledge.confidence[:] = 1.0
+        mission.terrain_knowledge.confidence[0, 0] = 0.0
         incomplete = WallMappingSnapshot(
             9969,
             10000,
@@ -179,10 +237,10 @@ class MissionLifecycleTests(unittest.TestCase):
         ):
             mission._update_wall_mapping_progress()
 
-        mission.control_center.set_explored_percent.assert_called_once_with(99)
+        mission.control_center.set_explored_percent.assert_called_once_with(98)
         runtime_state.start_returning_home.assert_not_called()
 
-    def test_wall_tolerance_starts_coordinated_homing_once(self) -> None:
+    def test_wall_tolerance_does_not_trigger_homing_or_completion(self) -> None:
         mission = MissionControl(FakeGame())
         states = [
             SimpleNamespace(start_returning_home=Mock())
@@ -216,21 +274,39 @@ class MissionLifecycleTests(unittest.TestCase):
             mission._update_wall_mapping_progress()
 
         for state in states:
-            state.start_returning_home.assert_called_once_with()
-        self.assertTrue(mission.exploration_completion_event.is_set())
-        self.assertTrue(mission.exploration_sectors.snapshot().mission_exhausted)
-        mission.runtime_trace.record.assert_called_once_with(
-            "team_wall_mapping_tolerance_reached",
-            mapped_wall_pixels=2970,
-            total_wall_pixels=3000,
-            missing_wall_pixels=30,
-            tolerance_pixels=30,
-            configured_tolerance_pixels=30,
-            drone_count=3,
-        )
-        mission.control_center.set_explored_percent.assert_called_once_with(99)
+            state.start_returning_home.assert_not_called()
+        self.assertFalse(mission.exploration_completion_event.is_set())
+        mission.runtime_trace.record.assert_not_called()
+        mission.control_center.set_explored_percent.assert_called_once_with(0)
 
-    def test_exact_team_wall_completion_starts_coordinated_homing(self) -> None:
+    def test_wall_tolerance_never_updates_component_completion(self) -> None:
+        mission = MissionControl(FakeGame())
+        runtime_state = SimpleNamespace(start_returning_home=Mock())
+        mission.drones = [SimpleNamespace(
+            slam_map=SimpleNamespace(version=1),
+            runtime_state=runtime_state,
+        )]
+        mission.exploration_coordinator = SimpleNamespace(
+            update_wall_goal=Mock(),
+        )
+        mission.control_center = SimpleNamespace(
+            set_explored_percent=Mock(),
+        )
+        mission.runtime_trace = Mock()
+        mission.simulation_time = Mock(return_value=1.0)
+        accepted = WallMappingSnapshot(990, 1000, 0.99, False, (1,))
+
+        with patch(
+            "mission.control.wall_mapping_snapshot",
+            return_value=accepted,
+        ):
+            mission._update_wall_mapping_progress()
+
+        mission.exploration_coordinator.update_wall_goal.assert_not_called()
+        runtime_state.start_returning_home.assert_not_called()
+        self.assertFalse(mission.exploration_completion_event.is_set())
+
+    def test_exact_wall_completion_is_diagnostic_only(self) -> None:
         mission = MissionControl(FakeGame())
         states = [
             SimpleNamespace(start_returning_home=Mock())
@@ -247,6 +323,7 @@ class MissionLifecycleTests(unittest.TestCase):
             set_explored_percent=Mock(),
         )
         mission.simulation_time = Mock(return_value=1.0)
+        mission.terrain_knowledge.confidence[:] = 1.0
         complete = WallMappingSnapshot(1000, 1000, 1.0, True, (1, 1, 1))
 
         with patch(
@@ -257,7 +334,7 @@ class MissionLifecycleTests(unittest.TestCase):
             mission._update_wall_mapping_progress()
 
         for state in states:
-            state.start_returning_home.assert_called_once_with()
+            state.start_returning_home.assert_not_called()
         mission.control_center.set_explored_percent.assert_called_once_with(100)
 
     def test_mission_trace_records_deterministic_exploration_policy(self) -> None:
@@ -278,42 +355,54 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertEqual(constructed.kwargs["exploration_policy"], "random")
         self.assertEqual(
             constructed.kwargs["frontier_policy"],
-            "rover_epoch_sectors_with_in_sector_frontier_guidance",
+            "coordinated_scan_then_frontier_component_dfs",
         )
-        self.assertEqual(constructed.kwargs["sector_cell_size"], 32)
+        self.assertEqual(constructed.kwargs["component_cost_cell_size"], 32)
         self.assertEqual(
-            constructed.kwargs["sector_check_in"],
-            "single_arrival_and_departure_exchange",
+            constructed.kwargs["component_check_in"],
+            "queued_moving_rover_rendezvous",
         )
         self.assertEqual(
-            constructed.kwargs["sector_check_in_path"],
+            constructed.kwargs["component_check_in_path"],
             "astar_with_breadcrumb_fallback",
         )
         self.assertEqual(
-            constructed.kwargs["sector_assignment_delivery"],
+            constructed.kwargs["component_assignment_delivery"],
             "rover_signalled_no_polling",
         )
         self.assertEqual(
-            constructed.kwargs["sector_outcome_memory"],
-            "component_local_immediate_zero_gain",
+            constructed.kwargs["component_task_routing"],
+            "rover_known_free_connectivity_then_drone_astar",
         )
         self.assertEqual(
-            constructed.kwargs["sector_workload_estimate"],
-            "scan_approach_dispersion_and_terrain",
+            constructed.kwargs["component_zero_gain_memory"],
+            "individual_anchor_or_subarc",
+        )
+        self.assertEqual(
+            constructed.kwargs["component_workload_estimate"],
+            "frontier_cells_plus_unknown_pixels_per_cell_size_squared",
+        )
+        self.assertEqual(
+            constructed.kwargs["component_energy_policy"],
+            "unlimited_via_energy_contract",
         )
         self.assertEqual(
             constructed.kwargs["frontier_unknown_basin_rescue"],
             "interior_basins_only",
         )
-        self.assertFalse(constructed.kwargs["rover_periodic_sharing"])
-        self.assertFalse(constructed.kwargs["rover_drone_pair_sharing"])
-        self.assertFalse(
+        self.assertTrue(constructed.kwargs["rover_periodic_sharing"])
+        self.assertTrue(constructed.kwargs["rover_drone_pair_sharing"])
+        self.assertTrue(
             mission.terrain_sharing.dependencies.periodic_rover_sharing_enabled
         )
 
         self.assertEqual(
-            constructed.kwargs["wall_completion_tolerance_pixels"],
-            30,
+            constructed.kwargs["exploration_completion"],
+            "physical_team_quiescence_after_component_exhaustion",
+        )
+        self.assertEqual(
+            constructed.kwargs["exploration_progress"],
+            "discovered_floor_coverage_display_only",
         )
         self.assertEqual(
             constructed.kwargs["frontier_minimum_cluster_cells"],
@@ -413,7 +502,7 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.exit_requested)
         self.assertFalse(mission.is_paused)
         self.assertTrue(mission.pause_event.is_set())
-        self.assertFalse(mission.rover_motion_enabled)
+        self.assertTrue(mission.rover_motion_enabled)
         self.assertFalse(mission._runtime_initialized)
         self.assertFalse(mission._has_run)
         self.assertTrue(hasattr(mission, "compute_path"))
@@ -432,9 +521,18 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.pathfinding.compute_weighted_path = Mock(
             return_value=[(0, 0), (0, 1)],
         )
+        rover_terrain = TerrainKnowledge(mission.map_matrix)
+        mission.rovers = [SimpleNamespace(
+            slam_map=SimpleNamespace(snapshot=Mock(return_value=SlamSnapshot(
+                np.full((8, 8), FREE, dtype=np.int8),
+                np.ones((8, 8), dtype=np.float32),
+                version=1,
+            ))),
+            terrain_knowledge=rover_terrain,
+        )]
 
         drone_path = mission.compute_path((0, 0), (1, 1))
-        rover_path = mission.compute_rover_path((0, 0), (0, 1))
+        rover_path = mission.compute_rover_path(0, (0, 0), (0, 1))
 
         self.assertEqual(drone_path, [(0, 0), (1, 1)])
         self.assertEqual(rover_path, [(0, 0), (0, 1)])
@@ -446,14 +544,42 @@ class MissionLifecycleTests(unittest.TestCase):
             mission.pathfinding.compute_weighted_path.call_args.args
         )
         np.testing.assert_array_equal(
-            weighted_args[0],
-            mission.terrain_knowledge.roughness,
+            weighted_args[0], rover_terrain.roughness,
         )
         np.testing.assert_array_equal(
-            weighted_args[1],
-            mission.terrain_knowledge.confidence,
+            weighted_args[1], rover_terrain.confidence,
         )
         self.assertEqual(weighted_args[2:], ((0, 0), (0, 1)))
+        traversability = (
+            mission.pathfinding.compute_weighted_path.call_args.kwargs[
+                "traversability_map"
+            ]
+        )
+        self.assertTrue(np.all(traversability == 0))
+
+    def test_rover_path_rejects_corridor_narrower_than_its_body(self) -> None:
+        mission = MissionControl(FakeGame())
+        occupancy = np.full((8, 8), OCCUPIED, dtype=np.int8)
+        confidence = np.ones((8, 8), dtype=np.float32)
+        occupancy[4, 1:7] = FREE
+        rover_terrain = TerrainKnowledge(mission.map_matrix)
+        rover = SimpleNamespace(
+            icon=pygame.Surface((4, 4), pygame.SRCALPHA),
+            slam_map=SimpleNamespace(snapshot=Mock(return_value=SlamSnapshot(
+                occupancy,
+                confidence,
+                version=1,
+            ))),
+            terrain_knowledge=rover_terrain,
+        )
+        mission.rovers = [rover]
+        mission.pathfinding.compute_weighted_path = Mock()
+
+        self.assertEqual(
+            mission.compute_rover_path(0, (2, 4), (5, 4)),
+            [],
+        )
+        mission.pathfinding.compute_weighted_path.assert_not_called()
 
     def test_game_constructs_then_runs_mission(self) -> None:
         game = object.__new__(Game)
@@ -621,7 +747,9 @@ class MissionLifecycleTests(unittest.TestCase):
                 mission._run_mission_loop()
 
         game.menu.toggle_music.assert_called_once_with()
-        mission.terrain_sharing.share_with_rovers.assert_called_once_with()
+        # Periodic rover sharing runs on the primary rover worker so the UI
+        # loop cannot stall on SLAM merge/reconciliation work.
+        mission.terrain_sharing.share_with_rovers.assert_not_called()
         mission.is_mission_over.assert_called_once_with()
         mission.update_sensors.assert_called_once_with()
         mission.renderer.draw.assert_called_once_with()
@@ -837,6 +965,15 @@ class MissionLifecycleTests(unittest.TestCase):
         mission.update_sensors = Mock()
         mission.terrain_sharing.share_with_rovers = Mock()
         mission.is_mission_over = Mock(return_value=True)
+        mission.control_center = SimpleNamespace(
+            handle_click=Mock(return_value=("mission_stop", None)),
+            pause_timer=Mock(),
+        )
+        stop_event = SimpleNamespace(
+            type=pygame.MOUSEBUTTONDOWN,
+            button=1,
+            pos=(1, 1),
+        )
 
         timestamps = [
             0.000,
@@ -847,10 +984,13 @@ class MissionLifecycleTests(unittest.TestCase):
             0.030,
             0.050,
             0.052,
+            0.060,
+            0.070,
+            0.080,
         ]
         with patch(
             "mission.lifecycle.pygame.event.get",
-            return_value=[],
+            side_effect=[[], [stop_event]],
         ):
             with patch("mission.lifecycle.pygame.display.update"):
                 with patch(
@@ -867,6 +1007,9 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(timing.stages_ms["sharing"], 8.0)
         self.assertAlmostEqual(timing.stages_ms["sensors"], 9.0)
         self.assertAlmostEqual(timing.stages_ms["render"], 20.0)
+        self.assertTrue(mission.exploration_complete)
+        self.assertTrue(mission.is_paused)
+        mission.control_center.pause_timer.assert_called_once_with()
 
 
 if __name__ == "__main__":

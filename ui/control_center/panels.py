@@ -8,7 +8,6 @@ from ui.control_center.view_model import (
     DRONE_ROSTER,
     ROVER_ROSTER,
     AgentRosterEntry,
-    ControlCenterViewModel,
     DroneStatusView,
     RoverStatusView,
 )
@@ -37,6 +36,7 @@ class ControlCenterPanelMixin:
     def draw_rover_section(
         self,
         statuses: tuple[RoverStatusView, ...],
+        selected_rover_heatmap_id: Optional[int],
     ) -> None:
         """Draw rover roster rows, including undeployed placeholders."""
         self.draw_section_header("rovers")
@@ -46,24 +46,47 @@ class ControlCenterPanelMixin:
                 roster_entry,
                 rover=True,
                 status_view=statuses_by_id.get(roster_entry.id),
+                selected_rover_heatmap_id=selected_rover_heatmap_id,
                 name_height=self.DRONE_NAME_Y,
                 data_height=self.DRONE_DATA_Y,
             )
 
     def draw_debug_panel(self, debug_lines: tuple[str, ...]) -> None:
-        """Draw wrapped mission debug lines in the debug tab."""
-        self.draw_section_header("debug")
-        lines = debug_lines or ("No debug lines available",)
-        font_obj = self._get_font(Fonts.BIG.value, 20)
+        """Draw wrapped live agent-state lines in the debug tab."""
+        self._draw_text_panel(
+            "debug",
+            debug_lines,
+            "No agent state available",
+        )
+
+    def draw_system_panel(self, system_lines: tuple[str, ...]) -> None:
+        """Draw wrapped mapping and runtime lines in the system tab."""
+        self._draw_text_panel(
+            "system",
+            system_lines,
+            "No system lines available",
+        )
+
+    def _draw_text_panel(
+        self,
+        prefix: str,
+        lines: tuple[str, ...],
+        empty_text: str,
+    ) -> None:
+        """Draw one wrapped line stream under its tab header."""
+        self.draw_section_header(prefix)
+        displayed_lines = lines or (empty_text,)
+        font_size = self.DEBUG_FONT_SIZE if prefix == "debug" else 20
+        font_obj = self._get_font(Fonts.BIG.value, font_size)
         max_w = Display.LEGEND_WIDTH - 16
         ypos = self.DRONE_NAME_Y
         index = 0
         line_gap = 8
-        for line in lines:
+        for line in displayed_lines:
             if ":" in line:
                 label, value = line.split(":", 1)
                 ypos, index, done = self._draw_label_value_entry(
-                    "debug",
+                    prefix,
                     index,
                     label.strip() + ":",
                     value.strip(),
@@ -75,7 +98,7 @@ class ControlCenterPanelMixin:
                 )
             else:
                 ypos, index, done = self._draw_wrapped_text_lines(
-                    "debug",
+                    prefix,
                     index,
                     line,
                     font_obj,
@@ -83,58 +106,6 @@ class ControlCenterPanelMixin:
                     ypos,
                     line_gap,
                 )
-            if done:
-                return
-
-    def draw_system_panel(self, view: ControlCenterViewModel) -> None:
-        """Draw aggregate UI/system state in the system tab."""
-        self.draw_section_header("system")
-        total_drones = len(view.drone_statuses)
-        active_vision = sum(
-            1 for drone in view.drone_statuses if drone.show_vision
-        )
-        active_paths = sum(
-            1 for drone in view.drone_statuses if drone.show_path
-        )
-        avg_battery = (
-            0
-            if total_drones == 0
-            else int(
-                sum(
-                    drone.battery
-                    for drone in view.drone_statuses
-                )
-                / total_drones
-            )
-        )
-        pairs = [
-            ("Active tab:", view.active_tab.upper()),
-            ("Drones online:", str(total_drones)),
-            ("Rovers online:", str(len(view.rover_statuses))),
-            (
-                "Vision overlays:",
-                f"{active_vision}/{total_drones}",
-            ),
-            ("Path overlays:", f"{active_paths}/{total_drones}"),
-            ("Avg drone battery:", f"{avg_battery}%"),
-            ("Debug lines:", str(len(view.debug_lines))),
-        ]
-        font_obj = self._get_font(Fonts.BIG.value, 20)
-        max_w = Display.LEGEND_WIDTH - 16
-        ypos = self.DRONE_DATA_Y - 25
-        index = 0
-        for label, value in pairs:
-            ypos, index, done = self._draw_label_value_entry(
-                "system",
-                index,
-                label,
-                value,
-                font_obj,
-                max_w,
-                ypos,
-                8,
-                6,
-            )
             if done:
                 return
 
@@ -146,6 +117,7 @@ class ControlCenterPanelMixin:
             DroneStatusView | RoverStatusView
         ] = None,
         selected_drone_heatmap_id: Optional[int] = None,
+        selected_rover_heatmap_id: Optional[int] = None,
         name_height: Optional[int] = None,
         data_height: Optional[int] = None,
     ) -> None:
@@ -198,6 +170,12 @@ class ControlCenterPanelMixin:
                 y_center,
                 selected_drone_heatmap_id,
             )
+        elif isinstance(status_view, RoverStatusView):
+            self._draw_rover_toggle(
+                status_view,
+                y_center,
+                selected_rover_heatmap_id,
+            )
 
         if status_view is None:
             na_surf = self._static_fragments["N/A"]
@@ -221,7 +199,7 @@ class ControlCenterPanelMixin:
             status_view.status,
             battery_color,
             status_color,
-            25,
+            self.STATUS_FONT_SIZE,
             Fonts.BIG.value,
         )
         self._blit_cached_surface(
@@ -252,6 +230,24 @@ class ControlCenterPanelMixin:
             "Moving",
             "Sharing",
             "Charging",
+            "Task transit",
+            "Frontier scan",
+            "DFS backtrack",
+            "Probe transit",
+            "Probe scan",
+            "Probe return",
+            "Rover scan",
+            "Rover return",
+            "Rover check-in",
+            "Checking in",
+            "Reporting",
+            "Awaiting task",
+            "Staging",
+            "Rendezvous",
+            "Announcing",
+            "Branch follow",
+            "Branch transit",
+            "Branch scan",
         ):
             return Colors.YELLOW.value
         if status in ("Deployed", "Homing"):

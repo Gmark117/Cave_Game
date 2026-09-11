@@ -60,19 +60,17 @@ class AgentFactoryTests(unittest.TestCase):
                 ) as rover_cls:
                     AgentFactory.build_rovers(self.control)
 
-        self.assertEqual(self.control.num_rovers, 3)
-        self.assertEqual(rover_cls.call_count, 3)
+        self.assertEqual(self.control.num_rovers, 1)
+        self.assertEqual(rover_cls.call_count, 1)
         self.assertEqual(self.control.rover_icon.get_size(), (40, 40))
         self.assertIs(
             self.control.rovers[0].args[-1],
             self.control.map_matrix,
         )
 
-    def test_rover_count_includes_first_aid_and_charging_carriers(self) -> None:
-        self.assertEqual(AgentFactory.get_rover_count(3), 2)
-        self.assertEqual(AgentFactory.get_rover_count(4), 2)
-        self.assertEqual(AgentFactory.get_rover_count(5), 3)
-        self.assertEqual(AgentFactory.get_rover_count(8), 3)
+    def test_component_exploration_uses_one_mobile_rover(self) -> None:
+        self.assertEqual(AgentFactory.get_rover_count(3), 1)
+        self.assertEqual(AgentFactory.get_rover_count(8), 1)
 
     def test_icon_dimensions_follow_map_size(self) -> None:
         self.assertEqual(AgentFactory.get_drone_icon_dim("LARGE"), (10, 10))

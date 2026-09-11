@@ -16,14 +16,45 @@ class SlamViewService:
         self.dependencies = dependencies
         self.refresh_interval = dependencies.rendering.refresh_interval
         self.last_refresh_time: float | None = None
-        self.rendered_versions: dict[int, int] = {}
+        self.rendered_versions: dict[tuple[str, int], int] = {}
 
     def dirty_map_count(self) -> int:
-        """Return the number of drone maps newer than their rendered version."""
+        """Return newer maps participating in the currently selected view."""
+        dependencies = self.dependencies
+        drones = dependencies.get_drones()
+        rovers = dependencies.get_rovers()
+        selected_rover_id = getattr(
+            dependencies.presentation,
+            "selected_rover_heatmap_id",
+            None,
+        )
+        if (
+            selected_rover_id is not None
+            and 0 <= selected_rover_id < len(rovers)
+        ):
+            return int(self._map_is_dirty(
+                "rover",
+                selected_rover_id,
+                rovers[selected_rover_id].slam_map,
+            ))
+        selected_drone_id = (
+            dependencies.presentation.selected_drone_heatmap_id
+        )
+        if (
+            selected_drone_id is not None
+            and 0 <= selected_drone_id < len(drones)
+        ):
+            return int(self._map_is_dirty(
+                "drone",
+                selected_drone_id,
+                drones[selected_drone_id].slam_map,
+            ))
+        agents = drones if drones else rovers
+        agent_kind = "drone" if drones else "rover"
         return sum(
             1
-            for drone_id, drone in enumerate(self.dependencies.get_drones())
-            if self._map_is_dirty(drone_id, drone.slam_map)
+            for agent_id, agent in enumerate(agents)
+            if self._map_is_dirty(agent_kind, agent_id, agent.slam_map)
         )
 
     def refresh(self, drone_id: Optional[int] = None) -> None:
@@ -35,7 +66,8 @@ class SlamViewService:
         """
         dependencies = self.dependencies
         drones = dependencies.get_drones()
-        if not drones:
+        rovers = dependencies.get_rovers()
+        if not drones and not rovers:
             dependencies.slam_renderer.surface.fill((0, 0, 0, 0))
             dependencies.presentation.terrain_heatmap_dirty = False
             self.rendered_versions.clear()
@@ -45,15 +77,50 @@ class SlamViewService:
         h, w = dependencies.terrain_knowledge.floor_mask.shape
         render_tail = dependencies.rendering.point_tail
 
-        selected_id = (
+        selected_drone_id = (
             drone_id
             if drone_id is not None
             else dependencies.presentation.selected_drone_heatmap_id
         )
-        if selected_id is not None and 0 <= selected_id < len(drones):
-            self._render_selected_drone(selected_id, h, w, render_tail)
+        selected_rover_id = getattr(
+            dependencies.presentation,
+            "selected_rover_heatmap_id",
+            None,
+        )
+        if drone_id is not None:
+            selected_rover_id = None
+        if (
+            selected_rover_id is not None
+            and 0 <= selected_rover_id < len(rovers)
+        ):
+            self._render_selected_agent(
+                "rover",
+                selected_rover_id,
+                rovers[selected_rover_id],
+                h,
+                w,
+                render_tail,
+            )
+        elif (
+            selected_drone_id is not None
+            and 0 <= selected_drone_id < len(drones)
+        ):
+            self._render_selected_agent(
+                "drone",
+                selected_drone_id,
+                drones[selected_drone_id],
+                h,
+                w,
+                render_tail,
+            )
         else:
-            self._render_combined(h, w, render_tail)
+            self._render_combined(
+                h,
+                w,
+                render_tail,
+                drones if drones else rovers,
+                "drone" if drones else "rover",
+            )
 
         dependencies.presentation.terrain_heatmap_dirty = False
         self.last_refresh_time = time.perf_counter()
@@ -61,7 +128,10 @@ class SlamViewService:
     def draw(self) -> None:
         """Blit the cached SLAM map overlay, refreshing it when dirty."""
         dependencies = self.dependencies
-        if not dependencies.get_drones():
+        if (
+            not dependencies.get_drones()
+            and not dependencies.get_rovers()
+        ):
             return
 
         # This flag also represents a selected/combined view identity change.
@@ -98,13 +168,18 @@ class SlamViewService:
         dependencies.get_window().blit(underlay, (0, 0))
         return True
 
-    def _render_selected_drone(
-        self, selected_id: int, h: int, w: int, render_tail: int
+    def _render_selected_agent(
+        self,
+        agent_kind: str,
+        selected_id: int,
+        agent: Any,
+        h: int,
+        w: int,
+        render_tail: int,
     ) -> None:
-        """Render only the selected drone's SLAM or terrain heatmap."""
+        """Render only the selected drone or rover's local knowledge."""
         dependencies = self.dependencies
-        drone = dependencies.get_drones()[selected_id]
-        slam = drone.slam_map.snapshot(point_limit=render_tail)
+        slam = agent.slam_map.snapshot(point_limit=render_tail)
         occ = slam.occupancy
         conf = slam.confidence
         points = list(slam.point_cloud)
@@ -121,7 +196,7 @@ class SlamViewService:
             padded_conf[:eh, :ew] = conf[:eh, :ew]
 
         if dependencies.presentation.show_terrain_heatmap:
-            terrain = drone.terrain_knowledge.snapshot()
+            terrain = agent.terrain_knowledge.snapshot()
             dependencies.slam_renderer.render(
                 None,
                 None,
@@ -137,18 +212,25 @@ class SlamViewService:
                 points,
                 draw_points=False,
             )
-        self.rendered_versions[selected_id] = slam.version
+        self.rendered_versions[(agent_kind, selected_id)] = slam.version
 
-    def _render_combined(self, h: int, w: int, render_tail: int) -> None:
-        """Merge all drone SLAM views for the combined mission overlay."""
+    def _render_combined(
+        self,
+        h: int,
+        w: int,
+        render_tail: int,
+        agents: Any,
+        agent_kind: str,
+    ) -> None:
+        """Merge the default mission-agent SLAM views."""
         dependencies = self.dependencies
         combined_occ = np.full((h, w), -1, dtype=np.int8)
         combined_conf = np.zeros((h, w), dtype=np.float32)
         combined_points: List[Tuple[int, int]] = []
 
         snapshots = [
-            drone.slam_map.snapshot(point_limit=render_tail)
-            for drone in dependencies.get_drones()
+            agent.slam_map.snapshot(point_limit=render_tail)
+            for agent in agents
         ]
         for slam in snapshots:
             occ = slam.occupancy
@@ -186,25 +268,51 @@ class SlamViewService:
                 draw_points=False,
             )
 
-        for drone_id, slam in enumerate(snapshots):
-            self.rendered_versions[drone_id] = slam.version
+        for agent_id, slam in enumerate(snapshots):
+            self.rendered_versions[(agent_kind, agent_id)] = slam.version
 
     def _current_view_is_dirty(self) -> bool:
         """Return whether the active combined/selected view needs refresh."""
         dependencies = self.dependencies
         drones = dependencies.get_drones()
+        rovers = dependencies.get_rovers()
+        selected_rover_id = getattr(
+            dependencies.presentation,
+            "selected_rover_heatmap_id",
+            None,
+        )
+        if (
+            selected_rover_id is not None
+            and 0 <= selected_rover_id < len(rovers)
+        ):
+            return self._map_is_dirty(
+                "rover",
+                selected_rover_id,
+                rovers[selected_rover_id].slam_map,
+            )
         selected_id = dependencies.presentation.selected_drone_heatmap_id
         if selected_id is not None and 0 <= selected_id < len(drones):
             return self._map_is_dirty(
+                "drone",
                 selected_id,
                 drones[selected_id].slam_map,
             )
+        agents = drones if drones else rovers
+        agent_kind = "drone" if drones else "rover"
         return any(
-            self._map_is_dirty(drone_id, drone.slam_map)
-            for drone_id, drone in enumerate(drones)
+            self._map_is_dirty(agent_kind, agent_id, agent.slam_map)
+            for agent_id, agent in enumerate(agents)
         )
 
-    def _map_is_dirty(self, drone_id: int, slam_map: Any) -> bool:
-        """Compare a drone SLAM version with the last rendered version."""
-        rendered_version = self.rendered_versions.get(drone_id, -1)
+    def _map_is_dirty(
+        self,
+        agent_kind: str,
+        agent_id: int,
+        slam_map: Any,
+    ) -> bool:
+        """Compare an agent SLAM version with its rendered version."""
+        rendered_version = self.rendered_versions.get(
+            (str(agent_kind), int(agent_id)),
+            -1,
+        )
         return slam_map.has_changed_since(rendered_version)

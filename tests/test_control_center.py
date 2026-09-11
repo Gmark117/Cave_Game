@@ -40,9 +40,11 @@ class ControlCenterTests(unittest.TestCase):
             show_terrain_heatmap=False,
             selected_drone_heatmap_id=1,
             debug_lines=["line"],
+            system_lines=["system"],
             is_paused=True,
             music_enabled=False,
             show_full_map=False,
+            exploration_complete=True,
         )
 
         view = self.center._renderer.render.call_args.args[0]
@@ -52,9 +54,11 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIs(view.drone_statuses, drones)
         self.assertIs(view.rover_statuses, rovers)
         self.assertEqual(view.debug_lines, ("line",))
+        self.assertEqual(view.system_lines, ("system",))
         self.assertTrue(view.is_paused)
         self.assertFalse(view.music_enabled)
         self.assertFalse(view.show_full_map)
+        self.assertTrue(view.exploration_complete)
         self.assertEqual(self.center.num_drones, 3)
         self.assertEqual(self.center.num_rovers, 2)
         self.assertEqual(

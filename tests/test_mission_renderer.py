@@ -48,7 +48,10 @@ class MissionRendererTests(unittest.TestCase):
             debug_info=getattr(
                 control,
                 "debug_info",
-                SimpleNamespace(build_lines=lambda snapshots: []),
+                SimpleNamespace(
+                    build_debug_lines=lambda snapshots: [],
+                    build_system_lines=lambda snapshots: [],
+                ),
             ),
             get_control_center=lambda: getattr(control, "control_center", None),
             get_drones=lambda: getattr(control, "drones", []),
@@ -59,6 +62,7 @@ class MissionRendererTests(unittest.TestCase):
                 SimpleNamespace(
                     show_terrain_heatmap=False,
                     selected_drone_heatmap_id=None,
+                    selected_rover_heatmap_id=None,
                     show_full_map=False,
                 ),
             ),
@@ -69,6 +73,11 @@ class MissionRendererTests(unittest.TestCase):
                 control,
                 "sector_snapshot",
                 None,
+            ),
+            is_exploration_complete=lambda: getattr(
+                control,
+                "exploration_complete",
+                False,
             ),
         )
 
@@ -111,11 +120,16 @@ class MissionRendererTests(unittest.TestCase):
         build_debug_lines = Mock(
             side_effect=lambda snapshots: events.append("debug") or ["line"],
         )
+        build_system_lines = Mock(
+            side_effect=lambda snapshots: events.append("system")
+            or ["system line"],
+        )
         debug_info = SimpleNamespace(
-            build_lines=build_debug_lines,
+            build_debug_lines=build_debug_lines,
+            build_system_lines=build_system_lines,
         )
         draw_control_center = Mock(
-            side_effect=lambda *args: events.append("control_center"),
+            side_effect=lambda *args, **kwargs: events.append("control_center"),
         )
         control_center = SimpleNamespace(
             draw_control_center=draw_control_center,
@@ -130,10 +144,12 @@ class MissionRendererTests(unittest.TestCase):
             presentation=SimpleNamespace(
                 show_terrain_heatmap=False,
                 selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
                 show_full_map=False,
             ),
             is_paused=True,
             music_enabled=False,
+            exploration_complete=True,
             sector_snapshot=object(),
         )
         control.sector_renderer = SimpleNamespace(
@@ -155,12 +171,13 @@ class MissionRendererTests(unittest.TestCase):
                 "drone_icon",
                 "rover_icon",
                 "debug",
+                "system",
                 "control_center",
             ],
         )
-        control_center_args = draw_control_center.call_args.args
-        self.assertIsNot(control_center_args[0][0], drone)
-        self.assertIsNot(control_center_args[1][0], rover)
+        control_center_values = draw_control_center.call_args.kwargs
+        self.assertIsNot(control_center_values["drone_statuses"][0], drone)
+        self.assertIsNot(control_center_values["rover_statuses"][0], rover)
         drone.snapshot.assert_called_once_with()
         self.assertIs(drone_renderer.path_snapshot, drone_snapshot)
         self.assertIs(drone_renderer.vision_snapshot, drone_snapshot)
@@ -169,9 +186,19 @@ class MissionRendererTests(unittest.TestCase):
             build_debug_lines.call_args.args[0][0],
             drone_snapshot,
         )
-        self.assertTrue(control_center_args[5])
-        self.assertFalse(control_center_args[6])
-        self.assertFalse(control_center_args[7])
+        self.assertIs(
+            build_system_lines.call_args.args[0][0],
+            drone_snapshot,
+        )
+        self.assertEqual(control_center_values["debug_lines"], ["line"])
+        self.assertEqual(
+            control_center_values["system_lines"],
+            ["system line"],
+        )
+        self.assertTrue(control_center_values["is_paused"])
+        self.assertFalse(control_center_values["music_enabled"])
+        self.assertFalse(control_center_values["show_full_map"])
+        self.assertTrue(control_center_values["exploration_complete"])
 
     def test_draw_skips_black_clear_when_static_background_draws(self) -> None:
         events = []
@@ -180,7 +207,7 @@ class MissionRendererTests(unittest.TestCase):
             draw=lambda: events.append("slam"),
         )
         draw_control_center = Mock(
-            side_effect=lambda *args: events.append("control_center"),
+            side_effect=lambda *args, **kwargs: events.append("control_center"),
         )
         control = SimpleNamespace(
             game=SimpleNamespace(window=RecordingWindow(events)),
@@ -193,6 +220,7 @@ class MissionRendererTests(unittest.TestCase):
             presentation=SimpleNamespace(
                 show_terrain_heatmap=False,
                 selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
                 show_full_map=True,
             ),
         )

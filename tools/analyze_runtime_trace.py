@@ -2456,17 +2456,88 @@ def _trace_event_time(event: Mapping[str, Any]) -> float | None:
     return _finite_float(event.get("perf_time"))
 
 
+def _exploration_completion_event_names(
+    events: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return terminal events appropriate to the trace's declared policy."""
+    component_quiescence = any(
+        event.get("event") == "mission_constructed"
+        and str(event.get("exploration_completion", "")).startswith(
+            "physical_team_quiescence"
+        )
+        for event in events
+    )
+    names = {"exploration_complete_presented"}
+    if not component_quiescence:
+        names.update({
+            "team_wall_mapping_tolerance_reached",
+            "team_wall_mapping_complete",
+        })
+    return frozenset(names)
+
+
+def _sector_wait_intervals(
+    events: Sequence[Mapping[str, Any]],
+) -> list[tuple[int, str, float, float]]:
+    """Separate standby from barrier waits, including waits open at shutdown."""
+    times = [t for event in events if (t := _trace_event_time(event)) is not None]
+    if not times:
+        return []
+    completion_events = _exploration_completion_event_names(events)
+    terminals = [
+        t for event in events
+        if event.get("event") in completion_events
+        or event.get("event") in {"mission_shutdown_started", "trace_closed"}
+        if (t := _trace_event_time(event)) is not None
+    ]
+    end = min(terminals) if terminals else max(times)
+    pending: dict[int, tuple[str, float]] = {}
+    intervals: list[tuple[int, str, float, float]] = []
+    for event in events:
+        timestamp = _trace_event_time(event)
+        drone_id = _integer(event.get("drone_id"))
+        if timestamp is None or drone_id is None:
+            continue
+        name = event.get("event")
+        if name in {"drone_sector_waiting_for_team", "drone_sector_standby"}:
+            reason = "standby" if name == "drone_sector_standby" else "barrier"
+            previous = pending.get(drone_id)
+            if previous is not None:
+                intervals.append((drone_id, previous[0], previous[1], min(end, timestamp)))
+            pending[drone_id] = (reason, timestamp)
+        elif name == "drone_sector_wait_completed":
+            duration = _finite_float(event.get("waited_seconds"))
+            previous = pending.pop(drone_id, None)
+            if previous is None and duration is not None:
+                previous = (str(event.get("wait_reason", "barrier")), timestamp - duration)
+            if previous is not None:
+                intervals.append((drone_id, previous[0], previous[1], min(end, timestamp)))
+    intervals.extend((drone_id, reason, start, end)
+                     for drone_id, (reason, start) in pending.items())
+    return [item for item in intervals if item[3] >= item[2]]
+
+
 def _sector_epoch_summary_lines(
     events: Sequence[Mapping[str, Any]],
 ) -> list[str]:
     """Summarize assigned work, yield, travel, and termination per epoch."""
     assignments: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    publications = {
+        generation: event for event in events
+        if event.get("event") == "rover_sector_epoch_published"
+        and (generation := _integer(event.get("generation"))) is not None
+    }
     for event in events:
         if event.get("event") != "drone_sector_assigned":
             continue
         generation = _integer(event.get("generation"))
-        if generation is not None:
+        if generation is not None and generation not in publications:
             assignments[generation].append(event)
+    for generation, event in publications.items():
+        assignments[generation] = [
+            dict(item, sim_time=_trace_event_time(event))
+            for item in event.get("assignments", ())
+        ]
     if not assignments:
         return []
 
@@ -2481,18 +2552,23 @@ def _sector_epoch_summary_lines(
     }
     if not starts:
         return []
+    completion_events = _exploration_completion_event_names(events)
     terminal_times = [
         timestamp
         for event in events
-        if event.get("event") in {
-            "team_wall_mapping_tolerance_reached",
-            "team_wall_mapping_complete",
-            "mission_shutdown_started",
-            "trace_closed",
-        }
+        if (
+            event.get("event") in completion_events
+            or event.get("event") in {
+                "mission_shutdown_started",
+                "trace_closed",
+            }
+        )
         and (timestamp := _trace_event_time(event)) is not None
     ]
-    trace_end = min(terminal_times) if terminal_times else max(starts.values())
+    trace_end = min(terminal_times) if terminal_times else max(
+        timestamp for event in events
+        if (timestamp := _trace_event_time(event)) is not None
+    )
     wall_observations = [
         event
         for event in events
@@ -2500,6 +2576,7 @@ def _sector_epoch_summary_lines(
             "frame_summary",
             "team_wall_mapping_tolerance_reached",
             "team_wall_mapping_complete",
+            "exploration_complete_presented",
         }
         and _trace_event_time(event) is not None
     ]
@@ -2515,6 +2592,7 @@ def _sector_epoch_summary_lines(
         )
 
     lines = ["", "Sector epoch yield:"]
+    wait_intervals = _sector_wait_intervals(events)
     ordered = sorted(starts)
     for index, generation in enumerate(ordered):
         start = starts[generation]
@@ -2539,6 +2617,44 @@ def _sector_epoch_summary_lines(
             )
             for event in assignments[generation]
         }
+        standby_ids = {
+            int(event["drone_id"]) for event in assignments[generation]
+            if event.get("standby", False)
+        }
+        active_ids = set(work_by_drone) - standby_ids
+        waits = {
+            reason: sum(
+                max(0.0, min(end, wait_end) - max(start, wait_start))
+                for _drone_id, wait_reason, wait_start, wait_end in wait_intervals
+                if wait_reason == reason
+            ) for reason in ("barrier", "standby")
+        }
+        standby_distance = sum(
+            float(event.get("travelled_distance", 0.0) or 0.0)
+            for event in interval if event.get("event") == "drone_motion"
+            and _integer(event.get("drone_id")) in standby_ids
+        )
+        scope_values = [event.get("scope_pixels") for event in assignments[generation]
+                        if not event.get("standby", False)]
+        scope_pixels = (
+            str(sum(int(value) for value in scope_values))
+            if scope_values and all(value is not None for value in scope_values)
+            else "N/A"
+        )
+        estimated_effort = sum(float(event.get("estimated_effort", 0.0) or 0.0)
+                               for event in assignments[generation])
+        effort_terms = "N/A"
+        if all("effort_breakdown" in event for event in assignments[generation]):
+            terms = ("frontier_scan", "approach", "setup", "dispersion", "unknown_area")
+            totals = {
+                term: sum(
+                    float(_nested_mapping(event, "effort_breakdown").get(term, 0.0) or 0.0)
+                    for event in assignments[generation]
+                ) for term in terms
+            }
+            effort_terms = ",".join(f"{term}:{total:.2f}" for term, total in totals.items())
+        excluded = sum(int(event.get("scope_excluded_frontier_count", 0) or 0)
+                       for event in interval if event.get("event") == "drone_frontiers_rebuilt")
         sensor_gain = sum(
             int(event.get("newly_known_cells", 0) or 0)
             for event in interval
@@ -2607,7 +2723,275 @@ def _sector_epoch_summary_lines(
             "suppressions="
             f"{sum(event.get('event') == 'drone_border_target_suppressed' for event in interval)} "
             "sector_exhaustions="
-            f"{sum(event.get('event') == 'drone_sector_exhausted' for event in interval)}"
+            f"{sum(event.get('event') == 'drone_sector_exhausted' for event in interval)} "
+            f"active={sorted(active_ids)} standby={sorted(standby_ids)} "
+            f"scope_pixels={scope_pixels} estimated_effort={estimated_effort:.2f} "
+            f"effort_terms=[{effort_terms}] "
+            f"excluded_frontier_samples={excluded} "
+            f"barrier_wait={waits['barrier']:.2f}s standby_time={waits['standby']:.2f}s "
+            f"standby_distance={standby_distance:.2f}px"
+        )
+    return lines
+
+
+def _component_exploration_summary_lines(
+    events: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Summarize discovery rounds, lineage, claims, and quiescence."""
+    component_event_names = {
+        "rover_discovery_round_started",
+        "rover_discovery_round_completed",
+        "rover_frontier_registry_reconciled",
+        "rover_frontier_lineage_changed",
+        "rover_task_claimed",
+        "rover_task_completed",
+        "rover_branch_follow_assigned",
+        "rover_branch_follow_completed",
+        "drone_component_branch_claimed",
+        "drone_component_branches_reserved_for_followers",
+        "drone_component_branch_follow_ended",
+        "drone_component_task_suspended",
+        "drone_energy_return_required",
+        "rover_exploration_quiescence_evaluated",
+        "drone_component_target_adjusted_after_share",
+        "drone_component_target_retired_after_share",
+        "drone_component_sweep_advanced",
+        "drone_dfs_backtrack_replanned",
+        "drone_component_check_in_queued",
+        "rover_component_check_in_processed",
+        "rover_frontier_target_acquired",
+        "rover_frontier_target_departure_authorized",
+        "rover_frontier_staging_reached",
+        "rover_frontier_target_invalidated",
+        "rover_route_planned",
+        "rover_rendezvous_endpoint_proposed",
+        "drone_rover_rendezvous_ack_exchanged",
+        "drone_rendezvous_message_relayed",
+        "drone_rendezvous_endpoint_fallback",
+        "drone_component_rendezvous_retargeted",
+        "rover_rendezvous_endpoint_reached",
+        "exploration_complete_presented",
+    }
+    relevant = [
+        event for event in events
+        if event.get("event") in component_event_names
+    ]
+    if not relevant:
+        return []
+
+    round_starts = [
+        event for event in relevant
+        if event.get("event") == "rover_discovery_round_started"
+    ]
+    round_completions = [
+        event for event in relevant
+        if event.get("event") == "rover_discovery_round_completed"
+    ]
+    round_kinds = Counter(
+        str(event.get("round_kind", "unknown")) for event in round_starts
+    )
+    lineages = Counter(
+        str(event.get("transition_kind", "unknown"))
+        for event in relevant
+        if event.get("event") == "rover_frontier_lineage_changed"
+    )
+    claims = [
+        event for event in relevant
+        if event.get("event") == "rover_task_claimed"
+    ]
+    reports = [
+        event for event in relevant
+        if event.get("event") == "rover_task_completed"
+    ]
+    follower_assignments = [
+        event for event in relevant
+        if event.get("event") == "rover_branch_follow_assigned"
+    ]
+    follower_reports = [
+        event for event in relevant
+        if event.get("event") == "rover_branch_follow_completed"
+    ]
+    branch_claims = [
+        event for event in relevant
+        if event.get("event") == "drone_component_branch_claimed"
+    ]
+    suspension_reasons = Counter(
+        str(event.get("suspension_reason", "unknown"))
+        for event in reports if event.get("suspended")
+    )
+    outcomes: Counter[str] = Counter()
+    for event in reports:
+        for outcome in event.get("work_unit_outcomes", ()) or ():
+            if isinstance(outcome, Mapping):
+                outcomes[str(outcome.get("disposition", "unknown"))] += 1
+
+    reconciliations = [
+        event for event in relevant
+        if event.get("event") == "rover_frontier_registry_reconciled"
+    ]
+    latest_registry = max(
+        reconciliations,
+        key=lambda event: _integer(event.get("revision")) or -1,
+        default=None,
+    )
+    quiescence = [
+        event for event in relevant
+        if event.get("event") == "rover_exploration_quiescence_evaluated"
+    ]
+    homing_reasons = Counter(
+        str(event.get("reason", "unknown")) for event in quiescence
+    )
+    waits: defaultdict[int, float] = defaultdict(float)
+    for event in events:
+        if event.get("event") != "drone_component_directive_started":
+            continue
+        drone_id = _integer(event.get("drone_id"))
+        waited = _finite_float(event.get("waited_seconds"))
+        if drone_id is not None and waited is not None and waited >= 0.0:
+            waits[drone_id] += waited
+
+    local_adaptation = Counter(
+        str(event.get("event"))
+        for event in relevant
+        if event.get("event") in {
+            "drone_component_target_adjusted_after_share",
+            "drone_component_target_retired_after_share",
+            "drone_component_sweep_advanced",
+            "drone_dfs_backtrack_replanned",
+        }
+    )
+    queued_check_ins = [
+        event for event in relevant
+        if event.get("event") == "drone_component_check_in_queued"
+    ]
+    processed_check_ins = [
+        event for event in relevant
+        if event.get("event") == "rover_component_check_in_processed"
+    ]
+    queue_wait_ms = [
+        value for event in processed_check_ins
+        if (value := _finite_float(event.get("queue_wait_ms"))) is not None
+    ]
+    processing_ms = [
+        value for event in processed_check_ins
+        if (value := _finite_float(event.get("processing_ms"))) is not None
+    ]
+    rover_staging = Counter(
+        str(event.get("event"))
+        for event in relevant
+        if event.get("event") in {
+            "rover_frontier_target_acquired",
+            "rover_frontier_target_departure_authorized",
+            "rover_frontier_staging_reached",
+            "rover_frontier_target_invalidated",
+            "rover_route_planned",
+        }
+    )
+    rendezvous = Counter(
+        str(event.get("event"))
+        for event in relevant
+        if event.get("event") in {
+            "rover_rendezvous_endpoint_proposed",
+            "drone_rover_rendezvous_ack_exchanged",
+            "drone_rendezvous_message_relayed",
+            "drone_rendezvous_endpoint_fallback",
+            "rover_rendezvous_endpoint_reached",
+        }
+    )
+
+    lines = ["", "Component exploration:"]
+    lines.append(
+        "  discovery rounds: "
+        f"started={len(round_starts)} completed={len(round_completions)} "
+        f"rover_scan={round_kinds['rover_scan']} "
+        f"radial_probe={round_kinds['radial_probe']}"
+    )
+    if latest_registry is not None:
+        modes = latest_registry.get("exploration_modes", {}) or {}
+        lines.append(
+            "  latest registry: "
+            f"revision={latest_registry.get('revision', 'unknown')} "
+            f"active_components={latest_registry.get('active_component_count', 0)} "
+            f"ready_units={latest_registry.get('ready_work_unit_count', 0)} "
+            f"dormant={latest_registry.get('dormant_component_count', 0)} "
+            f"resolved={latest_registry.get('resolved_component_count', 0)} "
+            f"modes={dict(sorted(modes.items())) if isinstance(modes, Mapping) else {}}"
+        )
+    lines.append(
+        "  tasks: "
+        f"claims={len(claims)} reports={len(reports)} "
+        f"outcomes={dict(sorted(outcomes.items()))} "
+        f"suspensions={dict(sorted(suspension_reasons.items()))}"
+    )
+    if follower_assignments or follower_reports or branch_claims:
+        lines.append(
+            "  bootstrap followers: "
+            f"assigned={len(follower_assignments)} "
+            f"branches_claimed={len(branch_claims)} "
+            f"reports={len(follower_reports)}"
+        )
+    lines.append(
+        "  lineage: " + str(dict(sorted(lineages.items())))
+    )
+    if local_adaptation:
+        lines.append(
+            "  local autonomy: "
+            "shared_adjustments="
+            f"{local_adaptation['drone_component_target_adjusted_after_share']} "
+            "shared_retirements="
+            f"{local_adaptation['drone_component_target_retired_after_share']} "
+            "sweep_advances="
+            f"{local_adaptation['drone_component_sweep_advanced']} "
+            "backtrack_replans="
+            f"{local_adaptation['drone_dfs_backtrack_replanned']}"
+        )
+    if queued_check_ins or processed_check_ins:
+        lines.append(
+            "  async rover check-ins: "
+            f"queued={len(queued_check_ins)} processed={len(processed_check_ins)} "
+            "queue_wait_avg="
+            f"{_format_optional(statistics.mean(queue_wait_ms) if queue_wait_ms else None, 'ms')} "
+            "queue_wait_max="
+            f"{_format_optional(max(queue_wait_ms, default=None), 'ms')} "
+            "processing_avg="
+            f"{_format_optional(statistics.mean(processing_ms) if processing_ms else None, 'ms')} "
+            "processing_max="
+            f"{_format_optional(max(processing_ms, default=None), 'ms')}"
+        )
+    if rover_staging:
+        lines.append(
+            "  moving rovers: "
+            f"targets={rover_staging['rover_frontier_target_acquired']} "
+            "departures_authorized="
+            f"{rover_staging['rover_frontier_target_departure_authorized']} "
+            f"reached={rover_staging['rover_frontier_staging_reached']} "
+            f"invalidated={rover_staging['rover_frontier_target_invalidated']} "
+            f"routes={rover_staging['rover_route_planned']}"
+        )
+    if rendezvous:
+        lines.append(
+            "  rendezvous protocol: "
+            f"proposals={rendezvous['rover_rendezvous_endpoint_proposed']} "
+            f"direct_acks={rendezvous['drone_rover_rendezvous_ack_exchanged']} "
+            f"relays={rendezvous['drone_rendezvous_message_relayed']} "
+            "fallbacks="
+            f"{rendezvous['drone_rendezvous_endpoint_fallback']} "
+            f"reached={rendezvous['rover_rendezvous_endpoint_reached']}"
+        )
+    if waits:
+        lines.append(
+            "  completed wait by drone: "
+            + ", ".join(
+                f"{drone_id}={duration:.2f}s"
+                for drone_id, duration in sorted(waits.items())
+            )
+        )
+    if quiescence:
+        lines.append(
+            "  quiescence: "
+            f"events={len(quiescence)} reasons={dict(sorted(homing_reasons.items()))} "
+            f"max_ready_tasks={max(int(event.get('ready_task_count', 0) or 0) for event in quiescence)} "
+            f"max_live_claims={max(int(event.get('live_claim_count', 0) or 0) for event in quiescence)}"
         )
     return lines
 
@@ -2619,6 +3003,9 @@ def summarize(
 ) -> list[str]:
     """Build a compact text summary of drone decision and path events."""
     materialized = tuple(events)
+    completion_event_names = _exploration_completion_event_names(
+        materialized
+    )
     metrics = analyze_trace(
         materialized,
         reversal_window_start_s=reversal_window_start_s,
@@ -2664,6 +3051,10 @@ def summarize(
     astar_path_statuses: dict[int, Counter[str]] = defaultdict(Counter)
     frontier_route_circuities: dict[int, list[float]] = defaultdict(list)
     sector_wait_durations: dict[int, list[float]] = defaultdict(list)
+    sector_standby_durations: dict[int, list[float]] = defaultdict(list)
+    for drone_id, reason, start, end in _sector_wait_intervals(materialized):
+        destination = sector_standby_durations if reason == "standby" else sector_wait_durations
+        destination[drone_id].append(end - start)
     coverage_heading_terms: dict[
         int,
         list[tuple[float, float, float]],
@@ -2693,10 +3084,7 @@ def summarize(
             trace_path = str(event.get("path", "-"))
         if event_name == "frame_summary":
             last_frame = event
-        if event_name in {
-            "team_wall_mapping_tolerance_reached",
-            "team_wall_mapping_complete",
-        }:
+        if event_name in completion_event_names:
             completion_trigger = event
         if event_name == "rover_sector_frontiers_filtered":
             sector_frontier_filters.append(event)
@@ -2889,10 +3277,13 @@ def summarize(
             partial_segment_outcomes[drone_id][
                 "accepted" if event.get("accepted") else "rejected"
             ] += 1
-        if event_name == "drone_sector_wait_completed":
+        if event_name == "drone_sector_wait_completed" and _trace_event_time(event) is None:
             waited = _finite_float(event.get("waited_seconds"))
             if waited is not None and waited >= 0.0:
-                sector_wait_durations[drone_id].append(waited)
+                destination = (sector_standby_durations
+                               if event.get("wait_reason") == "standby"
+                               else sector_wait_durations)
+                destination[drone_id].append(waited)
         last_by_drone[drone_id].append(event)
         if event_name == "drone_waypoint_route":
             waypoint_route_statuses[drone_id][
@@ -2929,6 +3320,7 @@ def summarize(
     for name, count in event_counts.most_common(12):
         lines.append(f"  {name}: {count}")
     lines.extend(format_characterization(metrics))
+    lines.extend(_component_exploration_summary_lines(materialized))
     lines.extend(_sector_epoch_summary_lines(materialized))
 
     mission_started = next((
@@ -2963,17 +3355,27 @@ def summarize(
             )
 
     if completion_trigger is not None:
-        missing = completion_trigger.get("missing_wall_pixels", 0)
-        lines.extend([
-            "",
-            (
+        if completion_trigger.get("event") == "exploration_complete_presented":
+            ratio = _finite_float(
+                completion_trigger.get("floor_exploration_ratio")
+            )
+            coverage = (
+                "N/A" if ratio is None else f"{ratio * 100.0:.2f}%"
+            )
+            description = (
+                "Completion trigger: exploration_complete_presented "
+                f"floor={coverage}"
+            )
+        else:
+            missing = completion_trigger.get("missing_wall_pixels", 0)
+            description = (
                 "Completion trigger: "
                 f"{completion_trigger.get('event')} "
                 f"mapped={completion_trigger.get('mapped_wall_pixels')}"
                 f"/{completion_trigger.get('total_wall_pixels')} "
                 f"missing={missing}"
-            ),
-        ])
+            )
+        lines.extend(["", description])
 
     if sharing_protocol:
         lines.extend(["", "Sharing protocol:"])
@@ -3121,6 +3523,18 @@ def summarize(
                 f"frontiers={state.get('frontiers')} "
                 f"home={state.get('returning_home')} "
                 f"done={state.get('done')} "
+                f"activity={state.get('activity')} "
+                f"target={state.get('activity_target')} "
+                f"dfs_depth={state.get('dfs_depth')} "
+                f"slam={state.get('slam_version')}"
+            )
+        for state in last_frame.get("rover_states", []):
+            lines.append(
+                "  "
+                f"r{state.get('id')}: pos={state.get('position')} "
+                f"target={state.get('target')} "
+                f"status={state.get('status')} "
+                f"path_remaining={state.get('path_remaining')} "
                 f"slam={state.get('slam_version')}"
             )
 
@@ -3384,6 +3798,12 @@ def summarize(
             )
             lines.append(f"  A* partial segments: {outcomes}")
         waits = sector_wait_durations[drone_id]
+        standby = sector_standby_durations[drone_id]
+        if standby:
+            lines.append(
+                f"  sector standby: count={len(standby)} total={sum(standby):.2f}s "
+                f"max={max(standby):.2f}s"
+            )
         if waits:
             lines.append(
                 "  sector barrier waits: "

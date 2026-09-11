@@ -48,6 +48,8 @@ class DroneStatusView:
     status: str
     show_path: bool
     show_vision: bool
+    detail: str = ""
+    target: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,8 @@ class RoverStatusView:
     color: Color
     battery: int
     status: str
+    detail: str = ""
+    target: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,10 +76,13 @@ class ControlCenterViewModel:
     rover_statuses: tuple[RoverStatusView, ...]
     show_terrain_heatmap: bool
     selected_drone_heatmap_id: int | None
+    selected_rover_heatmap_id: int | None
     show_full_map: bool
     debug_lines: tuple[str, ...]
+    system_lines: tuple[str, ...]
     is_paused: bool
     music_enabled: bool
+    exploration_complete: bool
 
     def __init__(
         self,
@@ -90,6 +97,9 @@ class ControlCenterViewModel:
         is_paused: bool = False,
         music_enabled: bool = True,
         show_full_map: bool = False,
+        selected_rover_heatmap_id: int | None = None,
+        system_lines: Iterable[str] = (),
+        exploration_complete: bool = False,
     ) -> None:
         """Copy mutable mission values into immutable display values."""
         object.__setattr__(self, "elapsed_time", str(elapsed_time))
@@ -119,14 +129,29 @@ class ControlCenterViewModel:
             "selected_drone_heatmap_id",
             selected_drone_heatmap_id,
         )
+        object.__setattr__(
+            self,
+            "selected_rover_heatmap_id",
+            selected_rover_heatmap_id,
+        )
         object.__setattr__(self, "show_full_map", bool(show_full_map))
         object.__setattr__(
             self,
             "debug_lines",
             tuple(str(line) for line in debug_lines),
         )
+        object.__setattr__(
+            self,
+            "system_lines",
+            tuple(str(line) for line in system_lines),
+        )
         object.__setattr__(self, "is_paused", bool(is_paused))
         object.__setattr__(self, "music_enabled", bool(music_enabled))
+        object.__setattr__(
+            self,
+            "exploration_complete",
+            bool(exploration_complete),
+        )
 
 
 def _roster_name(roster: tuple[AgentRosterEntry, ...], agent_id: int) -> str:
@@ -156,34 +181,52 @@ def build_drone_status_views(
     snapshot_list = tuple(snapshots)
     if len(drone_list) != len(snapshot_list):
         raise ValueError("drones and snapshots must have the same length")
-    return tuple(
-        DroneStatusView(
+    views = []
+    for drone, snapshot in zip(drone_list, snapshot_list):
+        activity = None
+        controller = getattr(drone, "movement_controller", None)
+        activity_snapshot = getattr(controller, "activity_snapshot", None)
+        if callable(activity_snapshot):
+            activity = activity_snapshot()
+        views.append(DroneStatusView(
             id=int(drone.id),
             name=_roster_name(DRONE_ROSTER, int(drone.id)),
             color=tuple(drone.color),
             battery=int(snapshot.battery),
-            status=_drone_status(snapshot),
+            status=(
+                _drone_status(snapshot)
+                if activity is None
+                else str(activity.state)
+            ),
             show_path=snapshot.show_path,
             show_vision=snapshot.show_vision,
-        )
-        for drone, snapshot in zip(drone_list, snapshot_list)
-    )
+            detail="" if activity is None else str(activity.detail),
+            target=None if activity is None else activity.target,
+        ))
+    return tuple(views)
 
 
 def build_rover_status_views(
     rovers: Iterable[Any],
 ) -> tuple[RoverStatusView, ...]:
     """Copy current rover display state into detached immutable values."""
-    return tuple(
-        RoverStatusView(
+    views = []
+    for rover in rovers:
+        snapshot_method = getattr(rover, "snapshot", None)
+        snapshot = snapshot_method() if callable(snapshot_method) else rover
+        target = getattr(snapshot, "target", getattr(rover, "target", None))
+        status = str(getattr(snapshot, "status", rover.status))
+        detail = _rover_detail(status, target)
+        views.append(RoverStatusView(
             id=int(rover.id),
             name=_roster_name(ROVER_ROSTER, int(rover.id)),
             color=tuple(rover.color),
-            battery=int(rover.battery),
-            status=_rover_status(str(rover.status)),
-        )
-        for rover in rovers
-    )
+            battery=int(getattr(snapshot, "battery", rover.battery)),
+            status=_rover_status(status),
+            detail=detail,
+            target=target,
+        ))
+    return tuple(views)
 
 
 def _rover_status(status: str) -> str:
@@ -191,3 +234,24 @@ def _rover_status(status: str) -> str:
     if status == "Advancing":
         return "Moving"
     return status
+
+
+def _rover_detail(
+    status: str,
+    target: tuple[int, int] | None,
+) -> str:
+    """Explain the rover state without making the renderer inspect policy."""
+    target_text = "none" if target is None else f"{target[0]},{target[1]}"
+    if status == "Rendezvous":
+        return "holding for drone rendezvous"
+    if status == "Ready":
+        return "no reachable component target"
+    if status == "Updating":
+        return "selecting component target"
+    if status == "Announcing":
+        return f"awaiting endpoint acks for {target_text}"
+    if status == "Staging":
+        return f"staged at {target_text}"
+    if status == "Advancing":
+        return f"target {target_text}"
+    return f"target {target_text}"

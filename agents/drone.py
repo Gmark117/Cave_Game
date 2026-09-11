@@ -96,9 +96,12 @@ class Drone:
                     None,
                 ),
                 runtime_trace=getattr(control, "runtime_trace", None),
-                get_drone_positions=lambda: tuple(
-                    (peer.id, peer.snapshot().position)
-                    for peer in getattr(control, "drones", ())
+                get_drone_positions=lambda drone_id=id: tuple(
+                    getattr(
+                        control,
+                        "visible_drone_positions",
+                        lambda _drone_id: (),
+                    )(drone_id)
                 ),
                 sector_check_in=getattr(control, "sector_check_in", None),
                 sector_assignment=getattr(
@@ -106,9 +109,35 @@ class Drone:
                     "sector_assignment",
                     None,
                 ),
-                get_check_in_position=getattr(
+                get_check_in_position=(
+                    lambda drone_id=id: (
+                        control.get_check_in_position(drone_id)
+                        if getattr(
+                            control,
+                            "rendezvous_protocol",
+                            None,
+                        ) is not None
+                        else control.get_check_in_position()
+                    )
+                ),
+                rendezvous_endpoint_missed=getattr(
                     control,
-                    "get_check_in_position",
+                    "rendezvous_endpoint_missed",
+                    None,
+                ),
+                exploration_check_in=getattr(
+                    control,
+                    "exploration_check_in",
+                    None,
+                ),
+                exploration_assignment=getattr(
+                    control,
+                    "exploration_assignment",
+                    None,
+                ),
+                exploration_energy_return=getattr(
+                    control,
+                    "exploration_energy_return",
                     None,
                 ),
             ),

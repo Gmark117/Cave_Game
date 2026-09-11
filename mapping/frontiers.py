@@ -325,6 +325,38 @@ def _border_connected_basin_ids(basin_labels: np.ndarray) -> set[int]:
     }
 
 
+def frontier_neighborhood_masks(
+    unknown: np.ndarray,
+    components: tuple[frozenset[Position], ...],
+    *,
+    halo: int,
+) -> tuple[np.ndarray, ...]:
+    """Freeze component halos and adjacent enclosed basins for one epoch.
+
+    Basin labels are snapshot-local geometry, never suppression identities.
+    Border-connected unknown space cannot expand a component's bounded halo.
+    """
+    if unknown.ndim != 2 or halo < 0:
+        raise ValueError("neighborhoods require a 2D mask and nonnegative halo")
+    _, labels = cv2.connectedComponents(
+        unknown.astype(np.uint8), connectivity=8,
+    )
+    border_ids = _border_connected_basin_ids(labels)
+    kernel = np.ones((2 * halo + 1, 2 * halo + 1), dtype=np.uint8)
+    masks = []
+    for component in components:
+        pixels = np.zeros(unknown.shape, dtype=np.uint8)
+        for x, y in component:
+            pixels[y, x] = 1
+        scope = cv2.dilate(pixels, kernel).astype(bool)
+        basin_ids = set(_adjacent_unknown_basins(tuple(component), labels))
+        enclosed = np.isin(labels, tuple(basin_ids - border_ids))
+        scope |= enclosed | eight_neighbor_adjacency(enclosed)
+        scope.setflags(write=False)
+        masks.append(scope)
+    return tuple(masks)
+
+
 def _adjacent_unknown_basins(
     frontier_component: tuple[Position, ...],
     basin_labels: np.ndarray,

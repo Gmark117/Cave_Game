@@ -27,6 +27,7 @@ class ControlHitMap:
     mission_controls: tuple[tuple[str, RectValue], ...] = ()
     tabs: tuple[tuple[str, RectValue], ...] = ()
     drone_toggles: tuple[tuple[int, str, RectValue], ...] = ()
+    rover_toggles: tuple[tuple[int, str, RectValue], ...] = ()
 
     def __init__(
         self,
@@ -35,6 +36,9 @@ class ControlHitMap:
         mission_controls: Iterable[tuple[str, Sequence[int]]] = (),
         tabs: Iterable[tuple[str, Sequence[int]]] = (),
         drone_toggles: Iterable[
+            tuple[int, str, Sequence[int]]
+        ] = (),
+        rover_toggles: Iterable[
             tuple[int, str, Sequence[int]]
         ] = (),
     ) -> None:
@@ -71,6 +75,14 @@ class ControlHitMap:
             tuple(
                 (int(drone_id), str(action), _rect_value(rect))
                 for drone_id, action, rect in drone_toggles
+            ),
+        )
+        object.__setattr__(
+            self,
+            "rover_toggles",
+            tuple(
+                (int(rover_id), str(action), _rect_value(rect))
+                for rover_id, action, rect in rover_toggles
             ),
         )
 
@@ -160,4 +172,10 @@ class ControlCenterController:
                 return ("drone_vision", drone_id)
             if overlay_type == "selected":
                 return ("drone_heatmap", drone_id)
+        for rover_id, overlay_type, rect in hit_map.rover_toggles:
+            if (
+                pygame.Rect(rect).collidepoint(mouse_pos)
+                and overlay_type == "selected"
+            ):
+                return ("rover_heatmap", rover_id)
         return None

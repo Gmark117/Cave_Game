@@ -5,7 +5,7 @@ import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -28,7 +28,7 @@ from mapping.exploration_sectors import (
     SectorCheckInResult,
     SectorFrontierComponent,
 )
-from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
+from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.terrain_knowledge import TerrainKnowledge
 from mission.pause_control import PauseCoordinator
 from navigation.astar_pathfinder import (
@@ -121,6 +121,191 @@ def global_region(
 
 
 class DroneMovementTests(unittest.TestCase):
+    def _scoped_assignment(self, mask):
+        return SectorAssignment(
+            sector_id=3, generation=1, owner_drone_id=0, cell_size=32,
+            cells=frozenset({(0, 0), (1, 0), (0, 1), (1, 1)}),
+            seed=(40, 16), gateway=(16, 16), frontier_cells=1,
+            rover_slam_version=1, exploration_mask=mask,
+            frontier_components=(SectorFrontierComponent(7, frozenset({(41, 17)})),),
+        )
+
+    def test_standby_skips_polling_frontier_refresh_and_movement_until_notification(self) -> None:
+        controller = self.drone.movement_controller
+        ready = threading.Event()
+        clock = [10.0]
+        trace = RecordingTrace()
+        arrival = Mock()
+        active = self._scoped_assignment(np.ones((64, 64), dtype=bool))
+        standby = replace(active, standby=True, cells=frozenset(),
+                          frontier_cells=0, frontier_components=(), exploration_mask=None)
+
+        def claim(_drone_id):
+            ready.clear()
+            return SectorCheckInResult(arrived=True, assignment=active)
+
+        delivery = Mock(side_effect=claim)
+        controller.dependencies = replace(
+            controller.dependencies, sector_check_in=arrival,
+            sector_assignment=delivery, get_check_in_position=lambda: (16, 16),
+            simulation_time=lambda: clock[0], runtime_trace=trace,
+        )
+        controller._apply_sector_check_in_result(SectorCheckInResult(
+            arrived=True, waiting_for_team=True, waiting_generation=0,
+            assignment_ready=ready,
+        ))
+        clock[0] = 12.0
+        controller._apply_sector_check_in_result(SectorCheckInResult(
+            arrived=True, assignment=standby, assignment_ready=ready,
+        ))
+        controller.mark_shared_slam_changed()
+        original = self.drone.snapshot().position
+        with patch.object(controller, "rebuild_frontiers") as rebuild:
+            with patch.object(controller, "find_new_node") as select:
+                for _ in range(4):
+                    controller.move()
+                rebuild.assert_not_called()
+                select.assert_not_called()
+        arrival.assert_not_called()
+        delivery.assert_not_called()
+        self.assertEqual(self.drone.snapshot().position, original)
+        self.assertFalse(self.drone.snapshot().done)
+        clock[0] = 20.0
+        ready.set()
+        controller.move()
+        delivery.assert_called_once_with(0)
+        arrival.assert_not_called()
+        self.assertFalse(controller._sector_check_in_required)
+        waits = [fields for name, fields in trace.events if name == "drone_sector_wait_completed"]
+        self.assertEqual([(item["wait_reason"], item["waited_seconds"]) for item in waits],
+                         [("barrier", 2.0), ("standby", 8.0)])
+
+    def test_scope_keeps_off_stride_gateway_and_excludes_unrelated_sector_frontier(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[12:30, 35:55] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        occupancy = np.full((64, 64), OCCUPIED, dtype=np.int8)
+        confidence = np.ones((64, 64), dtype=np.float32)
+        occupancy[17, 41] = FREE
+        occupancy[18:28, 42:52] = UNKNOWN
+        confidence[18:28, 42:52] = 0.0
+        occupancy[8:24, 4:20] = UNKNOWN
+        confidence[8:24, 4:20] = 0.0
+        occupancy[8:24, 3] = FREE
+        self.drone.slam_map.merge_from(SlamSnapshot(occupancy, confidence))
+        controller.rebuild_frontiers(stride=4)
+        self.assertEqual(self.drone.snapshot().frontiers, ((41, 17),))
+        regions = controller._coarse_global_frontier_regions(self.drone.slam_map.snapshot())
+        self.assertTrue(all(tile.target[0] >= 35 for region in regions for tile in region.tiles))
+        with patch.object(controller, "_frontier_clusters", wraps=controller._frontier_clusters) as clusters:
+            controller._exploration_heading_bias((90, 270), {90: (26, 16), 270: (6, 16)}, vision_fov=60)
+        local_mask = clusters.call_args.args[0]
+        origin = clusters.call_args.args[2]
+        self.assertTrue(all(mask[y + origin[1], x + origin[0]] for y, x in np.argwhere(local_mask)))
+        self.assertFalse(controller._start_frontier_scan(((3, 12),), reason="unassigned"))
+
+    def test_scoped_ingress_allows_transit_outside_neighborhood(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[10:24, 35:50] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        self.drone.runtime_state.replace_frontiers(((40, 16),))
+        self.control.paths[((16, 16), (40, 16))] = [(x, 16) for x in range(16, 41)]
+        controller._advance_scoped_frontier_route()
+        self.assertEqual(self.drone.snapshot().position, (40, 16))
+        self.assertTrue(any(x < 35 for x, _ in self.drone.snapshot().path_history))
+
+    def test_scoped_random_step_cannot_cross_gap_or_leave_neighborhood(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.ones((64, 64), dtype=bool)
+        mask[:, 20] = False
+        controller._sector_assignment = self._scoped_assignment(mask)
+        self.assertFalse(controller._permitted_random_step((16, 16), (25, 16)))
+        self.assertTrue(controller._permitted_random_step((16, 16), (16, 25)))
+        self.assertFalse(controller.explore([90], [(25, 16)], (25, 16)))
+        self.assertEqual(self.drone.snapshot().position, (16, 16))
+
+    def test_scoped_global_target_is_inside_nonconvex_mask(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[4, 4] = mask[20, 20] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        occupancy = np.full((64, 64), FREE, dtype=np.int8)
+        confidence = np.ones((64, 64), dtype=np.float32)
+        occupancy[mask] = UNKNOWN
+        confidence[mask] = 0.0
+        regions = controller._coarse_global_frontier_regions(
+            SlamSnapshot(occupancy, confidence),
+        )
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].tiles[0].target, (4, 4))
+        self.assertFalse(mask[12, 12])  # The old centroid is outside the scope.
+
+    def test_stale_pending_route_cannot_target_frontier_outside_scope(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[12:30, 35:55] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        controller._pending_frontier_route = SimpleNamespace(
+            target=(4, 4), recovery_reason="stagnation",
+        )
+        self.drone.runtime_state.replace_frontiers(((4, 4), (41, 17)))
+        with patch.object(controller, "maybe_rebuild_frontiers"):
+            with patch.object(controller, "reach_border") as reach:
+                with patch.object(controller, "_advance_scoped_frontier_route") as ingress:
+                    controller.move()
+        reach.assert_not_called()
+        ingress.assert_called_once()
+        self.assertIsNone(controller._pending_frontier_route)
+
+    def test_resolved_scoped_work_returns_before_ingress_without_random_step(self) -> None:
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(controller.dependencies, sector_check_in=Mock())
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[40:50, 40:50] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        controller.rebuild_frontiers()
+        with patch.object(controller, "_start_sector_check_in") as return_to_rover:
+            with patch.object(controller, "find_new_node") as select:
+                controller.move()
+                controller.move()
+                select.assert_not_called()
+            return_to_rover.assert_called_once_with(reason="local_frontiers_exhausted")
+
+    def test_unreachable_scoped_work_does_not_reset_failures_inside_sector(self) -> None:
+        controller = self.drone.movement_controller
+        controller.dependencies = replace(controller.dependencies, sector_check_in=Mock())
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[40:50, 40:50] = True
+        controller._sector_assignment = self._scoped_assignment(mask)
+        self.drone.runtime_state.replace_frontiers(((41, 41),))
+        with patch.object(controller, "reach_border", return_value=False):
+            with patch.object(controller, "_start_sector_check_in") as return_to_rover:
+                controller.move()
+                controller.move()
+                return_to_rover.assert_called_once_with(reason="assigned_neighborhood_unreachable")
+
+    def test_component_suppression_does_not_retire_migrated_gateway_in_same_scope(self) -> None:
+        controller = self.drone.movement_controller
+        mask = np.ones((64, 64), dtype=bool)
+        controller._sector_assignment = self._scoped_assignment(mask)
+        occupancy = np.full((64, 64), OCCUPIED, dtype=np.int8)
+        confidence = np.ones((64, 64), dtype=np.float32)
+        occupancy[18:28, 22:42] = UNKNOWN
+        confidence[18:28, 22:42] = 0.0
+        occupancy[17, 41] = FREE
+        occupancy[27, 21] = FREE
+        self.drone.slam_map.merge_from(SlamSnapshot(occupancy, confidence))
+        controller.rebuild_frontiers(stride=4)
+        controller._suppress_frontier_target((41, 17), reason="zero_gain_directed_scan", whole_component=True)
+        controller.rebuild_frontiers(stride=4)
+        self.assertIn((21, 27), self.drone.snapshot().frontiers)
+        self.assertNotIn((41, 17), self.drone.snapshot().frontiers)
+        report = controller.sector_outcome_report(3)
+        self.assertEqual([item.component_id for item in report.suppressions], [7])
+        self.assertIsNone(controller._assigned_frontier_component_id(((21, 27),)))
+
     def setUp(self) -> None:
         settings = SimulationConfig(
             mission_config=MissionConfig(map_dim="LARGE", seed=19),

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import heapq
 import math
 import threading
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
 from mapping.frontiers import (
     FrontierFilterDiagnostics,
     eight_connected_components,
+    frontier_neighborhood_masks,
     significant_frontier_mask,
 )
 from mapping.slam_map import OCCUPIED, UNKNOWN, SlamSnapshot
@@ -22,6 +23,11 @@ Position = tuple[int, int]
 SectorCell = tuple[int, int]
 
 
+def _coarse_area_equivalents(pixel_count: int, cell_size: int) -> float:
+    """Convert full-resolution pixels to coarse sector-cell work units."""
+    return float(pixel_count) / float(cell_size * cell_size)
+
+
 @dataclass(frozen=True)
 class SectorFrontierComponent:
     """Stable rover identity and geometry for assigned frontier work."""
@@ -29,6 +35,22 @@ class SectorFrontierComponent:
     component_id: int
     cells: frozenset[Position]
     estimated_effort: float = 0.0
+
+
+@dataclass(frozen=True)
+class SectorEffortEstimate:
+    """Relative work units, with scan area deduplicated within the scope."""
+
+    frontier_scan: float = 0.0
+    approach: float = 0.0
+    setup: float = 0.0
+    dispersion: float = 0.0
+    unknown_area: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return sum((self.frontier_scan, self.approach, self.setup,
+                    self.dispersion, self.unknown_area))
 
 
 @dataclass(frozen=True)
@@ -47,11 +69,28 @@ class SectorAssignment:
     bootstrap: bool = False
     frontier_components: tuple[SectorFrontierComponent, ...] = ()
     estimated_effort: float = 0.0
+    standby: bool = False
+    exploration_mask: np.ndarray | None = field(
+        default=None, compare=False, repr=False,
+    )
+    effort_breakdown: SectorEffortEstimate = SectorEffortEstimate()
 
     def contains(self, position: Position) -> bool:
         """Return whether a pixel coordinate belongs to this sector."""
         x, y = int(position[0]), int(position[1])
         return (x // self.cell_size, y // self.cell_size) in self.cells
+
+    def permits_exploration(self, position: Position) -> bool:
+        """Separate exploration targets from unrestricted transit geometry."""
+        if self.standby or not self.contains(position):
+            return False
+        if self.exploration_mask is None:
+            return True
+        x, y = int(position[0]), int(position[1])
+        height, width = self.exploration_mask.shape
+        return 0 <= x < width and 0 <= y < height and bool(
+            self.exploration_mask[y, x]
+        )
 
 
 @dataclass(frozen=True)
@@ -142,6 +181,7 @@ class SectorCheckInResult:
     frontier_diagnostics: FrontierFilterDiagnostics | None = None
     workload_diagnostics: SectorWorkloadDiagnostics | None = None
     outcome_diagnostics: SectorFrontierOutcomeDiagnostics | None = None
+    published_assignments: tuple[SectorAssignment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -152,6 +192,118 @@ class ExplorationSectorSnapshot:
     assignments: tuple[SectorAssignment, ...]
     waiting_drone_ids: frozenset[int]
     mission_exhausted: bool
+
+
+class _ScopedFrontierWork:
+    """Reuse snapshot geometry while evaluating prospective sector boundaries."""
+
+    def __init__(
+        self,
+        components: tuple[_TrackedFrontierComponent, ...],
+        neighborhoods: tuple[np.ndarray, ...],
+        unknown: np.ndarray,
+        cell_size: int,
+        traversal_cost: np.ndarray,
+        approach_distances: np.ndarray,
+        aggregate: Callable[[np.ndarray], np.ndarray],
+    ) -> None:
+        self.components = components
+        self.neighborhoods = neighborhoods
+        self.unknown = unknown
+        self.cell_size = cell_size
+        self.traversal_cost = traversal_cost
+        self.approach_distances = approach_distances
+        self.aggregate = aggregate
+        self.counts: list[dict[SectorCell, int]] = []
+        self._unknown_counts: dict[tuple[int, ...], np.ndarray] = {}
+        for component in components:
+            counts: dict[SectorCell, int] = {}
+            for x, y in component.cells:
+                cell = (x // cell_size, y // cell_size)
+                counts[cell] = counts.get(cell, 0) + 1
+            self.counts.append(counts)
+
+    def component_indices(self, cells: set[SectorCell]) -> tuple[int, ...]:
+        return tuple(i for i, counts in enumerate(self.counts)
+                     if cells.intersection(counts))
+
+    def _union(self, indices: tuple[int, ...]) -> np.ndarray:
+        mask = np.zeros(self.unknown.shape, dtype=bool)
+        for index in indices:
+            mask |= self.neighborhoods[index]
+        return mask
+
+    def scope(self, cells: set[SectorCell]) -> np.ndarray:
+        union = self._union(self.component_indices(cells))
+        mask = np.zeros_like(union)
+        size = self.cell_size
+        for x, y in cells:
+            window = (slice(y * size, (y + 1) * size),
+                      slice(x * size, (x + 1) * size))
+            mask[window] = union[window]
+        mask.setflags(write=False)
+        return mask
+
+    def _unknown_counts_for(self, indices: tuple[int, ...]) -> np.ndarray:
+        if indices not in self._unknown_counts:
+            self._unknown_counts[indices] = self.aggregate(
+                self._union(indices) & self.unknown,
+            )
+        return self._unknown_counts[indices]
+
+    def preserves_transfer(
+        self, donor: set[SectorCell], recipient: set[SectorCell], cell: SectorCell,
+    ) -> bool:
+        """Keep covered unknown work when ownership or component membership changes."""
+        before = self.component_indices(donor)
+        remaining = donor - {cell}
+        after = self.component_indices(remaining)
+        if before != after:
+            lost = self._unknown_counts_for(before) - self._unknown_counts_for(after)
+            if any(lost[y, x] > 0 for x, y in remaining):
+                return False
+        recipient_indices = self.component_indices(recipient | {cell})
+        x, y = cell
+        size = self.cell_size
+        window = (slice(y * size, (y + 1) * size),
+                  slice(x * size, (x + 1) * size))
+        unknown = self.unknown[window]
+        old_scope = np.zeros(unknown.shape, dtype=bool)
+        new_scope = np.zeros_like(old_scope)
+        for index in before:
+            old_scope |= self.neighborhoods[index][window]
+        for index in recipient_indices:
+            new_scope |= self.neighborhoods[index][window]
+        return not bool(np.any(unknown & old_scope & ~new_scope))
+
+    def estimate(self, cells: set[SectorCell]) -> SectorEffortEstimate:
+        indices = self.component_indices(cells)
+        if not indices:
+            return SectorEffortEstimate()
+        unknown_counts = self._unknown_counts_for(indices)
+        unknown_area = sum(int(unknown_counts[y, x]) for x, y in cells)
+        scan = approach = dispersion = 0.0
+        for index in indices:
+            counts = self.counts[index]
+            owned = cells.intersection(counts)
+            approach += 2.0 * min(
+                float(self.approach_distances[y, x]) for x, y in owned
+            )
+            dispersion += max(0, len(owned) - 1)
+            scan += sum(
+                counts[(x, y)] * (1.0 + 0.5 * max(
+                    0.0, float(self.traversal_cost[y, x]) - 1.0,
+                )) for x, y in owned
+            )
+        return SectorEffortEstimate(
+            frontier_scan=scan,
+            approach=approach,
+            setup=float(len(indices)),
+            dispersion=dispersion,
+            unknown_area=_coarse_area_equivalents(
+                unknown_area, self.cell_size,
+            ),
+        )
 
 
 class ExplorationSectorCoordinator:
@@ -204,6 +356,7 @@ class ExplorationSectorCoordinator:
         self._lock = threading.RLock()
         self._generation = -1
         self._assignments: dict[int, SectorAssignment] = {}
+        self._pending_assignments: dict[int, SectorAssignment] = {}
         self._epoch_assignments: tuple[SectorAssignment, ...] = ()
         self._waiting: set[int] = set()
         self._mission_exhausted = False
@@ -294,6 +447,7 @@ class ExplorationSectorCoordinator:
             frontier_diagnostics = None
             workload_diagnostics = None
             outcome_diagnostics = None
+            published_assignments = ()
             if len(self._waiting) == self.drone_count and not self._assignments:
                 self._generation += 1
                 if self._generation == 0:
@@ -310,6 +464,7 @@ class ExplorationSectorCoordinator:
                     outcome_diagnostics = self._last_outcome_diagnostics
                 if not assignments:
                     self._mission_exhausted = True
+                    self._pending_assignments.clear()
                     self._waiting.clear()
                     for ready in self._assignment_ready.values():
                         ready.set()
@@ -324,9 +479,15 @@ class ExplorationSectorCoordinator:
                         outcome_diagnostics=outcome_diagnostics,
                     )
                 self._epoch_assignments = assignments
+                published_assignments = assignments
+                self._pending_assignments = {
+                    assignment.owner_drone_id: assignment
+                    for assignment in assignments
+                }
                 self._assignments = {
                     assignment.owner_drone_id: assignment
                     for assignment in assignments
+                    if not assignment.standby
                 }
                 for ready in self._assignment_ready.values():
                     ready.set()
@@ -340,6 +501,7 @@ class ExplorationSectorCoordinator:
                 frontier_diagnostics=frontier_diagnostics,
                 workload_diagnostics=workload_diagnostics,
                 outcome_diagnostics=outcome_diagnostics,
+                published_assignments=published_assignments,
             )
 
     def claim_assignment(self, drone_id: int) -> SectorCheckInResult:
@@ -357,8 +519,9 @@ class ExplorationSectorCoordinator:
                     mission_exhausted=True,
                     generation=self._generation,
                 )
-            assignment = self._assignments.get(normalized_id)
+            assignment = self._pending_assignments.get(normalized_id)
             if normalized_id not in self._waiting or assignment is None:
+                ready.clear()
                 return SectorCheckInResult(
                     arrived=True,
                     waiting_for_team=True,
@@ -366,11 +529,15 @@ class ExplorationSectorCoordinator:
                     assignment_ready=ready,
                 )
             ready.clear()
-            self._waiting.discard(normalized_id)
+            self._pending_assignments.pop(normalized_id)
+            if not assignment.standby:
+                self._waiting.discard(normalized_id)
             return SectorCheckInResult(
                 arrived=True,
                 assignment=assignment,
                 generation=assignment.generation,
+                waiting_generation=assignment.generation,
+                assignment_ready=ready if assignment.standby else None,
             )
 
     def stop(self) -> None:
@@ -378,6 +545,7 @@ class ExplorationSectorCoordinator:
         with self._lock:
             self._mission_exhausted = True
             self._assignments.clear()
+            self._pending_assignments.clear()
             self._waiting.clear()
             for ready in self._assignment_ready.values():
                 ready.set()
@@ -550,17 +718,35 @@ class ExplorationSectorCoordinator:
             for cell_y, cell_x in np.argwhere(frontier_counts > 0)
         )
         if not candidates:
+            self._last_workload_diagnostics = None
             return ()
 
         traversal_cost, blocked = self._coarse_traversal_cost(
             occupancy,
             confidence,
         )
+        unknown = (occupancy == UNKNOWN) | (
+            confidence < self.confidence_threshold
+        )
+        neighborhoods = frontier_neighborhood_masks(
+            unknown, tuple(component.cells for component in tracked_components),
+            halo=self.cell_size,
+        )
+        approach_distances = self._coarse_approach_distances(traversal_cost)
+        scoped_work = _ScopedFrontierWork(
+            tracked_components, neighborhoods, unknown, self.cell_size,
+            traversal_cost, approach_distances, self._aggregate_mask,
+        )
         estimated_effort, component_efforts = (
             self._estimated_frontier_effort(
                 tracked_components,
                 frontier_counts,
                 traversal_cost,
+                approach_distances=approach_distances,
+                unknown_support=tuple(
+                    int(np.count_nonzero(mask & unknown))
+                    for mask in neighborhoods
+                ),
             )
         )
         assigned_components = tuple(
@@ -577,7 +763,11 @@ class ExplorationSectorCoordinator:
             owners,
             frontier_counts,
             seeds,
-            estimated_effort=estimated_effort,
+            estimated_effort=(estimated_effort + self._aggregate_mask(
+                np.logical_or.reduce(neighborhoods) & unknown,
+            ) / self.cell_size),
+            estimate_assignment=scoped_work.estimate,
+            preserves_transfer=scoped_work.preserves_transfer,
         )
         self._last_workload_diagnostics = workload_diagnostics
         cells_by_owner: list[set[SectorCell]] = [
@@ -599,10 +789,7 @@ class ExplorationSectorCoordinator:
                 int(frontier_counts[cell_y, cell_x])
                 for cell_x, cell_y in cells
             )
-            effort = sum(
-                float(estimated_effort[cell_y, cell_x])
-                for cell_x, cell_y in cells
-            )
+            effort = scoped_work.estimate(cells)
             components_for_owner = tuple(
                 component
                 for component in assigned_components
@@ -622,7 +809,17 @@ class ExplorationSectorCoordinator:
                 rover_slam_version=rover_slam.version,
                 bootstrap=False,
                 frontier_components=components_for_owner,
-                estimated_effort=effort,
+                estimated_effort=effort.total,
+                exploration_mask=scoped_work.scope(cells),
+                effort_breakdown=effort,
+            ))
+        for drone_id in range(len(seeds), self.drone_count):
+            assignments.append(self._assignment(
+                drone_id, set(),
+                (self.start_position[0] // self.cell_size,
+                 self.start_position[1] // self.cell_size),
+                frontier_cells=0, rover_slam_version=rover_slam.version,
+                bootstrap=False, standby=True,
             ))
         return tuple(assignments)
 
@@ -878,11 +1075,18 @@ class ExplorationSectorCoordinator:
         components: tuple[_TrackedFrontierComponent, ...],
         frontier_counts: np.ndarray,
         traversal_cost: np.ndarray,
+        *,
+        approach_distances: np.ndarray | None = None,
+        unknown_support: tuple[int, ...] = (),
     ) -> tuple[np.ndarray, dict[int, float]]:
         """Estimate scan, approach, dispersion, and terrain effort per cell."""
         effort = np.zeros_like(frontier_counts, dtype=np.float64)
         component_efforts: dict[int, float] = {}
-        for component in components:
+        distances = (
+            self._coarse_approach_distances(traversal_cost)
+            if approach_distances is None else approach_distances
+        )
+        for index, component in enumerate(components):
             counts_by_cell: dict[SectorCell, int] = {}
             for x, y in component.cells:
                 cell = (x // self.cell_size, y // self.cell_size)
@@ -893,9 +1097,13 @@ class ExplorationSectorCoordinator:
 
             component_size = len(component.cells)
             approach_cells = min(
-                math.sqrt(self._cell_distance_squared(cell, self.start_position))
-                / self.cell_size
-                for cell in counts_by_cell
+                float(distances[y, x]) for x, y in counts_by_cell
+            )
+            area_cost = (
+                _coarse_area_equivalents(
+                    unknown_support[index], self.cell_size,
+                )
+                if unknown_support else 0.0
             )
             dispersion_cost = max(0, len(counts_by_cell) - 1)
             total = 0.0
@@ -907,12 +1115,38 @@ class ExplorationSectorCoordinator:
                 )
                 cell_effort = (
                     pixel_count * terrain_multiplier
-                    + share * (approach_cells + dispersion_cost + 1.0)
+                    + share * (2.0 * approach_cells + dispersion_cost
+                               + 1.0 + area_cost)
                 )
                 effort[cell_y, cell_x] += cell_effort
                 total += cell_effort
             component_efforts[component.component_id] = total
         return effort, component_efforts
+
+    def _coarse_approach_distances(self, costs: np.ndarray) -> np.ndarray:
+        """Estimate round-trip-compatible travel on the coarse SLAM grid.
+
+        Wall-heavy tiles remain expensive estimates, not hard reachability
+        verdicts: a narrow traversable corridor can cross such a tile.
+        """
+        rows, columns = costs.shape
+        x = min(columns - 1, max(0, self.start_position[0] // self.cell_size))
+        y = min(rows - 1, max(0, self.start_position[1] // self.cell_size))
+        distances = np.full(costs.shape, np.inf)
+        distances[y, x] = 0.0
+        heap = [(0.0, y, x)]
+        while heap:
+            distance, y, x = heapq.heappop(heap)
+            if distance > distances[y, x]:
+                continue
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if not (0 <= nx < columns and 0 <= ny < rows):
+                    continue
+                candidate = distance + 0.5 * (costs[y, x] + costs[ny, nx])
+                if candidate < distances[ny, nx]:
+                    distances[ny, nx] = candidate
+                    heapq.heappush(heap, (float(candidate), ny, nx))
+        return distances
 
     def _coarse_traversal_cost(
         self,
@@ -957,26 +1191,9 @@ class ExplorationSectorCoordinator:
             ),
         )
         seeds = [first]
-        passable = [
-            (cell_x, cell_y)
-            for cell_y in range(blocked.shape[0])
-            for cell_x in range(blocked.shape[1])
-            if not blocked[cell_y, cell_x]
-        ]
-        all_cells = [
-            (cell_x, cell_y)
-            for cell_y in range(blocked.shape[0])
-            for cell_x in range(blocked.shape[1])
-        ]
         pool = available
-        while len(seeds) < self.drone_count:
+        while len(seeds) < min(self.drone_count, len(available)):
             unused = [cell for cell in pool if cell not in seeds]
-            if not unused:
-                unused = [cell for cell in passable if cell not in seeds]
-            if not unused:
-                unused = [cell for cell in all_cells if cell not in seeds]
-            if not unused:
-                unused = [seeds[-1]]
             selected = max(
                 unused,
                 key=lambda cell: (
@@ -1064,6 +1281,12 @@ class ExplorationSectorCoordinator:
         seeds: tuple[SectorCell, ...],
         *,
         estimated_effort: np.ndarray | None = None,
+        estimate_assignment: Callable[
+            [set[SectorCell]], SectorEffortEstimate
+        ] | None = None,
+        preserves_transfer: Callable[
+            [set[SectorCell], set[SectorCell], SectorCell], bool
+        ] | None = None,
     ) -> tuple[np.ndarray, SectorWorkloadDiagnostics]:
         """Move effort-bearing boundaries while sectors stay contiguous."""
         balanced = np.asarray(owners, dtype=np.int16).copy()
@@ -1091,7 +1314,7 @@ class ExplorationSectorCoordinator:
             for cells in cells_by_owner
         ]
         effort_workloads = [
-            sum(
+            estimate_assignment(cells).total if estimate_assignment else sum(
                 float(effort[cell_y, cell_x])
                 for cell_x, cell_y in cells
             )
@@ -1099,7 +1322,8 @@ class ExplorationSectorCoordinator:
         ]
         initial_frontier = tuple(frontier_workloads)
         initial_effort = tuple(effort_workloads)
-        target_workload = sum(effort_workloads) / self.drone_count
+        active_count = len(seeds)
+        target_workload = sum(effort_workloads) / active_count
         seed_set = set(seeds)
         moved = 0
 
@@ -1142,6 +1366,33 @@ class ExplorationSectorCoordinator:
                     ):
                         continue
                     for recipient in recipients:
+                        if preserves_transfer is not None and not preserves_transfer(
+                            cells_by_owner[donor], cells_by_owner[recipient], cell,
+                        ):
+                            continue
+                        if estimate_assignment is not None:
+                            donor_effort = estimate_assignment(
+                                cells_by_owner[donor] - {cell},
+                            ).total
+                            recipient_effort = estimate_assignment(
+                                cells_by_owner[recipient] | {cell},
+                            ).total
+                            proposed = effort_workloads.copy()
+                            proposed[donor] = donor_effort
+                            proposed[recipient] = recipient_effort
+                            # A strict global potential prevents cycling even
+                            # when a transfer changes scan area or setup cost.
+                            improvement = sum(v * v for v in effort_workloads) - sum(
+                                v * v for v in proposed
+                            )
+                            if improvement > 1e-9:
+                                candidate = (
+                                    improvement, effort_weight, frontier_weight,
+                                    -cell_y, -cell_x, -recipient, donor,
+                                )
+                                if best is None or candidate > best:
+                                    best = candidate
+                            continue
                         before = (
                             (effort_workloads[donor] - target_workload) ** 2
                             + (
@@ -1197,6 +1448,13 @@ class ExplorationSectorCoordinator:
             frontier_workloads[recipient] += frontier_weight
             effort_workloads[donor] -= effort_weight
             effort_workloads[recipient] += effort_weight
+            if estimate_assignment is not None:
+                effort_workloads[donor] = estimate_assignment(
+                    cells_by_owner[donor],
+                ).total
+                effort_workloads[recipient] = estimate_assignment(
+                    cells_by_owner[recipient],
+                ).total
             moved += 1
 
         return balanced, SectorWorkloadDiagnostics(
@@ -1242,6 +1500,9 @@ class ExplorationSectorCoordinator:
         bootstrap: bool,
         frontier_components: tuple[SectorFrontierComponent, ...] = (),
         estimated_effort: float = 0.0,
+        standby: bool = False,
+        exploration_mask: np.ndarray | None = None,
+        effort_breakdown: SectorEffortEstimate = SectorEffortEstimate(),
     ) -> SectorAssignment:
         return SectorAssignment(
             sector_id=self._generation * self.drone_count + drone_id,
@@ -1256,6 +1517,9 @@ class ExplorationSectorCoordinator:
             bootstrap=bootstrap,
             frontier_components=frontier_components,
             estimated_effort=float(estimated_effort),
+            standby=standby,
+            exploration_mask=exploration_mask,
+            effort_breakdown=effort_breakdown,
         )
 
     def _cell_center(self, cell: SectorCell) -> Position:

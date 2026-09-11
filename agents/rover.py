@@ -5,6 +5,7 @@ delegated to `RoverRenderer`.
 """
 
 import random as rand
+from dataclasses import dataclass
 from typing import Tuple, List, Optional, TYPE_CHECKING
 
 from agents.graph import Graph
@@ -15,6 +16,18 @@ from rendering.agent_renderer import RoverRenderer
 
 if TYPE_CHECKING:
     import pygame
+
+
+@dataclass(frozen=True)
+class RoverSnapshot:
+    """Detached navigation state for rendering and the control center."""
+
+    position: Tuple[int, int]
+    target: Optional[Tuple[int, int]]
+    status: str
+    battery: int
+    path_remaining: int
+    show_path: bool
 
 
 class Rover:
@@ -35,6 +48,23 @@ class Rover:
         self.navigation = RoverNavigationDependencies(
             rover_targets=control.rover_targets,
             compute_rover_path=control.compute_rover_path,
+            simulation_time=getattr(control, "simulation_time", lambda: 0.0),
+            runtime_trace=getattr(control, "runtime_trace", None),
+            announce_rendezvous=getattr(
+                control,
+                "announce_rendezvous",
+                lambda _position: None,
+            ),
+            rendezvous_departure_ready=getattr(
+                control,
+                "rendezvous_departure_ready",
+                lambda _position: True,
+            ),
+            rendezvous_arrived=getattr(
+                control,
+                "rendezvous_arrived",
+                lambda _position: True,
+            ),
         )
          
         self.id       = id # Unique identifier of the rover
@@ -56,6 +86,7 @@ class Rover:
         self.show_path    = True
         self.speed_factor = 4
         self.current_path: List[Tuple[int, int]] = []
+        self._announced_path: List[Tuple[int, int]] = []
         self.target: Optional[Tuple[int, int]] = None
          
         self.border    = []
@@ -63,8 +94,8 @@ class Rover:
         self.pos       = start_pos
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
-        # Rovers maintain their own knowledge store even though movement is
-        # currently disabled; this is the place future rover policy should read.
+        # Rovers maintain their own knowledge store; navigation and the rover
+        # map view consume only this received local knowledge.
         self.terrain_knowledge = TerrainKnowledge(cave)
         map_h = len(cave)
         map_w = len(cave[0]) if map_h else 0
@@ -74,6 +105,21 @@ class Rover:
         # during a physical rendezvous.
         self.slam_map = SlamMap(map_h, map_w, max_points=max_points)
         self.renderer  = RoverRenderer(self)
+
+    def snapshot(self) -> RoverSnapshot:
+        """Return a detached copy of current rover navigation state."""
+        return RoverSnapshot(
+            position=(int(self.pos[0]), int(self.pos[1])),
+            target=(
+                None
+                if self.target is None
+                else (int(self.target[0]), int(self.target[1]))
+            ),
+            status=str(self.status),
+            battery=int(self.battery),
+            path_remaining=len(self.current_path),
+            show_path=bool(self.show_path),
+        )
 
     # Define the radius based on the map size
     def calculate_radius(self) -> int:
@@ -86,12 +132,7 @@ class Rover:
 
 
     def move(self) -> None:
-        """Run the disabled rover-motion policy.
-
-        This implementation predates the distributed-knowledge contract.
-        Replace its mission-global target and routing inputs with rover-local
-        received knowledge before enabling rover worker threads.
-        """
+        """Move only after the next endpoint is universally acknowledged."""
         if self.current_path:
             self.status = 'Advancing'
             self.pos = self.current_path.pop(0)
@@ -99,12 +140,56 @@ class Rover:
             self.battery = max(0, self.battery - 1)
 
             if not self.current_path:
-                self.status = 'Done'
+                self.status = 'Staging'
+                self.navigation.rendezvous_arrived(tuple(self.pos))
+                self._trace(
+                    "rover_frontier_staging_reached",
+                    target=self.target,
+                    position=self.pos,
+                )
+            return
+
+        if self.navigation.rover_targets.should_hold(self.id):
+            self.status = 'Rendezvous'
+            return
+
+        if (
+            self.target is not None
+            and self.pos == self.target
+            and not self.navigation.rover_targets.target_is_current(self.id)
+        ):
+            previous = self.target
+            self.current_path.clear()
+            self._announced_path.clear()
+            self.navigation.rover_targets.release(self.id, completed=False)
+            self.target = None
+            self._trace("rover_frontier_target_invalidated", target=previous)
+
+        if self.target is not None:
+            if self.pos == self.target:
+                self.status = 'Staging'
+                return
+            if not self.navigation.rendezvous_departure_ready(self.target):
+                self.status = 'Announcing'
+                return
+            path = self._announced_path
+            if not path:
                 self.navigation.rover_targets.release(
                     self.id,
-                    completed=True,
+                    completed=False,
                 )
                 self.target = None
+                self.status = 'Ready'
+                return
+            self.current_path = list(path)
+            self._announced_path.clear()
+            self.status = 'Advancing'
+            self._trace(
+                "rover_frontier_target_departure_authorized",
+                target=self.target,
+                position=self.pos,
+                path_length=len(self.current_path) + 1,
+            )
             return
 
         self.status = 'Updating'
@@ -113,12 +198,31 @@ class Rover:
             self.status = 'Ready'
             return
 
-        path = self.navigation.compute_rover_path(self.pos, target)
-        if len(path) <= 1:
+        path = self.navigation.compute_rover_path(self.id, self.pos, target)
+        if len(path) <= 1 and self.pos != target:
             self.navigation.rover_targets.release(self.id, completed=False)
             self.status = 'Ready'
             return
-
         self.target = target
-        self.current_path = path[1:]
-        self.status = 'Advancing'
+        self._announced_path = list(path[1:])
+        self.navigation.announce_rendezvous(target)
+        if self.pos == target:
+            self.status = 'Staging'
+            return
+        self.status = 'Announcing'
+        self._trace(
+            "rover_frontier_target_acquired",
+            target=target,
+            position=self.pos,
+            path_length=len(path),
+        )
+
+    def _trace(self, event: str, **fields: object) -> None:
+        trace = self.navigation.runtime_trace
+        if trace is not None:
+            trace.record(
+                event,
+                sim_time=self.navigation.simulation_time(),
+                rover_id=int(self.id),
+                **fields,
+            )

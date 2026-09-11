@@ -2,11 +2,33 @@ import unittest
 
 import numpy as np
 
-from mapping.frontiers import significant_frontier_mask
+from mapping.frontiers import frontier_neighborhood_masks, significant_frontier_mask
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN
 
 
 class SignificantFrontierTests(unittest.TestCase):
+    def test_neighborhood_tracks_enclosed_basin_beyond_component_halo(self) -> None:
+        unknown = np.zeros((96, 96), dtype=bool)
+        unknown[40:50, 41:81] = True
+        (scope,) = frontier_neighborhood_masks(
+            unknown, (frozenset({(40, 40)}),), halo=4,
+        )
+        self.assertTrue(scope[40, 40])
+        self.assertTrue(scope[45, 81])  # A migrated gateway on the far boundary.
+        self.assertFalse(scope[45, 82])
+        self.assertFalse(scope[20, 20])
+        self.assertFalse(scope.flags.writeable)
+
+    def test_border_connected_basin_does_not_expand_component_halo(self) -> None:
+        unknown = np.zeros((96, 96), dtype=bool)
+        unknown[0:50, 41:81] = True
+        (scope,) = frontier_neighborhood_masks(
+            unknown, (frozenset({(40, 40)}),), halo=4,
+        )
+        self.assertTrue(scope[44, 44])
+        self.assertFalse(scope[45, 45])
+        self.assertFalse(scope[45, 81])
+
     def test_discards_tiny_component_with_tiny_unknown_support(self) -> None:
         occupancy = np.full((32, 32), FREE, dtype=np.int8)
         confidence = np.ones((32, 32), dtype=np.float32)
