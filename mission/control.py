@@ -6,7 +6,7 @@ threads before entering the main loop.
 """
 
 import random as rand
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from queue import Empty, Queue
 import math
 import threading
@@ -73,6 +73,36 @@ class _PendingExplorationCheckIn:
     result: CoordinationResult | None = None
 
 
+@dataclass
+class _DockedExplorationDrone:
+    """One verified mechanical attachment to the primary rover."""
+
+    drone_id: int
+    rover_id: int
+    source: str
+    report_id: int | None
+    started_at: float
+    contact_position: Tuple[int, int]
+    carried_distance: float = 0.0
+    carried_steps: int = 0
+    carried_path: list[Tuple[int, int]] = field(default_factory=list)
+    learned_endpoint_epochs: set[int] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _RoverStagingSelection:
+    """One rover-local service point with focused-endgame distribution cost."""
+
+    position: Tuple[int, int]
+    rover_route_cost: float
+    terrain_roughness: float
+    wall_clearance: float
+    remaining_max_distance: float = math.inf
+    remaining_total_distance: float = math.inf
+    current_max_distance: float = math.inf
+    current_total_distance: float = math.inf
+
+
 class MissionControl(MissionControlLifecycleMixin):
     """Orchestrates the simulation mission.
 
@@ -122,6 +152,17 @@ class MissionControl(MissionControlLifecycleMixin):
         self.rendezvous_protocol: RendezvousProtocol | None = None
         self._rover_staging_cache_key = None
         self._rover_staging_cache = None
+        self._rover_failed_route_cache: set[
+            tuple[
+                int,
+                Tuple[int, int],
+                Tuple[int, int],
+                int,
+                float,
+            ]
+        ] = set()
+        self._last_focused_endgame_trace_state = False
+        self._last_focused_staging_hold_revision: int | None = None
 
         # Runtime resources are initialized explicitly by run().
         # Pathfinding owns external resources (shared memory and a process pool)
@@ -146,12 +187,18 @@ class MissionControl(MissionControlLifecycleMixin):
         self._runtime_initialized = False
         self._running = False
         self._has_run = False
-        self._exploration_check_in_lock = threading.Lock()
+        # Report-stop reservations and rover steps share this lock so a rover
+        # cannot leave between verified contact and the queued check-in.
+        self._exploration_check_in_lock = threading.RLock()
         self._exploration_check_in_queue: Queue[
             _PendingExplorationCheckIn
         ] = Queue()
         self._exploration_check_ins: dict[
             int, _PendingExplorationCheckIn
+        ] = {}
+        self._exploration_report_stops: set[int] = set()
+        self._exploration_docked: dict[
+            int, _DockedExplorationDrone
         ] = {}
         self.restart_requested = False
         self.exit_requested = False
@@ -179,9 +226,14 @@ class MissionControl(MissionControlLifecycleMixin):
             component_cost_cell_size=self.settings.frontier.global_cell_size,
             component_check_in="queued_moving_rover_rendezvous",
             component_check_in_path="astar_with_breadcrumb_fallback",
+            component_waiting_state="physical_rover_dock",
+            component_docked_sensing=False,
             component_assignment_delivery="rover_signalled_no_polling",
             component_task_routing=(
                 "rover_known_free_connectivity_then_drone_astar"
+            ),
+            component_dfs_navigation=(
+                "logical_unwind_direct_astar_with_breadcrumb_fallback"
             ),
             component_probe_routing=(
                 "bootstrap_only_rover_known_free_then_drone_astar"
@@ -189,7 +241,11 @@ class MissionControl(MissionControlLifecycleMixin):
             component_follower_policy=(
                 "spare_drone_follows_leader_then_reserves_first_split_branch"
             ),
-            component_zero_gain_memory="individual_anchor_or_subarc",
+            component_zero_gain_memory="individual_anchor_or_subarc_plus_lineage_low_gain",
+            component_focused_endgame_policy=(
+                "max_parallel_then_round_trip_distribution"
+            ),
+            rover_failed_route_cache="slam_start_target_body",
             component_workload_estimate=(
                 "frontier_cells_plus_unknown_pixels_per_cell_size_squared"
             ),
@@ -323,6 +379,8 @@ class MissionControl(MissionControlLifecycleMixin):
                 norm_height=self.game.height,
                 get_frontier_candidates=self._rover_frontier_candidates,
                 should_hold_position=self._rover_should_hold_position,
+                simulation_time=self.simulation_time,
+                runtime_trace=self.runtime_trace,
             )
         )
         self.slam_view = SlamViewService(
@@ -365,6 +423,7 @@ class MissionControl(MissionControlLifecycleMixin):
                     else self.exploration_sectors.snapshot()
                 ),
                 is_exploration_complete=lambda: self.exploration_complete,
+                get_docked_drone_ids=self.exploration_docked_ids,
             )
         )
         
@@ -407,6 +466,10 @@ class MissionControl(MissionControlLifecycleMixin):
         self.game.display = self.game.to_maximised()
         self.control_center = ControlCenter(self.game)
         self.rendezvous_protocol = self._new_rendezvous_protocol()
+        self._exploration_docked.clear()
+        self._rover_failed_route_cache.clear()
+        self._last_focused_endgame_trace_state = False
+        self._last_focused_staging_hold_revision = None
 
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
@@ -528,9 +591,9 @@ class MissionControl(MissionControlLifecycleMixin):
         }
         claimed_task_ids = {claim.task_id for claim in snapshot.claims}
         staging = self._rover_staging_context()
-        candidates = []
-        for task in snapshot.tasks:
-            if not (
+        tasks = tuple(
+            task for task in snapshot.tasks
+            if (
                 task.component_id in live_components
                 and task.state.value in {
                     "ready",
@@ -538,15 +601,25 @@ class MissionControl(MissionControlLifecycleMixin):
                     "active",
                     "suspended",
                 }
-            ):
-                continue
+            )
+        )
+        outstanding_entries = tuple(
+            tuple(task.preferred_entry) for task in tasks
+        )
+        candidates = []
+        for task in tasks:
             selected = self._select_rover_staging(
                 task.preferred_entry,
                 staging,
+                outstanding_entries=(
+                    outstanding_entries
+                    if snapshot.focused_endgame
+                    else ()
+                ),
             )
             if selected is None:
                 continue
-            position, route_cost, roughness, clearance = selected
+            position = selected.position
             candidates.append(RoverFrontierTarget(
                 position=position,
                 component_id=task.component_id,
@@ -558,13 +631,44 @@ class MissionControl(MissionControlLifecycleMixin):
                     task.component_id
                 ].parent_ids,
                 service_cost=(
-                    route_cost
+                    selected.rover_route_cost
                     + math.dist(position, task.preferred_entry)
                 ),
-                rover_route_cost=route_cost,
-                terrain_roughness=roughness,
-                wall_clearance=clearance,
+                rover_route_cost=selected.rover_route_cost,
+                terrain_roughness=selected.terrain_roughness,
+                wall_clearance=selected.wall_clearance,
+                focused_endgame=snapshot.focused_endgame,
+                remaining_max_distance=(
+                    selected.remaining_max_distance
+                ),
+                remaining_total_distance=(
+                    selected.remaining_total_distance
+                ),
+                current_max_distance=selected.current_max_distance,
+                current_total_distance=selected.current_total_distance,
             ))
+        if (
+            snapshot.focused_endgame
+            and tasks
+            and not candidates
+            and self._last_focused_staging_hold_revision
+            != snapshot.revision
+        ):
+            self._last_focused_staging_hold_revision = snapshot.revision
+            rover_position = (
+                None
+                if not self.rovers or self.rovers[0] is None
+                else tuple(self.rovers[0].pos)
+            )
+            self.runtime_trace.record(
+                "rover_focused_endgame_staging_held",
+                sim_time=self.simulation_time(),
+                registry_revision=snapshot.revision,
+                rover_position=rover_position,
+                task_ids=tuple(task.task_id for task in tasks),
+                outstanding_entries=outstanding_entries,
+                reason="no_distribution_safe_candidate",
+            )
         return tuple(candidates)
 
     def _rover_staging_context(self):
@@ -601,7 +705,10 @@ class MissionControl(MissionControlLifecycleMixin):
             safe = known_free & (clearance >= body_radius)
             _count, labels = cv2.connectedComponents(
                 safe.astype(np.uint8),
-                connectivity=8,
+                # A* permits a diagonal only if an orthogonal side is free.
+                # Such a move is already connected by orthogonal steps, so
+                # four-connectivity exactly matches route existence here.
+                connectivity=4,
             )
             terrain = rover.terrain_knowledge.snapshot()
             terrain_confidence = terrain.confidence
@@ -641,7 +748,13 @@ class MissionControl(MissionControlLifecycleMixin):
             body_radius,
         )
 
-    def _select_rover_staging(self, entry, context):
+    def _select_rover_staging(
+        self,
+        entry,
+        context,
+        *,
+        outstanding_entries=(),
+    ) -> _RoverStagingSelection | None:
         """Choose a low-asperity, wall-clear service point near a task."""
         if context is None:
             return None
@@ -659,6 +772,19 @@ class MissionControl(MissionControlLifecycleMixin):
         ys, xs = np.nonzero(local_safe)
         if len(xs) == 0:
             return None
+        outstanding_entries = tuple(
+            (int(point[0]), int(point[1]))
+            for point in outstanding_entries
+        )
+        current_distances = tuple(
+            math.dist(rover_pos, point) for point in outstanding_entries
+        )
+        current_max_distance = max(current_distances, default=math.inf)
+        current_total_distance = sum(current_distances)
+        distribution_tolerance = max(
+            float(radius),
+            float(self.settings.frontier.global_cell_size),
+        )
         ranked = []
         for local_x, local_y in zip(xs, ys):
             x, y = int(local_x) + left, int(local_y) + top
@@ -670,7 +796,32 @@ class MissionControl(MissionControlLifecycleMixin):
                 continue
             known_roughness = float(roughness[y, x])
             rover_distance = math.dist(rover_pos, point)
+            remaining_distances = tuple(
+                math.dist(point, outstanding)
+                for outstanding in outstanding_entries
+            )
+            remaining_max_distance = max(
+                remaining_distances,
+                default=math.inf,
+            )
+            remaining_total_distance = sum(remaining_distances)
+            if outstanding_entries and (
+                remaining_max_distance
+                > current_max_distance + distribution_tolerance
+                or remaining_total_distance
+                > current_total_distance
+                + distribution_tolerance * len(outstanding_entries)
+            ):
+                continue
             ranked.append((
+                (
+                    remaining_max_distance
+                    if outstanding_entries else 0.0
+                ),
+                (
+                    remaining_total_distance
+                    if outstanding_entries else 0.0
+                ),
                 service_distance + rover_distance,
                 known_roughness,
                 -float(clearance[y, x]),
@@ -683,14 +834,46 @@ class MissionControl(MissionControlLifecycleMixin):
             return None
         selected = min(ranked)
         point = selected[-1]
-        return point, selected[3], selected[1], -selected[2]
+        return _RoverStagingSelection(
+            position=point,
+            rover_route_cost=selected[5],
+            terrain_roughness=selected[3],
+            wall_clearance=-selected[4],
+            remaining_max_distance=(
+                selected[0] if outstanding_entries else math.inf
+            ),
+            remaining_total_distance=(
+                selected[1] if outstanding_entries else math.inf
+            ),
+            current_max_distance=(
+                current_max_distance if outstanding_entries else math.inf
+            ),
+            current_total_distance=(
+                current_total_distance if outstanding_entries else math.inf
+            ),
+        )
 
     def _rover_should_hold_position(self, rover_id: int) -> bool:
-        """Hold only for reports already delivered by physical contact."""
+        """Hold reports, or a completed team physically beside the rover."""
         if int(rover_id) != 0:
             return False
         with self._exploration_check_in_lock:
-            return bool(self._exploration_check_ins)
+            if self._exploration_report_stops:
+                return True
+            if any(
+                drone_id not in self._exploration_docked
+                for drone_id in self._exploration_check_ins
+            ):
+                return True
+            coordinator = self.exploration_coordinator
+            snapshot = getattr(coordinator, "snapshot", None)
+            if not callable(snapshot) or not self.drones:
+                return False
+            if not snapshot(blocking=False).mission_exhausted:
+                return False
+            if len(self.drones) != coordinator.drone_count:
+                return False
+            return len(self._exploration_docked) == len(self.drones)
 
     def get_check_in_position(
         self,
@@ -721,6 +904,10 @@ class MissionControl(MissionControlLifecycleMixin):
         """Expose no peer position outside direct LOS/proximity."""
         return self.terrain_sharing.visible_drone_positions(observer_id)
 
+    def physical_contact_checkpoint(self, drone_id: int) -> None:
+        """Process peer contact reached during one physical translation step."""
+        self.terrain_sharing.physical_contact_checkpoint(int(drone_id))
+
     def announce_rendezvous(self, position: Tuple[int, int]):
         protocol = self.rendezvous_protocol
         return None if protocol is None else protocol.propose(position)
@@ -738,8 +925,195 @@ class MissionControl(MissionControlLifecycleMixin):
             self.rendezvous_protocol.drone_drone_contact(first_id, second_id)
 
     def _rendezvous_drone_rover_contact(self, drone_id: int) -> None:
+        with self._exploration_check_in_lock:
+            protocol = self.rendezvous_protocol
+            if protocol is None:
+                return
+            normalized_id = int(drone_id)
+            protocol.drone_rover_contact(normalized_id)
+            self._record_docked_endpoint_epoch_locked(normalized_id)
+
+    def _record_docked_endpoint_epoch_locked(self, drone_id: int) -> None:
+        """Attach physically learned endpoint identity to one dock session."""
+        protocol = self.rendezvous_protocol
+        session = self._exploration_docked.get(int(drone_id))
+        if protocol is None or session is None:
+            return
+        try:
+            announcement = protocol.snapshot().drone_announcements[
+                int(drone_id)
+            ]
+            session.learned_endpoint_epochs.add(int(announcement.epoch))
+        except (AttributeError, IndexError, TypeError):
+            # Lightweight controller doubles may implement only contact and
+            # endpoint lookup. Runtime protocols always expose this snapshot.
+            return
+
+    def _reserve_exploration_report_stop_locked(
+        self,
+        drone_id: int,
+    ) -> None:
+        if (
+            drone_id in self._exploration_report_stops
+            or drone_id in self._exploration_check_ins
+        ):
+            return
+        self._exploration_report_stops.add(drone_id)
+        distance = math.dist(
+            self.drones[drone_id].snapshot().position,
+            tuple(self.rovers[0].pos),
+        )
+        self.runtime_trace.record(
+            "rover_report_stop_reserved",
+            sim_time=self.simulation_time(),
+            drone_id=drone_id,
+            distance=distance,
+        )
+
+    def request_exploration_report_stop(self, drone_id: int) -> bool:
+        """Atomically verify rover contact and reserve a stop for a report."""
+        normalized_id = int(drone_id)
+        if (
+            self.exploration_coordinator is None
+            or not self.rovers
+            or self.rovers[0] is None
+        ):
+            return False
+        with self._exploration_check_in_lock:
+            if not self.terrain_sharing.drone_at_rover(normalized_id, 0):
+                return False
+            self._reserve_exploration_report_stop_locked(normalized_id)
+            if self.rendezvous_protocol is not None:
+                self.rendezvous_protocol.drone_rover_contact(normalized_id)
+            return True
+
+    def is_exploration_docked(self, drone_id: int) -> bool:
+        """Return whether one drone is mechanically attached to rover 0."""
+        with self._exploration_check_in_lock:
+            return int(drone_id) in self._exploration_docked
+
+    def exploration_docked_ids(self) -> frozenset[int]:
+        """Return one coherent render-safe snapshot of attached drones."""
+        with self._exploration_check_in_lock:
+            return frozenset(self._exploration_docked)
+
+    def request_exploration_dock(self, drone_id: int) -> CoordinationResult:
+        """Dock through the ordinary physical no-report check-in."""
+        return self.exploration_check_in(int(drone_id), None)
+
+    def _dock_exploration_drone_locked(
+        self,
+        drone_id: int,
+        report: CoordinationReport | None,
+    ) -> None:
+        """Attach one physically verified drone while movement is serialized."""
+        if drone_id in self._exploration_docked:
+            return
+        report_stop_reserved = drone_id in self._exploration_report_stops
+        rover = self.rovers[0]
+        drone = self.drones[drone_id]
+        contact_position = tuple(drone.snapshot().position)
+        rover_position = tuple(rover.pos)
+        endpoint = (
+            rover_position
+            if self.rendezvous_protocol is None
+            else tuple(self.rendezvous_protocol.drone_endpoint(drone_id))
+        )
+        encounter = contact_position != endpoint
+        if report is None:
+            source = "check_in_intercept" if encounter else "check_in_endpoint"
+        else:
+            source = "report_intercept" if encounter else "report_endpoint"
+        drone.runtime_state.carry_to(rover_position)
+        drone.runtime_state.clear_ray_points()
+        self._exploration_docked[drone_id] = _DockedExplorationDrone(
+            drone_id=drone_id,
+            rover_id=0,
+            source=source,
+            report_id=None if report is None else report.report_id,
+            started_at=self.simulation_time(),
+            contact_position=contact_position,
+            carried_path=[rover_position],
+        )
         if self.rendezvous_protocol is not None:
-            self.rendezvous_protocol.drone_rover_contact(drone_id)
+            if not report_stop_reserved:
+                self._rendezvous_drone_rover_contact(drone_id)
+            else:
+                self._record_docked_endpoint_epoch_locked(drone_id)
+        self.runtime_trace.record(
+            "drone_docked",
+            sim_time=self.simulation_time(),
+            drone_id=drone_id,
+            rover_id=0,
+            source=source,
+            report_id=None if report is None else report.report_id,
+            contact_position=contact_position,
+            rover_position=rover_position,
+            remembered_endpoint=endpoint,
+        )
+
+    def _move_docked_drones_locked(self, rover_id: int) -> None:
+        """Carry attached drones through one serialized rover step."""
+        rover_position = tuple(self.rovers[rover_id].pos)
+        for drone_id, session in self._exploration_docked.items():
+            if session.rover_id != rover_id:
+                continue
+            distance = self.drones[drone_id].runtime_state.carry_to(
+                rover_position
+            )
+            if distance <= 0.0:
+                continue
+            session.carried_distance += distance
+            session.carried_steps += 1
+            session.carried_path.append(rover_position)
+
+    def _undock_exploration_drone_locked(
+        self,
+        drone_id: int,
+        *,
+        reason: str,
+        directive_id: int | None = None,
+        directive_kind: str | None = None,
+    ) -> None:
+        """Release one attachment and summarize its carried movement."""
+        session = self._exploration_docked.pop(int(drone_id), None)
+        if session is None:
+            return
+        # A scan that began immediately before docking may have published its
+        # old world-space rays while the attachment was active.  Keep the
+        # first released frame clear until sensing publishes a fresh pose.
+        self.drones[session.drone_id].runtime_state.clear_ray_points()
+        self.runtime_trace.record(
+            "drone_undocked",
+            sim_time=self.simulation_time(),
+            drone_id=session.drone_id,
+            rover_id=session.rover_id,
+            reason=reason,
+            directive_id=directive_id,
+            directive_kind=directive_kind,
+            docking_source=session.source,
+            report_id=session.report_id,
+            docked_seconds=max(
+                0.0, self.simulation_time() - session.started_at
+            ),
+            contact_position=session.contact_position,
+            release_position=self.drones[session.drone_id].snapshot().position,
+            carried_distance=session.carried_distance,
+            carried_steps=session.carried_steps,
+            carried_path=tuple(session.carried_path),
+            learned_endpoint_epochs=tuple(sorted(
+                session.learned_endpoint_epochs
+            )),
+        )
+
+    def _clear_exploration_docks(self, *, reason: str) -> None:
+        """Release all remaining attachments during lifecycle teardown."""
+        with self._exploration_check_in_lock:
+            for drone_id in tuple(self._exploration_docked):
+                self._undock_exploration_drone_locked(
+                    drone_id,
+                    reason=reason,
+                )
 
     def _new_rendezvous_protocol(self) -> RendezvousProtocol:
         return RendezvousProtocol(
@@ -765,9 +1139,10 @@ class MissionControl(MissionControlLifecycleMixin):
         normalized_id = int(drone_id)
         if coordinator is None or not self.rovers or self.rovers[0] is None:
             return CoordinationResult(arrived=False)
-        if not self.terrain_sharing.drone_at_rover(normalized_id, 0):
-            return CoordinationResult(arrived=False)
         with self._exploration_check_in_lock:
+            if not self.terrain_sharing.drone_at_rover(normalized_id, 0):
+                return CoordinationResult(arrived=False)
+            self._dock_exploration_drone_locked(normalized_id, report)
             pending = self._exploration_check_ins.get(normalized_id)
             if pending is None:
                 pending = _PendingExplorationCheckIn(
@@ -787,12 +1162,44 @@ class MissionControl(MissionControlLifecycleMixin):
                         None if report is None else report.directive_id
                     ),
                 )
+            # Docking now preserves contact while the queued work is handled.
+            # The pre-queue report reservation is no longer needed.
+            self._exploration_report_stops.discard(normalized_id)
         return CoordinationResult(
             arrived=True,
             report_accepted=report is None,
             waiting=True,
             directive_ready=pending.ready,
         )
+
+    def exploration_contact(self, drone_id: int) -> bool:
+        """Check direct rover contact without reserving a report stop."""
+        with self._exploration_check_in_lock:
+            normalized_id = int(drone_id)
+            if normalized_id in self._exploration_docked:
+                return True
+            at_rover = bool(self.terrain_sharing.drone_at_rover(normalized_id, 0))
+            coordinator = self.exploration_coordinator
+            if not at_rover and coordinator is not None:
+                coordinator.waiting_contact_lost(normalized_id)
+            return at_rover
+
+    def _prune_exploration_waiting_contacts(self) -> None:
+        """Expire old check-ins before evaluating team quiescence."""
+        coordinator = self.exploration_coordinator
+        if coordinator is None:
+            return
+        waiting = coordinator.snapshot().waiting_drone_ids
+        for drone_id in waiting:
+            if drone_id in self._exploration_docked:
+                continue
+            if not self.terrain_sharing.drone_at_rover(drone_id, 0):
+                coordinator.waiting_contact_lost(drone_id)
+                self.runtime_trace.record(
+                    "rover_waiting_contact_expired",
+                    sim_time=self.simulation_time(),
+                    drone_id=drone_id,
+                )
 
     def _perform_exploration_check_in(
         self,
@@ -807,7 +1214,16 @@ class MissionControl(MissionControlLifecycleMixin):
         arrived = self.terrain_sharing.check_in_with_rover(drone_id, 0)
         if not arrived:
             return CoordinationResult(arrived=False)
+        self._prune_exploration_waiting_contacts()
         rover_slam = self.rovers[0].slam_map.snapshot(point_limit=0)
+        # These are rover-local cumulative knowledge counters sampled after a
+        # verified physical exchange. Their differences include any rover
+        # observations or physical proximity shares since the last sample;
+        # the display-only mission floor map is not coordinator knowledge.
+        rover_progress = self.rovers[0].slam_map.progress_snapshot()
+        rover_terrain_known_floor_cells = int(np.count_nonzero(
+            self.rovers[0].terrain_knowledge.known_mask()
+        ))
         battery = 100.0
         if 0 <= int(drone_id) < len(self.drones):
             battery = float(self.drones[int(drone_id)].snapshot().battery)
@@ -822,6 +1238,32 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
         )
         coordination_snapshot = coordinator.snapshot()
+        if (
+            coordination_snapshot.focused_endgame
+            != self._last_focused_endgame_trace_state
+        ):
+            self._last_focused_endgame_trace_state = (
+                coordination_snapshot.focused_endgame
+            )
+            active_components = tuple(
+                component
+                for component in coordination_snapshot.components
+                if component.state.value == "active"
+            )
+            self.runtime_trace.record(
+                "rover_focused_endgame_changed",
+                sim_time=self.simulation_time(),
+                active=coordination_snapshot.focused_endgame,
+                registry_revision=coordination_snapshot.revision,
+                active_component_count=len(active_components),
+                active_modes={
+                    mode: sum(
+                        component.exploration_mode.value == mode
+                        for component in active_components
+                    )
+                    for mode in ("focused", "wall_follow", "sweep")
+                },
+            )
         self.runtime_trace.record(
             "drone_component_check_in",
             sim_time=self.simulation_time(),
@@ -835,6 +1277,8 @@ class MissionControl(MissionControlLifecycleMixin):
             mission_exhausted=result.mission_exhausted,
             coordination_phase=coordination_snapshot.phase.value,
             rover_slam_version=rover_slam.version,
+            rover_slam_newly_known_cells=rover_progress.newly_known_cells,
+            rover_terrain_known_floor_cells=rover_terrain_known_floor_cells,
         )
         if report is not None and result.report_accepted:
             if report.kind in {
@@ -860,6 +1304,10 @@ class MissionControl(MissionControlLifecycleMixin):
                         None if report.suspension is None
                         else report.suspension.reason
                     ),
+                    outbound_distance=report.outbound_distance,
+                    service_distance=report.service_distance,
+                    return_distance=report.return_distance,
+                    return_path_source=report.return_path_source,
                 )
             elif report.kind == DirectiveKind.RADIAL_PROBE:
                 self.runtime_trace.record(
@@ -909,6 +1357,16 @@ class MissionControl(MissionControlLifecycleMixin):
         if result.reconcile_result is not None:
             reconcile = result.reconcile_result
             snapshot = coordination_snapshot
+            for unit_id in reconcile.low_gain_deferred_work_unit_ids:
+                unit = coordinator.registry.work_units[unit_id]
+                self.runtime_trace.record(
+                    "rover_frontier_low_gain_deferred",
+                    sim_time=self.simulation_time(),
+                    component_id=unit.component_id,
+                    work_unit_id=unit_id,
+                    anchor=unit.anchor_position,
+                    revision=reconcile.revision,
+                )
             self.runtime_trace.record(
                 "rover_frontier_registry_reconciled",
                 sim_time=self.simulation_time(),
@@ -935,6 +1393,7 @@ class MissionControl(MissionControlLifecycleMixin):
                     )
                     for mode in ("focused", "wall_follow", "sweep")
                 },
+                focused_endgame=coordination_snapshot.focused_endgame,
             )
             for transition in reconcile.transitions:
                 self.runtime_trace.record(
@@ -1001,41 +1460,67 @@ class MissionControl(MissionControlLifecycleMixin):
         coordinator = self.exploration_coordinator
         if coordinator is None:
             return CoordinationResult(arrived=False)
-        completed = None
         with self._exploration_check_in_lock:
-            pending = self._exploration_check_ins.get(int(drone_id))
-            if pending is not None and pending.ready.is_set():
-                completed = self._exploration_check_ins.pop(int(drone_id))
-        if completed is not None:
-            processed = completed.result or CoordinationResult(arrived=False)
-            if not processed.arrived or (
-                completed.report is not None
-                and not processed.report_accepted
-            ):
-                return processed
+            normalized_id = int(drone_id)
+            if normalized_id not in self._exploration_docked:
+                if normalized_id not in coordinator.snapshot().waiting_drone_ids:
+                    self._exploration_check_ins.pop(normalized_id, None)
+                return CoordinationResult(arrived=False)
+            if normalized_id not in coordinator.snapshot().waiting_drone_ids:
+                # Its earlier waiting check-in was invalidated by lost contact.
+                # A fresh rover-worker check-in must restore that membership.
+                self._exploration_check_ins.pop(normalized_id, None)
+                return CoordinationResult(arrived=False)
+            pending = self._exploration_check_ins.get(normalized_id)
+            if pending is not None and not pending.ready.is_set():
+                return CoordinationResult(
+                    arrived=True,
+                    waiting=True,
+                    directive_ready=pending.ready,
+                )
+            if pending is not None:
+                completed = self._exploration_check_ins.pop(normalized_id)
+                processed = completed.result or CoordinationResult(arrived=False)
+                if not processed.arrived or (
+                    completed.report is not None
+                    and not processed.report_accepted
+                ):
+                    return processed
+                if (
+                    processed.directive_ready is None
+                    or not processed.directive_ready.is_set()
+                ):
+                    return processed
+                claimed = coordinator.claim_directive(drone_id)
+                result = replace(
+                    claimed,
+                    report_accepted=processed.report_accepted,
+                    reconcile_result=processed.reconcile_result,
+                    published_directives=processed.published_directives,
+                )
+            else:
+                result = coordinator.claim_directive(drone_id)
+            departure_kinds = {
+                DirectiveKind.COMPONENT_TASK,
+                DirectiveKind.COMPONENT_FOLLOW,
+                DirectiveKind.RADIAL_PROBE,
+            }
+            release_kinds = departure_kinds | {DirectiveKind.ROVER_SCAN}
             if (
-                processed.directive_ready is None
-                or not processed.directive_ready.is_set()
+                result.directive is not None
+                and result.directive.kind in release_kinds
             ):
-                return processed
-            claimed = coordinator.claim_directive(drone_id)
-            result = replace(
-                claimed,
-                report_accepted=processed.report_accepted,
-                reconcile_result=processed.reconcile_result,
-                published_directives=processed.published_directives,
-            )
-        else:
-            result = coordinator.claim_directive(drone_id)
+                if result.directive.kind in departure_kinds:
+                    self.terrain_sharing.share_on_departure(drone_id, 0)
+                self._undock_exploration_drone_locked(
+                    normalized_id,
+                    reason="directive_assigned",
+                    directive_id=result.directive.directive_id,
+                    directive_kind=result.directive.kind.value,
+                )
         directive = result.directive
         if directive is None:
             return result
-        if directive.kind in {
-            DirectiveKind.COMPONENT_TASK,
-            DirectiveKind.COMPONENT_FOLLOW,
-            DirectiveKind.RADIAL_PROBE,
-        }:
-            self.terrain_sharing.share_on_departure(drone_id, 0)
         if (
             directive.round_id is not None
             and directive.round_id not in self._traced_discovery_rounds
@@ -1075,10 +1560,34 @@ class MissionControl(MissionControlLifecycleMixin):
                 claim_token=directive.claim.token,
                 entry=directive.task.preferred_entry,
                 estimated_effort=directive.task.estimated_effort,
+                assignment_policy=directive.assignment_policy,
+                estimated_outbound_cost=(
+                    directive.estimated_outbound_cost
+                ),
+                estimated_round_trip_cost=(
+                    directive.estimated_round_trip_cost
+                ),
                 route_distance=self._trace_path_distance(
                     directive.outbound_route
                 ),
             )
+            if directive.assignment_policy == "focused_endgame_round_trip":
+                self.runtime_trace.record(
+                    "rover_focused_endgame_assignment",
+                    sim_time=self.simulation_time(),
+                    drone_id=int(drone_id),
+                    directive_id=directive.directive_id,
+                    task_id=directive.task.task_id,
+                    component_id=directive.task.component_id,
+                    entry=directive.task.preferred_entry,
+                    estimated_effort=directive.task.estimated_effort,
+                    estimated_outbound_cost=(
+                        directive.estimated_outbound_cost
+                    ),
+                    estimated_round_trip_cost=(
+                        directive.estimated_round_trip_cost
+                    ),
+                )
         elif directive.kind == DirectiveKind.COMPONENT_FOLLOW:
             self.runtime_trace.record(
                 "rover_branch_follow_assigned",
@@ -1488,6 +1997,36 @@ class MissionControl(MissionControlLifecycleMixin):
             1.0,
             float(max(icon.get_size())) / 2.0 if icon is not None else 1.0,
         )
+        normalized_start = (int(start[0]), int(start[1]))
+        normalized_goal = (int(goal[0]), int(goal[1]))
+        normalized_radius = round(body_radius, 3)
+        failed_key = (
+            normalized_id,
+            normalized_start,
+            normalized_goal,
+            int(slam.version),
+            normalized_radius,
+        )
+        self._rover_failed_route_cache = {
+            key for key in self._rover_failed_route_cache
+            if key[0] != normalized_id
+            or (
+                key[1] == normalized_start
+                and key[3] == int(slam.version)
+                and key[4] == normalized_radius
+            )
+        }
+        if failed_key in self._rover_failed_route_cache:
+            self.runtime_trace.record(
+                "rover_route_negative_cache_hit",
+                sim_time=self.simulation_time(),
+                rover_id=normalized_id,
+                start=normalized_start,
+                goal=normalized_goal,
+                rover_slam_version=slam.version,
+                body_radius=body_radius,
+            )
+            return []
         clearance = cv2.distanceTransform(
             np.pad(known_free.astype(np.uint8), 1),
             cv2.DIST_L2,
@@ -1530,6 +2069,17 @@ class MissionControl(MissionControlLifecycleMixin):
             body_radius=body_radius,
             goal_clearance=float(clearance[goal_y, goal_x]),
         )
+        if not path:
+            self._rover_failed_route_cache.add(failed_key)
+            self.runtime_trace.record(
+                "rover_route_negative_cached",
+                sim_time=self.simulation_time(),
+                rover_id=normalized_id,
+                start=normalized_start,
+                goal=normalized_goal,
+                rover_slam_version=slam.version,
+                body_radius=body_radius,
+            )
         return path
 
 
@@ -1544,7 +2094,11 @@ class MissionControl(MissionControlLifecycleMixin):
                     break
                 if rover_id == 0:
                     self._process_exploration_check_ins()
-                self.rovers[rover_id].move()
+                    with self._exploration_check_in_lock:
+                        self.rovers[rover_id].move()
+                        self._move_docked_drones_locked(rover_id)
+                else:
+                    self.rovers[rover_id].move()
                 coordinator = self.exploration_coordinator
                 if coordinator is not None and rover_id == 0:
                     coordinator.update_rover_position(

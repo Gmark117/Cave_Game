@@ -34,9 +34,11 @@ The component-policy regressions cover stable continuation, split and merge
 lineage, targeted wide-component retirement, wall-follow versus sweep
 classification, token-fenced claims, rover-known-free eligibility with
 drone-owned exact routing, bounded discovery rounds, scan-footprint local DFS,
-failed-backtrack replanning, energy suspension, service-cost rover staging,
-contact-carried rendezvous acknowledgement, per-agent state projection,
-rover-local map selection, and component quiescence. Legacy sector tests remain to protect the compatibility surface
+direct sibling A* and breadcrumb recovery, energy suspension, service-cost rover staging,
+contact-carried rendezvous acknowledgement and confirmed-stop relay, pending
+check-in retention, endgame gain/travel telemetry, per-agent state projection,
+rover-local map selection, atomic rover docking and carriage, inactive docked
+sensing, release ordering, and component quiescence. Legacy sector tests remain to protect the compatibility surface
 while production composition bypasses it. A live trace remains necessary to
 assess completion time and wall yield; passing unit tests does not establish a
 runtime speedup.
@@ -62,14 +64,14 @@ they protect.
 | Weighted-random movement and A* escape | `test_drone_movement.py`, `test_exploration_policy.py`, `test_astar_pathfinder.py` | Unit/concurrency/interaction | Seeded weighted choice, wall-continuation priority, generic unknown fallback, teammate separation, direct raster steps, sensor-local stagnation windows, scan-only wall-facing turns, exact-pose scan waits, zero-gain suppression, local-SLAM borders, cul-de-sac A*, homing, pause barriers, and path history are protected without a live mission. |
 | Frontier registry and lineage | `test_frontier_registry.py` | Unit | Significant eight-connected components, stable continuation, explicit split/merge identity, wide-work classification, normalized effort, and anchor-local retirement are deterministic registry rules. |
 | Component coordination and energy | `test_exploration_coordination.py` | Unit/state-machine | Full-circle and bootstrap-only radial rounds, component-phase monotonicity, follower assignment, known-free connected eligibility, claim fencing, suspension/reassignment, quiescence, and unlimited/finite policy boundaries are coordinator rules. |
-| Local component DFS execution | `test_component_explorer.py` | Unit/interaction | Exact sensor completion, deterministic follower branch claims, LIFO successor traversal, actual-path reversal and bounded replan recovery, anchor-local zero gain, and energy/route return reports cross the movement/coordinator boundary. |
-| Drone runtime state | `test_drone_runtime_state.py` | Unit/concurrency | Immutable snapshots, atomic movement/path updates, frontier timing, and concurrent read consistency belong to the synchronized state owner. |
-| Drone behavior | `test_drone_movement.py`, `test_drone_sensor.py` | Characterization/unit | Mission-facing actions use the small `Drone` API; detailed movement, sensing, terrain, and SLAM behavior is tested through owned collaborators with injected pathfinding, pause, clock, and terrain callbacks. |
+| Local component DFS execution | `test_component_explorer.py` | Unit/interaction | Exact sensor completion, deterministic follower branch claims, logical LIFO unwinding, direct sibling A*, breadcrumb fallback, physical rover return, anchor-local zero gain, and energy/route return reports cross the movement/coordinator boundary. |
+| Drone runtime state | `test_drone_runtime_state.py` | Unit/concurrency | Immutable snapshots, atomic self-propelled and carried movement/path updates, frontier timing, and concurrent read consistency belong to the synchronized state owner. |
+| Drone behavior | `test_drone_movement.py`, `test_drone_sensor.py` | Characterization/unit | Mission-facing actions use the small `Drone` API; detailed movement, docked idling, inactive docked sensing, terrain, and SLAM behavior is tested through owned collaborators with injected pathfinding, pause, clock, and terrain callbacks. |
 | Rover behavior | `test_rover.py` | Characterization | Local-SLAM reachability, acknowledgement-gated departure, advancing, rendezvous hold, and target release form one rover workflow through explicit navigation dependencies. |
 | Rendezvous protocol | `test_rendezvous.py` | Unit/state-machine | Endpoint announcements, direct and relayed acknowledgements, universal rover receipt, and arrival commit are deterministic without radio broadcasts. |
 | Agent construction | `test_agent_factory.py` | Interaction | Asset loading is mocked while constructor arguments, initialized agent state, and the single-rover policy are verified. |
 | Agent rendering | `test_agent_renderer.py` | Surface | Renderer-owned surfaces consume detached agent snapshots; non-empty drawing output is more stable than screenshots. |
-| Mission construction and loop | `test_mission_lifecycle.py`, `test_pause_control.py` | Interaction/concurrency | Tests protect setup-only construction, explicit run lifecycle, stop/restart behavior, pause barriers, pause-aware time, cave reuse, and cleanup. |
+| Mission construction and loop | `test_mission_lifecycle.py`, `test_pause_control.py` | Interaction/concurrency | Tests protect setup-only construction, explicit run lifecycle, physical docking, rover-step carriage, assignment release ordering, stop/restart behavior, pause barriers, pause-aware time, cave reuse, and cleanup. |
 | Frame performance telemetry | `test_frame_timing.py`, `test_mission_lifecycle.py` | Unit/interaction | Smoothing and lifecycle stage boundaries are deterministic and should not require real-time sleeps. |
 | Mission frame composition | `test_mission_renderer.py` | Interaction/surface | Draw order, one coherent drone snapshot per frame, and detached status values crossing into the control center are contracts. |
 | Debug information | `test_debug_info.py` | Unit | Debug text should summarize state without requiring the control-center renderer. |

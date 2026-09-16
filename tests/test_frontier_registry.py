@@ -51,6 +51,92 @@ class FrontierComponentRegistryTests(unittest.TestCase):
             minimum_unknown_support_cells=1,
         )
 
+    def _two_low_gain_lineage_scans(
+        self,
+        scan_slam: SlamSnapshot,
+    ) -> tuple[FrontierComponentRegistry, int]:
+        registry = self.registry(sensor_range=20.0)
+        cells = tuple((x, 8) for x in range(5, 13))
+        initial = registry.reconcile(line_slam((32, 32), cells, version=1))
+        parent_id = initial.active_component_ids[0]
+        geometry = registry.components[parent_id].geometry
+        unknown = registry._unknown_mask(scan_slam)
+        for _index in range(2):
+            unit = registry.work_units[
+                registry.components[parent_id].work_unit_ids[0]
+            ]
+            registry.record_scan_result(
+                unit.work_unit_id,
+                scan_position=(1, 1),
+                frontier_position=unit.anchor_position,
+                scan_heading=(unit.scan_headings[0] + 90) % 360,
+                frontier_heading=unit.scan_headings[0],
+                newly_known_cells=0,
+                confidence_gain=0.0,
+                rover_slam=scan_slam,
+            )
+            parent_id = registry._create_component(
+                geometry,
+                unknown,
+                parent_ids=(parent_id,),
+            )
+        return registry, parent_id
+
+    def test_low_gain_memory_follows_lineage_and_retires_only_matching_unit(self) -> None:
+        scan_slam = line_slam(
+            (32, 32), tuple((x, 8) for x in range(5, 13)), version=2,
+        )
+        registry, child_id = self._two_low_gain_lineage_scans(scan_slam)
+        child = registry.components[child_id]
+        first_id = child.work_unit_ids[0]
+
+        deferred = registry._apply_low_gain_memory(
+            registry._unknown_mask(scan_slam), first_id,
+        )
+
+        self.assertEqual(deferred, (first_id,))
+        self.assertEqual(
+            registry.work_units[first_id].terminal_reason,
+            "lineage_low_gain",
+        )
+        self.assertEqual(child.state, ComponentState.DORMANT)
+
+    def test_new_unknown_support_reenables_low_gain_lineage(self) -> None:
+        occupancy = np.full((32, 32), FREE, dtype=np.int8)
+        confidence = np.ones((32, 32), dtype=np.float32)
+        occupancy[7, 5] = UNKNOWN
+        confidence[7, 5] = 0.0
+        scan_slam = SlamSnapshot(occupancy, confidence, version=2)
+        registry, child_id = self._two_low_gain_lineage_scans(scan_slam)
+        child = registry.components[child_id]
+        grown_unknown = registry._unknown_mask(scan_slam)
+        grown_unknown[9, 5] = True
+
+        deferred = registry._apply_low_gain_memory(
+            grown_unknown, child.work_unit_ids[0],
+        )
+
+        self.assertEqual(deferred, ())
+        self.assertEqual(
+            registry.work_units[child.work_unit_ids[0]].state,
+            WorkUnitState.READY,
+        )
+
+    def test_moved_gateway_is_not_retired_by_old_low_gain_pose(self) -> None:
+        scan_slam = line_slam(
+            (32, 32), tuple((x, 8) for x in range(5, 13)), version=2,
+        )
+        registry, child_id = self._two_low_gain_lineage_scans(scan_slam)
+        unit_id = registry.components[child_id].work_unit_ids[0]
+        registry.work_units[unit_id].anchor_position = (6, 8)
+
+        deferred = registry._apply_low_gain_memory(
+            registry._unknown_mask(scan_slam), unit_id,
+        )
+
+        self.assertEqual(deferred, ())
+        self.assertEqual(registry.work_units[unit_id].state, WorkUnitState.READY)
+
     def test_one_to_one_continuation_retains_identity(self) -> None:
         registry = self.registry()
         first = tuple((x, 8) for x in range(5, 13))

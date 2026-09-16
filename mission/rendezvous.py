@@ -25,6 +25,7 @@ class RendezvousSnapshot:
     rover_acknowledgements: frozenset[int]
     drone_endpoints: tuple[RendezvousEndpoint, ...]
     drone_announcements: tuple[RendezvousEndpoint, ...]
+    drone_confirmed_endpoints: tuple[RendezvousEndpoint, ...]
     departure_ready: bool
 
 
@@ -62,6 +63,12 @@ class RendezvousProtocol:
             drone_id: initial for drone_id in range(self.drone_count)
         }
         self._drone_targets = {
+            drone_id: initial for drone_id in range(self.drone_count)
+        }
+        # A rover visit is stronger evidence than a proposed destination.
+        # Carry it separately so a drone that missed several stops can visit
+        # the newest rover-confirmed stop before chasing a later proposal.
+        self._drone_confirmed = {
             drone_id: initial for drone_id in range(self.drone_count)
         }
         self._drone_ack_ledgers = {
@@ -102,6 +109,7 @@ class RendezvousProtocol:
             # until it later observes that the rover left this endpoint.
             self._learn_endpoint(normalized, self._current)
             self._drone_targets[normalized] = self._current
+            self._drone_confirmed[normalized] = self._current
             if self._proposal is not None:
                 self._learn_endpoint(normalized, self._proposal)
             drone_ledger = self._drone_ack_ledgers[normalized]
@@ -119,12 +127,6 @@ class RendezvousProtocol:
                 drone_ledger.setdefault(proposal.epoch, set()).update(
                     acknowledgements
                 )
-                if len(acknowledgements) == self.drone_count:
-                    # This contact has just observed the rover accept the
-                    # universal set, so switching this drone is information
-                    # delivered over the same physical exchange, not a global
-                    # state leak.
-                    self._drone_targets[normalized] = proposal
                 self._trace(
                     "drone_rover_rendezvous_ack_exchanged",
                     drone_id=normalized,
@@ -147,6 +149,13 @@ class RendezvousProtocol:
             )
             self._learn_endpoint(first, freshest)
             self._learn_endpoint(second, freshest)
+            confirmed = max(
+                self._drone_confirmed[first],
+                self._drone_confirmed[second],
+                key=lambda endpoint: endpoint.epoch,
+            )
+            self._drone_confirmed[first] = confirmed
+            self._drone_confirmed[second] = confirmed
             first_ledger = self._drone_ack_ledgers[first]
             second_ledger = self._drone_ack_ledgers[second]
             epochs = set(first_ledger) | set(second_ledger)
@@ -160,6 +169,8 @@ class RendezvousProtocol:
                 first_drone_id=first,
                 second_drone_id=second,
                 rendezvous_epoch=freshest.epoch,
+                confirmed_epoch=confirmed.epoch,
+                confirmed_endpoint=confirmed.position,
                 acknowledgement_count=len(first_ledger.get(freshest.epoch, ())),
             )
 
@@ -180,22 +191,29 @@ class RendezvousProtocol:
         with self._lock:
             current_target = self._drone_targets[normalized]
             announcement = self._drone_announcements[normalized]
-            if (
-                current_target.position != observed
-                or announcement.epoch <= current_target.epoch
-            ):
+            confirmed = self._drone_confirmed[normalized]
+            if current_target.position != observed:
                 return current_target.position
-            self._drone_targets[normalized] = announcement
+            if confirmed.epoch > current_target.epoch:
+                next_target = confirmed
+                source = "rover_confirmed_relay"
+            elif announcement.epoch > current_target.epoch:
+                next_target = announcement
+                source = "proposal_after_absence"
+            else:
+                return current_target.position
+            self._drone_targets[normalized] = next_target
             self._trace(
                 "drone_rendezvous_endpoint_fallback",
                 drone_id=normalized,
                 previous_epoch=current_target.epoch,
                 previous_endpoint=current_target.position,
-                rendezvous_epoch=announcement.epoch,
-                endpoint=announcement.position,
+                rendezvous_epoch=next_target.epoch,
+                endpoint=next_target.position,
+                target_source=source,
                 reason="rover_absent_at_confirmed_endpoint",
             )
-            return announcement.position
+            return next_target.position
 
     def can_depart(self, position: Position) -> bool:
         """Return whether universal acknowledgement reached the rover."""
@@ -248,6 +266,10 @@ class RendezvousProtocol:
                 ),
                 drone_announcements=tuple(
                     self._drone_announcements[drone_id]
+                    for drone_id in range(self.drone_count)
+                ),
+                drone_confirmed_endpoints=tuple(
+                    self._drone_confirmed[drone_id]
                     for drone_id in range(self.drone_count)
                 ),
                 departure_ready=(

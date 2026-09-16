@@ -86,6 +86,11 @@ class DroneRenderer:
             drone.color,
             drone.alpha,
         )
+        if not snapshot.ray_points:
+            if signature != self._vision_signature:
+                self.vision_surface.fill((0, 0, 0, 0))
+                self._vision_signature = signature
+            return
         if signature != self._vision_signature:
             self.vision_surface.fill((0, 0, 0, 0))
             if len(snapshot.ray_points) > 1:

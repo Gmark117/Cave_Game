@@ -144,6 +144,27 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertEqual(service.last_pair_share[(0, 1)], 10.0)
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
 
+    def test_motion_checkpoint_exchanges_once_on_contact_entry(self) -> None:
+        control = make_control()
+        contact = Mock()
+        object.__setattr__(control.dependencies, "on_drone_contact", contact)
+        source = make_agent(0, (1, 1))
+        target = make_agent(1, (2, 1))
+        self.seed_slam(source, 1, 1, 1, 0.9)
+        control.drones = [source, target]
+        service = TerrainSharingService(control.dependencies)
+        service.drone_share_interval = 30.0
+        service.last_drone_share[0] = 10.0
+
+        service.physical_contact_checkpoint(0)
+        service.physical_contact_checkpoint(0)
+
+        shared = target.slam_map.snapshot()
+        self.assertEqual(int(shared.occupancy[1, 1]), 1)
+        self.assertAlmostEqual(float(shared.confidence[1, 1]), 0.9)
+        contact.assert_called_once_with(0, 1)
+        self.assertEqual(service.last_drone_share[0], 10.0)
+
     def test_peer_protocol_contact_requires_proximity_and_line_of_sight(self) -> None:
         control = make_control()
         contact = Mock()

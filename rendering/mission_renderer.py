@@ -25,6 +25,7 @@ class MissionRenderer:
         drones = tuple(dependencies.get_drones())
         rovers = tuple(dependencies.get_rovers())
         drone_snapshots = tuple(drone.snapshot() for drone in drones)
+        docked_drone_ids = frozenset(dependencies.get_docked_drone_ids())
         window = dependencies.get_window()
         draw_static_background = getattr(
             dependencies.slam_view,
@@ -51,7 +52,8 @@ class MissionRenderer:
             rover.renderer.draw_path()
 
         for drone, snapshot in zip(drones, drone_snapshots):
-            drone.renderer.draw_vision_overlay(snapshot)
+            if drone.id not in docked_drone_ids:
+                drone.renderer.draw_vision_overlay(snapshot)
 
         for i, (drone, snapshot) in enumerate(
             zip(drones, drone_snapshots)

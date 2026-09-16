@@ -19,6 +19,7 @@ class RoverTests(unittest.TestCase):
         self.rover_targets = SimpleNamespace(
             acquire=Mock(return_value=(2, 0)),
             release=Mock(),
+            reject_failed_route=Mock(),
             should_hold=Mock(return_value=False),
             target_is_current=Mock(return_value=True),
         )
@@ -75,6 +76,9 @@ class RoverTests(unittest.TestCase):
             0,
             completed=False,
         )
+        self.rover_targets.reject_failed_route.assert_called_once_with(
+            0, (0, 0), (2, 0), sim_time=0.0,
+        )
         self.assertEqual(self.rover.status, "Ready")
         self.assertEqual(self.rover.current_path, [])
 
@@ -102,6 +106,23 @@ class RoverTests(unittest.TestCase):
         self.assertEqual(self.rover.pos, (0, 0))
         self.assertEqual(self.rover.status, "Rendezvous")
         self.rover_targets.acquire.assert_not_called()
+
+    def test_report_stop_pauses_an_authorized_route_without_losing_it(
+        self,
+    ) -> None:
+        self.rover.current_path = [(1, 0), (2, 0)]
+        self.rover.target = (2, 0)
+        self.rover_targets.should_hold.return_value = True
+
+        self.rover.move()
+
+        self.assertEqual(self.rover.pos, (0, 0))
+        self.assertEqual(self.rover.current_path, [(1, 0), (2, 0)])
+        self.assertEqual(self.rover.status, "Rendezvous")
+        self.rover_targets.should_hold.return_value = False
+        self.rover.move()
+        self.assertEqual(self.rover.pos, (1, 0))
+        self.assertEqual(self.rover.current_path, [(2, 0)])
 
     def test_rover_owns_local_terrain_knowledge(self) -> None:
         knowledge = self.rover.terrain_knowledge

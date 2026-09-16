@@ -103,6 +103,11 @@ class Drone:
                         lambda _drone_id: (),
                     )(drone_id)
                 ),
+                physical_contact_checkpoint=getattr(
+                    control,
+                    "physical_contact_checkpoint",
+                    None,
+                ),
                 sector_check_in=getattr(control, "sector_check_in", None),
                 sector_assignment=getattr(
                     control,
@@ -128,6 +133,26 @@ class Drone:
                 exploration_check_in=getattr(
                     control,
                     "exploration_check_in",
+                    None,
+                ),
+                request_exploration_report_stop=getattr(
+                    control,
+                    "request_exploration_report_stop",
+                    None,
+                ),
+                request_exploration_dock=getattr(
+                    control,
+                    "request_exploration_dock",
+                    None,
+                ),
+                is_exploration_docked=getattr(
+                    control,
+                    "is_exploration_docked",
+                    None,
+                ),
+                exploration_contact=getattr(
+                    control,
+                    "exploration_contact",
                     None,
                 ),
                 exploration_assignment=getattr(
@@ -182,6 +207,8 @@ class Drone:
 
     def update_sensors(self) -> None:
         """Update local SLAM and terrain knowledge without rendering."""
+        if self.movement_controller.is_docked():
+            return
         self.sensor_controller.update()
 
     def snapshot(self) -> DroneSnapshot:

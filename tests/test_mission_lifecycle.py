@@ -11,6 +11,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from game import Game
+from agents.drone_runtime_state import DroneRuntimeState
 from mission.control import MissionControl
 from config.simulation_config import (
     ExplorationConfig,
@@ -27,6 +28,12 @@ from mapping.exploration_sectors import (
 )
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 from mapping.wall_mapping import WallMappingSnapshot, exposed_wall_mask
+from mission.exploration_coordination import (
+    CoordinationResult,
+    DirectiveKind,
+    ExplorationDirective,
+    ExplorationPhase,
+)
 from navigation.pathfinding import PathfindingService
 from rendering.mission_renderer import MissionRenderer
 
@@ -66,6 +73,436 @@ class FakeGame:
 
 
 class MissionLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _runtime_drone(drone_id: int, position=(4, 4)):
+        state = DroneRuntimeState(
+            start_position=position,
+            cave=np.zeros((16, 16), dtype=np.uint8),
+            direction=0,
+            frontier_rebuild_cooldown=0.0,
+        )
+        return SimpleNamespace(
+            id=drone_id,
+            runtime_state=state,
+            snapshot=state.snapshot,
+        )
+
+    @staticmethod
+    def _rendezvous_protocol(endpoint=(5, 4), drone_count=1):
+        protocol = Mock()
+        protocol.drone_endpoint.return_value = endpoint
+        protocol.snapshot.return_value = SimpleNamespace(
+            drone_announcements=tuple(
+                SimpleNamespace(epoch=0) for _ in range(drone_count)
+            ),
+        )
+        return protocol
+
+    def test_assignment_requires_current_physical_rover_dock(self) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock()
+        coordinator.claim_directive.return_value = CoordinationResult(
+            arrived=True, waiting=True,
+        )
+        coordinator.snapshot.return_value = SimpleNamespace(
+            waiting_drone_ids=frozenset({0}),
+        )
+        mission.exploration_coordinator = coordinator
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=False)
+        processed = threading.Event()
+        processed.set()
+        directive_ready = threading.Event()
+        directive_ready.set()
+        mission._exploration_check_ins[0] = SimpleNamespace(
+            ready=processed,
+            report=None,
+            result=CoordinationResult(
+                arrived=True,
+                report_accepted=True,
+                waiting=True,
+                directive_ready=directive_ready,
+            ),
+        )
+
+        self.assertFalse(mission.exploration_assignment(0).arrived)
+        coordinator.claim_directive.assert_not_called()
+        self.assertIn(0, mission._exploration_check_ins)
+        mission.terrain_sharing.drone_at_rover.return_value = True
+        self.assertFalse(mission.exploration_assignment(0).arrived)
+        coordinator.claim_directive.assert_not_called()
+        mission._exploration_docked[0] = object()
+        self.assertTrue(mission.exploration_assignment(0).arrived)
+        coordinator.claim_directive.assert_called_once_with(0)
+        self.assertNotIn(0, mission._exploration_check_ins)
+
+    def test_recontact_requires_new_check_in_before_assignment(self) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock()
+        coordinator.snapshot.return_value = SimpleNamespace(
+            waiting_drone_ids=frozenset(),
+        )
+        mission.exploration_coordinator = coordinator
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        pending_ready = threading.Event()
+        pending_ready.set()
+        mission._exploration_check_ins[0] = SimpleNamespace(ready=pending_ready)
+
+        self.assertFalse(mission.exploration_assignment(0).arrived)
+        self.assertNotIn(0, mission._exploration_check_ins)
+        coordinator.claim_directive.assert_not_called()
+
+    def test_exhausted_rover_holds_only_for_fully_docked_team(self) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock(drone_count=3)
+        coordinator.snapshot.return_value = SimpleNamespace(
+            mission_exhausted=True,
+        )
+        mission.exploration_coordinator = coordinator
+        mission.drones = [object(), object(), object()]
+        mission._exploration_docked.update({0: object(), 1: object()})
+
+        self.assertFalse(mission._rover_should_hold_position(0))
+        mission._exploration_docked[2] = object()
+        self.assertTrue(mission._rover_should_hold_position(0))
+        mission._exploration_docked.pop(2)
+        self.assertFalse(mission._rover_should_hold_position(0))
+
+    def test_waiting_contact_pruned_before_quiescence_check(self) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock()
+        coordinator.snapshot.return_value = SimpleNamespace(
+            waiting_drone_ids=frozenset({0, 1}),
+        )
+        mission.exploration_coordinator = coordinator
+        mission.terrain_sharing.drone_at_rover = Mock(
+            side_effect=lambda drone_id, _rover_id: drone_id == 1,
+        )
+
+        mission._prune_exploration_waiting_contacts()
+
+        coordinator.waiting_contact_lost.assert_called_once_with(0)
+        self.assertFalse(mission.exploration_contact(0))
+        self.assertEqual(coordinator.waiting_contact_lost.call_count, 2)
+
+    def test_physical_report_stop_holds_rover_until_check_in_is_queued(
+        self,
+    ) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        mission.drones = [SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(position=(4, 4)),
+            runtime_state=SimpleNamespace(
+                carry_to=Mock(return_value=1.0),
+                clear_ray_points=Mock(),
+            ),
+        )]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        mission.rendezvous_protocol = self._rendezvous_protocol()
+        report = SimpleNamespace(report_id=12, directive_id=13)
+
+        self.assertTrue(mission.request_exploration_report_stop(0))
+        self.assertTrue(mission._rover_should_hold_position(0))
+        mission.terrain_sharing.drone_at_rover.return_value = False
+        missed = mission.exploration_check_in(0, report)
+        self.assertFalse(missed.arrived)
+        self.assertTrue(mission._rover_should_hold_position(0))
+        mission.terrain_sharing.drone_at_rover.return_value = True
+        result = mission.exploration_check_in(0, report)
+        duplicate = mission.exploration_check_in(0, report)
+
+        self.assertTrue(result.arrived)
+        self.assertIs(result.directive_ready, duplicate.directive_ready)
+        self.assertEqual(mission._exploration_check_in_queue.qsize(), 1)
+        self.assertNotIn(0, mission._exploration_report_stops)
+        self.assertIs(mission._exploration_check_ins[0].report, report)
+        self.assertTrue(mission.is_exploration_docked(0))
+        self.assertEqual(
+            mission._exploration_docked[0].source,
+            "report_intercept",
+        )
+        self.assertEqual(mission._exploration_docked[0].report_id, 12)
+        self.assertFalse(mission._rover_should_hold_position(0))
+        mission.rendezvous_protocol.drone_rover_contact.assert_called_once_with(0)
+
+    def test_empty_physical_check_in_docks_and_snaps_to_rover(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        drone = self._runtime_drone(0, (4, 4))
+        drone.runtime_state.set_ray_points(((4, 2), (5, 2)))
+        mission.drones = [drone]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=False)
+        mission.rendezvous_protocol = self._rendezvous_protocol(
+            endpoint=(10, 4),
+        )
+
+        missed = mission.request_exploration_dock(0)
+        self.assertFalse(missed.arrived)
+        self.assertFalse(mission.is_exploration_docked(0))
+        self.assertEqual(drone.snapshot().position, (4, 4))
+
+        mission.terrain_sharing.drone_at_rover.return_value = True
+        result = mission.request_exploration_dock(0)
+
+        self.assertTrue(result.arrived)
+        self.assertTrue(mission.is_exploration_docked(0))
+        self.assertEqual(drone.snapshot().position, (5, 4))
+        session = mission._exploration_docked[0]
+        self.assertEqual(session.source, "check_in_intercept")
+        self.assertEqual(session.contact_position, (4, 4))
+        self.assertEqual(session.learned_endpoint_epochs, {0})
+        self.assertEqual(drone.snapshot().ray_points, ())
+        self.assertEqual(mission.exploration_docked_ids(), frozenset({0}))
+
+        drone.runtime_state.set_ray_points(((5, 2),))
+        with mission._exploration_check_in_lock:
+            mission._undock_exploration_drone_locked(
+                0,
+                reason="test_release",
+            )
+        self.assertEqual(drone.snapshot().ray_points, ())
+        self.assertFalse(mission.is_exploration_docked(0))
+
+    def test_empty_check_in_dock_is_atomic_with_rover_carriage(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        drone = self._runtime_drone(0, (4, 4))
+        mission.drones = [drone]
+        rover = SimpleNamespace(pos=(5, 4))
+        rover.move = lambda: setattr(rover, "pos", (6, 4))
+        mission.rovers = [rover]
+        mission.rendezvous_protocol = self._rendezvous_protocol()
+        contact_started = threading.Event()
+        release_contact = threading.Event()
+        request_result = []
+
+        def contact(_drone_id, _rover_id):
+            contact_started.set()
+            self.assertTrue(release_contact.wait(2.0))
+            return True
+
+        mission.terrain_sharing.drone_at_rover = contact
+
+        def rover_step():
+            with mission._exploration_check_in_lock:
+                rover.move()
+                mission._move_docked_drones_locked(0)
+
+        requester = threading.Thread(target=lambda: request_result.append(
+            mission.request_exploration_dock(0)
+        ))
+        mover = threading.Thread(target=rover_step)
+        requester.start()
+        self.assertTrue(contact_started.wait(2.0))
+        mover.start()
+        release_contact.set()
+        requester.join(2.0)
+        mover.join(2.0)
+
+        self.assertFalse(requester.is_alive())
+        self.assertFalse(mover.is_alive())
+        self.assertTrue(request_result[0].arrived)
+        self.assertEqual(rover.pos, (6, 4))
+        self.assertEqual(drone.snapshot().position, (6, 4))
+        session = mission._exploration_docked[0]
+        self.assertEqual(session.carried_steps, 1)
+        self.assertEqual(session.carried_distance, 1.0)
+        self.assertEqual(session.carried_path, [(5, 4), (6, 4)])
+
+    def test_rover_step_carries_multiple_docked_drones(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        mission.drones = [
+            self._runtime_drone(0, (4, 4)),
+            self._runtime_drone(1, (5, 3)),
+        ]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        mission.rendezvous_protocol = self._rendezvous_protocol(drone_count=2)
+        mission.request_exploration_dock(0)
+        mission.request_exploration_dock(1)
+
+        with mission._exploration_check_in_lock:
+            mission.rovers[0].pos = (7, 4)
+            mission._move_docked_drones_locked(0)
+
+        self.assertEqual(
+            [drone.snapshot().position for drone in mission.drones],
+            [(7, 4), (7, 4)],
+        )
+
+    def test_work_assignment_shares_then_releases_at_current_rover_pose(
+        self,
+    ) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock()
+        coordinator.snapshot.return_value = SimpleNamespace(
+            waiting_drone_ids=frozenset({0}),
+        )
+        coordinator.claim_directive.return_value = CoordinationResult(
+            arrived=True,
+            directive=ExplorationDirective(
+                directive_id=52,
+                kind=DirectiveKind.RADIAL_PROBE,
+                probe_target=(12, 4),
+            ),
+        )
+        mission.exploration_coordinator = coordinator
+        drone = self._runtime_drone(0, (4, 4))
+        mission.drones = [drone]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        mission.rendezvous_protocol = self._rendezvous_protocol()
+        mission.request_exploration_dock(0)
+        mission._exploration_check_ins.clear()
+        with mission._exploration_check_in_lock:
+            mission.rovers[0].pos = (8, 4)
+            mission._move_docked_drones_locked(0)
+        order = []
+
+        def share(_drone_id, _rover_id):
+            order.append((
+                "share",
+                mission.is_exploration_docked(0),
+                drone.snapshot().position,
+            ))
+            return True
+
+        mission.terrain_sharing.share_on_departure = share
+        mission.runtime_trace = SimpleNamespace(
+            record=lambda event, **_fields: order.append((event,)),
+        )
+
+        result = mission.exploration_assignment(0)
+
+        self.assertEqual(result.directive.directive_id, 52)
+        self.assertEqual(order[0], ("share", True, (8, 4)))
+        self.assertEqual(order[1], ("drone_undocked",))
+        self.assertFalse(mission.is_exploration_docked(0))
+        self.assertEqual(drone.snapshot().position, (8, 4))
+
+    def test_home_assignment_keeps_drone_docked(self) -> None:
+        mission = MissionControl(FakeGame())
+        snapshot = SimpleNamespace(
+            waiting_drone_ids=frozenset({0}),
+            mission_exhausted=True,
+            phase=ExplorationPhase.COMPLETE,
+            tasks=(),
+            claims=(),
+        )
+        coordinator = Mock()
+        coordinator.snapshot.return_value = snapshot
+        coordinator.claim_directive.return_value = CoordinationResult(
+            arrived=True,
+            directive=ExplorationDirective(
+                directive_id=53,
+                kind=DirectiveKind.HOME,
+                reason="component_work_exhausted",
+            ),
+        )
+        mission.exploration_coordinator = coordinator
+        mission.drones = [self._runtime_drone(0)]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        mission.terrain_sharing.share_on_departure = Mock()
+        mission.rendezvous_protocol = self._rendezvous_protocol()
+        mission.request_exploration_dock(0)
+        mission._exploration_check_ins.clear()
+
+        result = mission.exploration_assignment(0)
+
+        self.assertEqual(result.directive.kind, DirectiveKind.HOME)
+        self.assertTrue(mission.is_exploration_docked(0))
+        mission.terrain_sharing.share_on_departure.assert_not_called()
+
+    def test_rover_scan_releases_in_place_without_departure_share(self) -> None:
+        mission = MissionControl(FakeGame())
+        coordinator = Mock()
+        coordinator.snapshot.return_value = SimpleNamespace(
+            waiting_drone_ids=frozenset({0}),
+        )
+        coordinator.claim_directive.return_value = CoordinationResult(
+            arrived=True,
+            directive=ExplorationDirective(
+                directive_id=54,
+                kind=DirectiveKind.ROVER_SCAN,
+                scan_headings=(0, 90),
+            ),
+        )
+        mission.exploration_coordinator = coordinator
+        drone = self._runtime_drone(0)
+        mission.drones = [drone]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=True)
+        mission.terrain_sharing.share_on_departure = Mock()
+        mission.rendezvous_protocol = self._rendezvous_protocol()
+        mission.request_exploration_dock(0)
+        mission._exploration_check_ins.clear()
+
+        result = mission.exploration_assignment(0)
+
+        self.assertEqual(result.directive.kind, DirectiveKind.ROVER_SCAN)
+        self.assertFalse(mission.is_exploration_docked(0))
+        self.assertEqual(drone.snapshot().position, (5, 4))
+        mission.terrain_sharing.share_on_departure.assert_not_called()
+
+    def test_report_stop_is_atomic_with_a_rover_step(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        mission.drones = [SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(position=(4, 4)),
+        )]
+        rover = SimpleNamespace(pos=(5, 4))
+        mission.rovers = [rover]
+        mission.rendezvous_protocol = Mock()
+        contact_started = threading.Event()
+        release_contact = threading.Event()
+        request_result = []
+
+        def contact(_drone_id, _rover_id):
+            contact_started.set()
+            self.assertTrue(release_contact.wait(2.0))
+            return True
+
+        mission.terrain_sharing.drone_at_rover = contact
+
+        def rover_step():
+            with mission._exploration_check_in_lock:
+                if not mission._rover_should_hold_position(0):
+                    rover.pos = (6, 4)
+
+        requester = threading.Thread(target=lambda: request_result.append(
+            mission.request_exploration_report_stop(0)
+        ))
+        mover = threading.Thread(target=rover_step)
+        requester.start()
+        self.assertTrue(contact_started.wait(2.0))
+        mover.start()
+        release_contact.set()
+        requester.join(2.0)
+        mover.join(2.0)
+
+        self.assertFalse(requester.is_alive())
+        self.assertFalse(mover.is_alive())
+        self.assertEqual(request_result, [True])
+        self.assertEqual(rover.pos, (5, 4))
+
+    def test_report_stop_requires_verified_physical_contact(self) -> None:
+        mission = MissionControl(FakeGame())
+        mission.exploration_coordinator = object()
+        mission.drones = [SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(position=(4, 4)),
+        )]
+        mission.rovers = [SimpleNamespace(pos=(5, 4))]
+        mission.terrain_sharing.drone_at_rover = Mock(return_value=False)
+        mission.rendezvous_protocol = Mock()
+
+        self.assertFalse(mission.request_exploration_report_stop(0))
+        self.assertFalse(mission._rover_should_hold_position(0))
+        mission.rendezvous_protocol.drone_rover_contact.assert_not_called()
+
     def test_epoch_with_standby_exchanges_only_for_actual_arrivals_and_departures(self) -> None:
         shape = (64, 96)
         coordinator = ExplorationSectorCoordinator(shape, 3, (16, 16))
@@ -376,7 +813,7 @@ class MissionLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             constructed.kwargs["component_zero_gain_memory"],
-            "individual_anchor_or_subarc",
+            "individual_anchor_or_subarc_plus_lineage_low_gain",
         )
         self.assertEqual(
             constructed.kwargs["component_workload_estimate"],
@@ -580,6 +1017,105 @@ class MissionLifecycleTests(unittest.TestCase):
             [],
         )
         mission.pathfinding.compute_weighted_path.assert_not_called()
+
+    def test_rover_staging_excludes_diagonal_corner_connection(self) -> None:
+        mission = MissionControl(FakeGame())
+        occupancy = np.full((8, 8), OCCUPIED, dtype=np.int8)
+        occupancy[3, 3] = FREE
+        occupancy[4, 4] = FREE
+        confidence = np.ones((8, 8), dtype=np.float32)
+        mission.rovers = [SimpleNamespace(
+            pos=(3, 3),
+            icon=pygame.Surface((2, 2), pygame.SRCALPHA),
+            slam_map=SimpleNamespace(snapshot=Mock(return_value=SlamSnapshot(
+                occupancy, confidence, version=1,
+            ))),
+            terrain_knowledge=TerrainKnowledge(mission.map_matrix),
+        )]
+
+        safe, *_rest = mission._rover_staging_context()
+
+        self.assertTrue(safe[3, 3])
+        self.assertFalse(safe[4, 4])
+
+    def test_focused_staging_rejects_move_that_strands_distribution(self) -> None:
+        mission = MissionControl(FakeGame())
+        shape = (24, 220)
+        context = (
+            np.ones(shape, dtype=bool),
+            np.ones(shape, dtype=np.float32),
+            np.zeros(shape, dtype=np.float32),
+            np.ones(shape, dtype=np.float32),
+            (100, 10),
+            1.0,
+        )
+
+        selected = mission._select_rover_staging(
+            (200, 10),
+            context,
+            outstanding_entries=((0, 10), (200, 10)),
+        )
+
+        self.assertIsNone(selected)
+
+    def test_focused_staging_moves_toward_clustered_remaining_work(self) -> None:
+        mission = MissionControl(FakeGame())
+        shape = (24, 220)
+        context = (
+            np.ones(shape, dtype=bool),
+            np.ones(shape, dtype=np.float32),
+            np.zeros(shape, dtype=np.float32),
+            np.ones(shape, dtype=np.float32),
+            (100, 10),
+            1.0,
+        )
+
+        selected = mission._select_rover_staging(
+            (200, 10),
+            context,
+            outstanding_entries=((180, 10), (200, 10)),
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertLess(
+            selected.remaining_max_distance,
+            selected.current_max_distance,
+        )
+
+    def test_rover_path_negative_cache_uses_local_slam_version(self) -> None:
+        mission = MissionControl(FakeGame())
+        occupancy = np.full((8, 8), FREE, dtype=np.int8)
+        confidence = np.ones((8, 8), dtype=np.float32)
+        snapshots = [
+            SlamSnapshot(occupancy, confidence, version=1),
+            SlamSnapshot(occupancy, confidence, version=1),
+            SlamSnapshot(occupancy, confidence, version=2),
+        ]
+        rover_terrain = TerrainKnowledge(mission.map_matrix)
+        mission.rovers = [SimpleNamespace(
+            icon=pygame.Surface((2, 2), pygame.SRCALPHA),
+            slam_map=SimpleNamespace(
+                snapshot=Mock(side_effect=snapshots),
+            ),
+            terrain_knowledge=rover_terrain,
+        )]
+        mission.pathfinding.compute_weighted_path = Mock(return_value=[])
+        mission.runtime_trace = Mock()
+
+        self.assertEqual(mission.compute_rover_path(0, (2, 2), (5, 5)), [])
+        self.assertEqual(mission.compute_rover_path(0, (2, 2), (5, 5)), [])
+        self.assertEqual(mission.compute_rover_path(0, (2, 2), (5, 5)), [])
+
+        self.assertEqual(
+            mission.pathfinding.compute_weighted_path.call_count,
+            2,
+        )
+        event_names = tuple(
+            call.args[0]
+            for call in mission.runtime_trace.record.call_args_list
+        )
+        self.assertIn("rover_route_negative_cached", event_names)
+        self.assertIn("rover_route_negative_cache_hit", event_names)
 
     def test_game_constructs_then_runs_mission(self) -> None:
         game = object.__new__(Game)

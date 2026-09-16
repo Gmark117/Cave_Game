@@ -2422,6 +2422,45 @@ class DroneMovementTests(unittest.TestCase):
         self.assertEqual(motion["source"], "test")
         self.assertAlmostEqual(motion["travelled_distance"], 5.0)
 
+    def test_path_checks_peer_contact_and_can_stop_after_shared_slam(
+        self,
+    ) -> None:
+        trace = RecordingTrace()
+        controller = self.drone.movement_controller
+        visited = []
+
+        def contact_checkpoint(_drone_id: int) -> None:
+            position = self.drone.snapshot().position
+            visited.append(position)
+            if position == (18, 16):
+                controller.mark_shared_slam_changed()
+
+        controller.dependencies = replace(
+            controller.dependencies,
+            runtime_trace=trace,
+            physical_contact_checkpoint=contact_checkpoint,
+        )
+
+        followed = controller._follow_path(
+            ((17, 16), (18, 16), (19, 16)),
+            source="component_task_transit",
+            stop_when=controller._shared_slam_changed.is_set,
+            stop_reason="shared_slam_invalidated",
+        )
+
+        self.assertFalse(followed)
+        self.assertEqual(visited, [(17, 16), (18, 16)])
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        motion = next(
+            fields for event, fields in trace.events
+            if event == "drone_motion"
+        )
+        self.assertEqual(motion["stop_reason"], "shared_slam_invalidated")
+        self.assertTrue(any(
+            event == "drone_route_interrupted_after_share"
+            for event, _fields in trace.events
+        ))
+
     def test_path_trace_counts_coverage_revisits_and_repeated_edges(
         self,
     ) -> None:

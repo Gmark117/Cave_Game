@@ -29,6 +29,7 @@ class TerrainSharingService:
         self.last_pair_share: dict[Tuple[int, int], float] = {}
         self.last_rover_share_time: float | None = None
         self._active_pairs: set[Tuple[int, int]] = set()
+        self._physical_contact_pairs: set[Tuple[int, int]] = set()
         self._last_pair_versions: dict[
             Tuple[int, int], tuple[tuple[int, int], tuple[int, int]]
         ] = {}
@@ -210,6 +211,7 @@ class TerrainSharingService:
         now = self._simulation_time()
 
         if self._at_any_rover(drone, drone_snapshot):
+            self._clear_physical_contacts(drone_id)
             with self._cooldown_lock:
                 first_suppression = drone_id not in self._rover_suppressed_drones
                 self._rover_suppressed_drones.add(drone_id)
@@ -244,14 +246,17 @@ class TerrainSharingService:
 
             proximity_threshold = min(drone.radius, other_drone.radius)
             if distance >= 2 * proximity_threshold:
+                self._set_physical_contact(pair_key, False)
                 continue
             if self._at_any_rover(other_drone, other_snapshot):
+                self._set_physical_contact(pair_key, False)
                 continue
             # Agents need to be close and unobstructed; walls block data sharing.
             if not self.has_line_of_sight(
                 drone_snapshot.position,
                 other_snapshot.position,
             ):
+                self._set_physical_contact(pair_key, False)
                 self._trace(
                     "drone_sharing_pair",
                     drone_id=drone_id,
@@ -263,11 +268,131 @@ class TerrainSharingService:
                 )
                 continue
 
-            contact_callback = dependencies.on_drone_contact
-            if callable(contact_callback):
-                contact_callback(int(drone_id), int(other_id))
+            self._set_physical_contact(pair_key, True)
+            self._exchange_visible_pair(
+                drone_id,
+                other_id,
+                drone,
+                other_drone,
+                drone_snapshot,
+                other_snapshot,
+                pair_key,
+                distance,
+                now,
+            )
 
-            if not self._reserve_pair(pair_key, now):
+    def physical_contact_checkpoint(self, drone_id: int) -> None:
+        """Exchange immediately when translation enters a peer contact envelope.
+
+        Long path followers do not return to the ordinary periodic sharing pass
+        between points.  Track contact edges here so a crossing is observed
+        without repeating full-map comparisons for every path pixel.
+        """
+        dependencies = self.dependencies
+        drones = dependencies.get_drones()
+        if not 0 <= int(drone_id) < len(drones):
+            return
+        drone = drones[int(drone_id)]
+        drone_snapshot = drone.snapshot()
+        if self._at_any_rover(drone, drone_snapshot):
+            self._clear_physical_contacts(drone_id)
+            return
+        now = self._simulation_time()
+        for other_id, other_drone in enumerate(drones):
+            if other_id == int(drone_id):
+                continue
+            other_snapshot = other_drone.snapshot()
+            pair_key = (
+                min(int(drone_id), other_id),
+                max(int(drone_id), other_id),
+            )
+            distance = math.dist(
+                drone_snapshot.position,
+                other_snapshot.position,
+            )
+            proximity_threshold = min(drone.radius, other_drone.radius)
+            visible_contact = bool(
+                distance < 2 * proximity_threshold
+                and not self._at_any_rover(other_drone, other_snapshot)
+                and self.has_line_of_sight(
+                    drone_snapshot.position,
+                    other_snapshot.position,
+                )
+            )
+            entered = self._set_physical_contact(pair_key, visible_contact)
+            if not entered:
+                continue
+            self._exchange_visible_pair(
+                int(drone_id),
+                other_id,
+                drone,
+                other_drone,
+                drone_snapshot,
+                other_snapshot,
+                pair_key,
+                distance,
+                now,
+            )
+
+    def _set_physical_contact(
+        self,
+        pair_key: Tuple[int, int],
+        in_contact: bool,
+    ) -> bool:
+        """Record a contact edge and return whether it has just been entered."""
+        with self._cooldown_lock:
+            present = pair_key in self._physical_contact_pairs
+            if not in_contact:
+                self._physical_contact_pairs.discard(pair_key)
+                return False
+            self._physical_contact_pairs.add(pair_key)
+            return not present
+
+    def _clear_physical_contacts(self, drone_id: int) -> None:
+        """Forget peer-contact edges involving one rover-adjacent drone."""
+        normalized_id = int(drone_id)
+        with self._cooldown_lock:
+            self._physical_contact_pairs = {
+                pair for pair in self._physical_contact_pairs
+                if normalized_id not in pair
+            }
+
+    def _exchange_visible_pair(
+        self,
+        drone_id: int,
+        other_id: int,
+        drone: Any,
+        other_drone: Any,
+        drone_snapshot: Any,
+        other_snapshot: Any,
+        pair_key: Tuple[int, int],
+        distance: float,
+        now: float,
+    ) -> None:
+        """Run the existing ACK and bidirectional map exchange for one contact."""
+        contact_callback = self.dependencies.on_drone_contact
+        if callable(contact_callback):
+            contact_callback(int(drone_id), int(other_id))
+
+        if not self._reserve_pair(pair_key, now):
+            self._trace(
+                "drone_sharing_pair",
+                drone_id=drone_id,
+                other_drone_id=other_id,
+                pair_key=pair_key,
+                distance=distance,
+                shared=False,
+                reason="cooldown_or_active",
+            )
+            return
+
+        shared = False
+        exchange_started = time.perf_counter()
+        try:
+            versions = self._agent_pair_versions(drone, other_drone)
+            with self._cooldown_lock:
+                unchanged = self._last_pair_versions.get(pair_key) == versions
+            if unchanged:
                 self._trace(
                     "drone_sharing_pair",
                     drone_id=drone_id,
@@ -275,60 +400,39 @@ class TerrainSharingService:
                     pair_key=pair_key,
                     distance=distance,
                     shared=False,
-                    reason="cooldown_or_active",
-                )
-                continue
-
-            shared = False
-            exchange_started = time.perf_counter()
-            try:
-                versions = self._agent_pair_versions(drone, other_drone)
-                with self._cooldown_lock:
-                    unchanged = self._last_pair_versions.get(pair_key) == versions
-                if unchanged:
-                    self._trace(
-                        "drone_sharing_pair",
-                        drone_id=drone_id,
-                        other_drone_id=other_id,
-                        pair_key=pair_key,
-                        distance=distance,
-                        shared=False,
-                        reason="unchanged_versions",
-                        elapsed_ms=(
-                            time.perf_counter() - exchange_started
-                        ) * 1000.0,
-                    )
-                    continue
-                shared = self._exchange_drone_data(
-                    drone,
-                    other_drone,
-                    drone_snapshot,
-                    other_snapshot,
-                )
-                if shared:
-                    dependencies.presentation.terrain_heatmap_dirty = True
-                self._trace(
-                    "drone_sharing_pair",
-                    drone_id=drone_id,
-                    other_drone_id=other_id,
-                    pair_key=pair_key,
-                    distance=distance,
-                    shared=bool(shared),
-                    reason=("exchanged" if shared else "no_delta"),
+                    reason="unchanged_versions",
                     elapsed_ms=(
                         time.perf_counter() - exchange_started
                     ) * 1000.0,
-                    drone_slam_version=drone.slam_map.version,
-                    other_slam_version=other_drone.slam_map.version,
                 )
-            finally:
-                final_versions = self._agent_pair_versions(
-                    drone,
-                    other_drone,
-                )
-                with self._cooldown_lock:
-                    self._last_pair_versions[pair_key] = final_versions
-                self._release_pair(pair_key, now, shared)
+                return
+            shared = self._exchange_drone_data(
+                drone,
+                other_drone,
+                drone_snapshot,
+                other_snapshot,
+            )
+            if shared:
+                self.dependencies.presentation.terrain_heatmap_dirty = True
+            self._trace(
+                "drone_sharing_pair",
+                drone_id=drone_id,
+                other_drone_id=other_id,
+                pair_key=pair_key,
+                distance=distance,
+                shared=bool(shared),
+                reason=("exchanged" if shared else "no_delta"),
+                elapsed_ms=(
+                    time.perf_counter() - exchange_started
+                ) * 1000.0,
+                drone_slam_version=drone.slam_map.version,
+                other_slam_version=other_drone.slam_map.version,
+            )
+        finally:
+            final_versions = self._agent_pair_versions(drone, other_drone)
+            with self._cooldown_lock:
+                self._last_pair_versions[pair_key] = final_versions
+            self._release_pair(pair_key, now, shared)
 
     @staticmethod
     def _agent_versions(agent: Any) -> tuple[int, int]:

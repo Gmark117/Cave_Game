@@ -1,10 +1,15 @@
 import math
 import threading
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
-from mapping.frontier_registry import WorkUnitState
+from mapping.frontier_registry import (
+    ComponentState,
+    ExplorationMode,
+    WorkUnitState,
+)
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 from mission.energy import (
     EnergyRequirement,
@@ -182,6 +187,30 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
         self.assertEqual(len(followers), 1)
         self.assertEqual(followers[0].leader_drone_id, task.claim.owner_drone_id)
         self.assertEqual(task.reserved_branch_count, 1)
+
+    def test_first_component_dispatch_consumes_bootstrap_follow_window(self) -> None:
+        coordinator = self.coordinator(drones=1)
+        slam = slam_with_line()
+        scans = self._start_initial_round(coordinator, slam)
+        self._finish_round(coordinator, scans, slam)
+
+        first = coordinator.claim_directive(0).directive
+        self.assertIsNotNone(first)
+        self.assertEqual(first.kind, DirectiveKind.COMPONENT_TASK)
+        self.assertTrue(coordinator._bootstrap_followers_issued)
+
+    def test_lost_waiting_contact_blocks_quiescence_until_recheck_in(self) -> None:
+        coordinator = self.coordinator(drones=2)
+        slam = known_free_slam()
+        coordinator._initial_scan_complete = True
+        coordinator._phase = ExplorationPhase.COMPONENT_EXPLORATION
+        coordinator._waiting.update((0, 1))
+        coordinator.waiting_contact_lost(0)
+
+        self.assertFalse(coordinator._team_is_quiescent())
+        self.assertFalse(coordinator.snapshot().mission_exhausted)
+        coordinator.check_in(0, slam)
+        self.assertTrue(coordinator.snapshot().mission_exhausted)
 
     def test_follower_reservation_blocks_child_reassignment_until_report(self) -> None:
         coordinator = self.coordinator(drones=2)
@@ -528,6 +557,63 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
         )
 
         self.assertEqual(selected[0][1], child.task_id)
+
+    def test_focused_endgame_prefers_round_trip_before_continuation(self) -> None:
+        coordinator = self.coordinator(drones=1)
+        coordinator._last_reported_task_by_drone[0] = 40
+        near = ExplorationTask(
+            task_id=41,
+            component_id=1,
+            component_revision=0,
+            work_unit_ids=(1,),
+            parent_task_id=None,
+            depth=0,
+            preferred_entry=(17, 16),
+            estimated_effort=1.0,
+        )
+        far_continuation = ExplorationTask(
+            task_id=42,
+            component_id=2,
+            component_revision=0,
+            work_unit_ids=(2,),
+            parent_task_id=40,
+            depth=3,
+            preferred_entry=(30, 16),
+            estimated_effort=1.0,
+        )
+
+        _quotes, selected = coordinator._assign_tasks(
+            (0,),
+            (near, far_continuation),
+            focused_endgame=True,
+        )
+
+        self.assertEqual(selected[0][1], near.task_id)
+
+    def test_focused_endgame_requires_every_actionable_component(self) -> None:
+        coordinator = self.coordinator(drones=1)
+        coordinator.registry.work_units = {
+            1: SimpleNamespace(state=WorkUnitState.READY),
+            2: SimpleNamespace(state=WorkUnitState.READY),
+        }
+        focused = SimpleNamespace(
+            state=ComponentState.ACTIVE,
+            work_unit_ids=(1,),
+            exploration_mode=ExplorationMode.FOCUSED,
+        )
+        sweep = SimpleNamespace(
+            state=ComponentState.ACTIVE,
+            work_unit_ids=(2,),
+            exploration_mode=ExplorationMode.SWEEP,
+        )
+        coordinator.registry.components = {1: focused, 2: sweep}
+
+        self.assertFalse(coordinator._focused_endgame_is_active())
+        sweep.exploration_mode = ExplorationMode.FOCUSED
+        self.assertTrue(coordinator._focused_endgame_is_active())
+        coordinator.registry.work_units[1].state = WorkUnitState.VISITED
+        coordinator.registry.work_units[2].state = WorkUnitState.VISITED
+        self.assertFalse(coordinator._focused_endgame_is_active())
 
     def test_assignment_delegates_exact_routes_to_drone_workers(self) -> None:
         coordinator = self.coordinator(drones=3)

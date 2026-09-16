@@ -2,6 +2,7 @@ import os
 import unittest
 import math
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -119,6 +120,19 @@ class DroneSensorTests(unittest.TestCase):
             roughness_before,
             self.drone.terrain_knowledge.roughness,
         )
+
+    def test_docked_drone_does_not_run_its_sensor_controller(self) -> None:
+        with (
+            patch.object(
+                self.drone.movement_controller,
+                "is_docked",
+                return_value=True,
+            ),
+            patch.object(self.drone.sensor_controller, "update") as update,
+        ):
+            self.drone.update_sensors()
+
+        update.assert_not_called()
 
     def test_sensor_scan_trace_reports_progress_delta_and_cumulative_gain(
         self,

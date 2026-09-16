@@ -2755,15 +2755,30 @@ def _component_exploration_summary_lines(
         "rover_exploration_quiescence_evaluated",
         "drone_component_target_adjusted_after_share",
         "drone_component_target_retired_after_share",
+        "drone_route_interrupted_after_share",
+        "drone_component_observation_pose_selected",
         "drone_component_sweep_advanced",
         "drone_dfs_backtrack_replanned",
+        "drone_dfs_popped",
+        "drone_dfs_reposition_started",
+        "drone_dfs_reposition_path",
+        "drone_dfs_reposition_fallback",
         "drone_component_check_in_queued",
         "rover_component_check_in_processed",
+        "drone_docked",
+        "drone_undocked",
         "rover_frontier_target_acquired",
         "rover_frontier_target_departure_authorized",
         "rover_frontier_staging_reached",
         "rover_frontier_target_invalidated",
         "rover_route_planned",
+        "rover_focused_endgame_changed",
+        "rover_focused_endgame_assignment",
+        "rover_focused_endgame_staging_selected",
+        "rover_focused_endgame_staging_held",
+        "rover_route_negative_cached",
+        "rover_route_negative_cache_hit",
+        "rover_frontier_route_retry_suppressed",
         "rover_rendezvous_endpoint_proposed",
         "drone_rover_rendezvous_ack_exchanged",
         "drone_rendezvous_message_relayed",
@@ -2860,6 +2875,53 @@ def _component_exploration_summary_lines(
             "drone_dfs_backtrack_replanned",
         }
     )
+    route_interruptions = [
+        event for event in relevant
+        if event.get("event") == "drone_route_interrupted_after_share"
+    ]
+    route_interruption_sources = Counter(
+        str(event.get("source", "unknown"))
+        for event in route_interruptions
+    )
+    observation_poses = [
+        event for event in relevant
+        if event.get("event") == "drone_component_observation_pose_selected"
+    ]
+    observation_sources = Counter(
+        str(event.get("source", "unknown"))
+        for event in observation_poses
+    )
+    observation_savings = [
+        value for event in observation_poses
+        if (
+            value := _finite_float(event.get("saved_route_distance"))
+        ) is not None and value >= 0.0
+    ]
+    dfs_navigation = Counter(
+        str(event.get("event"))
+        for event in relevant
+        if event.get("event") in {
+            "drone_dfs_popped",
+            "drone_dfs_reposition_started",
+            "drone_dfs_reposition_path",
+            "drone_dfs_reposition_fallback",
+        }
+    )
+    dfs_motion: defaultdict[str, float] = defaultdict(float)
+    for event in events:
+        if event.get("event") != "drone_motion":
+            continue
+        source = str(event.get("source", ""))
+        if source not in {
+            "component_dfs_reposition_astar",
+            "component_dfs_breadcrumb_fallback",
+            "component_dfs_backtrack",
+            "component_dfs_backtrack_replan",
+        }:
+            continue
+        distance = _finite_float(event.get("travelled_distance"))
+        if distance is not None and distance >= 0.0:
+            dfs_motion[source] += distance
     queued_check_ins = [
         event for event in relevant
         if event.get("event") == "drone_component_check_in_queued"
@@ -2876,6 +2938,40 @@ def _component_exploration_summary_lines(
         value for event in processed_check_ins
         if (value := _finite_float(event.get("processing_ms"))) is not None
     ]
+    docked = [
+        event for event in relevant
+        if event.get("event") == "drone_docked"
+    ]
+    undocked = [
+        event for event in relevant
+        if event.get("event") == "drone_undocked"
+    ]
+    docking_sources = Counter(
+        str(event.get("source", "unknown")) for event in docked
+    )
+    release_reasons = Counter(
+        str(event.get("reason", "unknown")) for event in undocked
+    )
+    carried_distance = sum(
+        value for event in undocked
+        if (value := _finite_float(event.get("carried_distance"))) is not None
+        and value >= 0.0
+    )
+    carried_steps = sum(
+        max(0, _integer(event.get("carried_steps")) or 0)
+        for event in undocked
+    )
+    docked_seconds = sum(
+        value for event in undocked
+        if (value := _finite_float(event.get("docked_seconds"))) is not None
+        and value >= 0.0
+    )
+    learned_endpoint_epochs = {
+        parsed
+        for event in undocked
+        for epoch in (event.get("learned_endpoint_epochs", ()) or ())
+        if (parsed := _integer(epoch)) is not None
+    }
     rover_staging = Counter(
         str(event.get("event"))
         for event in relevant
@@ -2887,6 +2983,58 @@ def _component_exploration_summary_lines(
             "rover_route_planned",
         }
     )
+    focused_endgame = Counter(
+        str(event.get("event"))
+        for event in relevant
+        if event.get("event") in {
+            "rover_focused_endgame_assignment",
+            "rover_focused_endgame_staging_selected",
+            "rover_focused_endgame_staging_held",
+            "rover_route_negative_cached",
+            "rover_route_negative_cache_hit",
+            "rover_frontier_route_retry_suppressed",
+        }
+    )
+    focused_transitions = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_endgame_changed"
+    ]
+    focused_activations = sum(
+        _boolean(event.get("active")) is True
+        for event in focused_transitions
+    )
+    focused_deactivations = sum(
+        _boolean(event.get("active")) is False
+        for event in focused_transitions
+    )
+    focused_assignments = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_endgame_assignment"
+    ]
+    estimated_outbound = sum(
+        value for event in focused_assignments
+        if (
+            value := _finite_float(event.get("estimated_outbound_cost"))
+        ) is not None and value >= 0.0
+    )
+    estimated_round_trip = sum(
+        value for event in focused_assignments
+        if (
+            value := _finite_float(event.get("estimated_round_trip_cost"))
+        ) is not None and value >= 0.0
+    )
+    report_distances = {
+        field: sum(
+            value for event in reports
+            if (value := _finite_float(event.get(field))) is not None
+            and value >= 0.0
+        )
+        for field in (
+            "outbound_distance",
+            "service_distance",
+            "return_distance",
+        )
+    }
     rendezvous = Counter(
         str(event.get("event"))
         for event in relevant
@@ -2945,6 +3093,31 @@ def _component_exploration_summary_lines(
             "backtrack_replans="
             f"{local_adaptation['drone_dfs_backtrack_replanned']}"
         )
+    if route_interruptions:
+        lines.append(
+            "  mid-route peer sharing: "
+            f"interruptions={len(route_interruptions)} "
+            f"sources={dict(sorted(route_interruption_sources.items()))}"
+        )
+    if observation_poses:
+        lines.append(
+            "  focused observation poses: "
+            f"selected={len(observation_poses)} "
+            "shortened="
+            f"{sum(value > 1e-9 for value in observation_savings)} "
+            f"route_suffix_avoided={sum(observation_savings):.1f}px "
+            f"sources={dict(sorted(observation_sources.items()))}"
+        )
+    if dfs_navigation or dfs_motion:
+        lines.append(
+            "  DFS navigation: "
+            f"logical_pops={dfs_navigation['drone_dfs_popped']} "
+            f"repositions={dfs_navigation['drone_dfs_reposition_started']} "
+            f"astar_px={dfs_motion['component_dfs_reposition_astar']:.1f} "
+            f"breadcrumb_px={dfs_motion['component_dfs_breadcrumb_fallback']:.1f} "
+            "legacy_retrace_px="
+            f"{dfs_motion['component_dfs_backtrack'] + dfs_motion['component_dfs_backtrack_replan']:.1f}"
+        )
     if queued_check_ins or processed_check_ins:
         lines.append(
             "  async rover check-ins: "
@@ -2958,6 +3131,19 @@ def _component_exploration_summary_lines(
             "processing_max="
             f"{_format_optional(max(processing_ms, default=None), 'ms')}"
         )
+    if docked or undocked:
+        lines.append(
+            "  docking: "
+            f"acquired={len(docked)} released={len(undocked)} "
+            f"active_at_trace_end={max(0, len(docked) - len(undocked))} "
+            "intercepts="
+            f"{sum(count for source, count in docking_sources.items() if 'intercept' in source)} "
+            f"carried={carried_distance:.1f}px steps={carried_steps} "
+            f"docked={docked_seconds:.2f}s "
+            f"learned_epochs={sorted(learned_endpoint_epochs)} "
+            f"sources={dict(sorted(docking_sources.items()))} "
+            f"releases={dict(sorted(release_reasons.items()))}"
+        )
     if rover_staging:
         lines.append(
             "  moving rovers: "
@@ -2967,6 +3153,32 @@ def _component_exploration_summary_lines(
             f"reached={rover_staging['rover_frontier_staging_reached']} "
             f"invalidated={rover_staging['rover_frontier_target_invalidated']} "
             f"routes={rover_staging['rover_route_planned']}"
+        )
+    if focused_transitions or focused_endgame:
+        lines.append(
+            "  focused endgame economics: "
+            f"activations={focused_activations} "
+            f"deactivations={focused_deactivations} "
+            "assignments="
+            f"{focused_endgame['rover_focused_endgame_assignment']} "
+            f"estimated_outbound={estimated_outbound:.1f}px "
+            f"estimated_round_trip={estimated_round_trip:.1f}px "
+            "staging_selected="
+            f"{focused_endgame['rover_focused_endgame_staging_selected']} "
+            "staging_held="
+            f"{focused_endgame['rover_focused_endgame_staging_held']} "
+            "route_cached="
+            f"{focused_endgame['rover_route_negative_cached']} "
+            f"cache_hits={focused_endgame['rover_route_negative_cache_hit']} "
+            "retry_suppressed="
+            f"{focused_endgame['rover_frontier_route_retry_suppressed']}"
+        )
+    if reports and any(report_distances.values()):
+        lines.append(
+            "  reported sortie distance: "
+            f"outbound={report_distances['outbound_distance']:.1f}px "
+            f"service={report_distances['service_distance']:.1f}px "
+            f"return={report_distances['return_distance']:.1f}px"
         )
     if rendezvous:
         lines.append(
@@ -2978,6 +3190,34 @@ def _component_exploration_summary_lines(
             f"{rendezvous['drone_rendezvous_endpoint_fallback']} "
             f"reached={rendezvous['rover_rendezvous_endpoint_reached']}"
         )
+        fallback_events = [
+            event for event in relevant
+            if event.get("event") == "drone_rendezvous_endpoint_fallback"
+        ]
+        queued_checkins = [
+            event for event in relevant
+            if event.get("event") == "drone_component_check_in_queued"
+        ]
+        fallback_sources = Counter(
+            str(event.get("target_source", "unrecorded"))
+            for event in fallback_events
+        )
+        queued_contact_fallbacks = sum(
+            1 for fallback in fallback_events
+            if any(
+                queued.get("drone_id") == fallback.get("drone_id")
+                and (fallback_time := _trace_event_time(fallback)) is not None
+                and (queued_time := _trace_event_time(queued)) is not None
+                and abs(fallback_time - queued_time) <= 0.02
+                for queued in queued_checkins
+            )
+        )
+        if fallback_events:
+            lines.append(
+                "  rendezvous fallbacks: "
+                f"sources={dict(sorted(fallback_sources.items()))} "
+                f"same_tick_queued_checkins={queued_contact_fallbacks}"
+            )
     if waits:
         lines.append(
             "  completed wait by drone: "
@@ -2992,6 +3232,169 @@ def _component_exploration_summary_lines(
             f"events={len(quiescence)} reasons={dict(sorted(homing_reasons.items()))} "
             f"max_ready_tasks={max(int(event.get('ready_task_count', 0) or 0) for event in quiescence)} "
             f"max_live_claims={max(int(event.get('live_claim_count', 0) or 0) for event in quiescence)}"
+        )
+    return lines
+
+
+def _endgame_cost_lines(
+    events: Sequence[Mapping[str, Any]],
+    completion_trigger: Mapping[str, Any] | None,
+) -> list[str]:
+    """Compare display coverage with observed travel and rover knowledge.
+
+    This is offline telemetry. The mission-wide floor ratio is not a lawful
+    coordinator input because distant drones update it without rover contact.
+    """
+    frames = sorted(
+        (
+            (event_time, event, ratio)
+            for event in events
+            if event.get("event") == "frame_summary"
+            if (event_time := _trace_event_time(event)) is not None
+            if (ratio := _finite_float(event.get("floor_exploration_ratio")))
+            is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if not frames:
+        return []
+    completion_time = (
+        None if completion_trigger is None
+        else _trace_event_time(completion_trigger)
+    )
+    if completion_time is not None:
+        frames = [frame for frame in frames if frame[0] <= completion_time]
+    if not frames:
+        return []
+    final_frame_time, _end_frame, end_ratio = frames[-1]
+    end_time = (
+        final_frame_time if completion_time is None else completion_time
+    )
+    if completion_trigger is not None:
+        end_ratio = (
+            _finite_float(completion_trigger.get("floor_exploration_ratio"))
+            or end_ratio
+        )
+    mission_start = next(
+        (
+            time for event in events
+            if event.get("event") == "mission_run_started"
+            if (time := _trace_event_time(event)) is not None
+        ),
+        frames[0][0],
+    )
+    checkins = sorted(
+        (
+            (time, event)
+            for event in events
+            if event.get("event") == "drone_component_check_in"
+            if (time := _trace_event_time(event)) is not None
+            and time <= end_time
+        ),
+        key=lambda item: item[0],
+    )
+
+    def rover_position(frame: Mapping[str, Any]) -> tuple[float, float] | None:
+        states = frame.get("rover_states") or ()
+        if not states:
+            return None
+        position = states[0].get("position") or ()
+        if len(position) != 2:
+            return None
+        x, y = (_finite_float(value) for value in position)
+        return None if x is None or y is None else (x, y)
+
+    lines: list[str] = []
+    for threshold in (0.97, 0.98, 0.985):
+        crossing = next(
+            (index for index, frame in enumerate(frames)
+             if frame[2] >= threshold),
+            None,
+        )
+        if crossing is None:
+            continue
+        start_time, _start_frame, start_ratio = frames[crossing]
+        rover_distance = 0.0
+        for earlier, later in zip(frames[crossing:], frames[crossing + 1:]):
+            old_position = rover_position(earlier[1])
+            new_position = rover_position(later[1])
+            if old_position is not None and new_position is not None:
+                rover_distance += math.dist(old_position, new_position)
+
+        drone_distance = 0.0
+        sensor_slam_gain = 0
+        counts: Counter[str] = Counter()
+        for event in events:
+            name = event.get("event")
+            time = _trace_event_time(event)
+            if name == "drone_motion":
+                distance = _finite_float(event.get("travelled_distance"))
+                began = _finite_float(event.get("started_sim_time"))
+                ended = _finite_float(event.get("ended_sim_time"))
+                if ended is None:
+                    ended = time
+                if distance is None or distance < 0.0 or ended is None:
+                    continue
+                if began is None or began >= ended:
+                    if start_time <= ended <= end_time:
+                        drone_distance += distance
+                else:
+                    overlap = max(
+                        0.0,
+                        min(ended, end_time) - max(began, start_time),
+                    )
+                    drone_distance += distance * overlap / (ended - began)
+            elif time is not None and start_time <= time <= end_time:
+                if name == "sensor_scan":
+                    sensor_slam_gain += max(
+                        0, _integer(event.get("newly_known_cells")) or 0
+                    )
+                elif name in {
+                    "rover_task_claimed",
+                    "rover_task_completed",
+                    "rover_rendezvous_endpoint_proposed",
+                }:
+                    counts[str(name)] += 1
+
+        earlier_checkin = next(
+            (event for time, event in reversed(checkins)
+             if time <= start_time),
+            None,
+        )
+        latest_checkin = (
+            checkins[-1][1]
+            if checkins and checkins[-1][0] > start_time else None
+        )
+
+        def known_delta(field: str) -> str:
+            if earlier_checkin is None or latest_checkin is None:
+                return "N/A"
+            earlier = _integer(earlier_checkin.get(field))
+            latest = _integer(latest_checkin.get(field))
+            if earlier is None or latest is None:
+                return "N/A"
+            return str(max(0, latest - earlier))
+
+        if not lines:
+            lines.extend([
+                "",
+                "Endgame cost (offline floor; sampled rover distance/knowledge):",
+            ])
+        lines.append(
+            f"  from {start_ratio * 100.0:.2f}% at "
+            f"t={start_time - mission_start:.1f}s: "
+            f"floor_gain={max(0.0, end_ratio - start_ratio) * 100.0:.3f}pp "
+            f"elapsed={end_time - start_time:.1f}s "
+            f"drone={drone_distance:.0f}px "
+            f"rover_sampled={rover_distance:.0f}px "
+            f"sensor_slam_gain={sensor_slam_gain} "
+            "rover_known_slam_delta="
+            f"{known_delta('rover_slam_newly_known_cells')} "
+            "rover_known_terrain_delta="
+            f"{known_delta('rover_terrain_known_floor_cells')} "
+            f"claims={counts['rover_task_claimed']} "
+            f"reports={counts['rover_task_completed']} "
+            f"proposals={counts['rover_rendezvous_endpoint_proposed']}"
         )
     return lines
 
@@ -3322,6 +3725,7 @@ def summarize(
     lines.extend(format_characterization(metrics))
     lines.extend(_component_exploration_summary_lines(materialized))
     lines.extend(_sector_epoch_summary_lines(materialized))
+    lines.extend(_endgame_cost_lines(materialized, completion_trigger))
 
     mission_started = next((
         _trace_event_time(event)

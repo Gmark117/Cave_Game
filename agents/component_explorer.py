@@ -13,7 +13,8 @@ from mapping.frontiers import (
     eight_connected_components,
     significant_frontier_mask,
 )
-from mapping.slam_map import UNKNOWN, SlamSnapshot
+from mapping.ray_geometry import bresenham_line_points
+from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
 
 
 Position = tuple[int, int]
@@ -46,6 +47,16 @@ class ScanPlanProgress:
 
 
 @dataclass(frozen=True)
+class FrontierObservationPose:
+    """A reachable route prefix from which one small frontier can be scanned."""
+
+    position: Position
+    heading: int
+    route_prefix: tuple[Position, ...]
+    saved_route_distance: float
+
+
+@dataclass(frozen=True)
 class LocalComponentNode:
     """One provisional successor explored under an authoritative claim."""
 
@@ -54,6 +65,7 @@ class LocalComponentNode:
     anchor_position: Position
     scan_heading: int
     work_unit_id: int | None = None
+    allow_standoff: bool = False
 
 
 @dataclass
@@ -87,6 +99,7 @@ class LocalDFSStack:
         anchor_position: Position,
         scan_heading: int,
         work_unit_id: int | None = None,
+        allow_standoff: bool = False,
     ) -> LocalComponentNode:
         node = LocalComponentNode(
             local_id=self._next_local_id,
@@ -94,6 +107,7 @@ class LocalDFSStack:
             anchor_position=anchor_position,
             scan_heading=int(scan_heading) % 360,
             work_unit_id=work_unit_id,
+            allow_standoff=bool(allow_standoff),
         )
         self._next_local_id += 1
         return node
@@ -149,7 +163,7 @@ class LocalDFSStack:
         return child
 
     def pop_completed(self) -> tuple[tuple[Position, ...], LocalComponentNode | None]:
-        """Pop one leaf and return its exact reverse path and next sibling."""
+        """Pop one leaf; retain its reverse path for navigation fallback."""
         if not self.frames:
             return (), None
         completed = self.frames.pop()
@@ -277,6 +291,144 @@ def _inside_scan_footprint(
     )) % 360.0
     delta = abs((bearing - float(heading) + 180.0) % 360.0 - 180.0)
     return delta <= float(sensor_fov_deg) / 2.0 + 1e-9
+
+
+def observation_pose_on_path(
+    cells: frozenset[Position],
+    slam: SlamSnapshot,
+    path: Iterable[Position],
+    *,
+    origin: Position,
+    sensor_range: float,
+    sensor_fov_deg: float,
+    confidence_threshold: float,
+) -> FrontierObservationPose | None:
+    """Choose the earliest known-clear scan pose on an existing route.
+
+    The route remains the reachability authority.  This helper only removes a
+    suffix when the complete small frontier and its adjacent unknown support
+    fit inside one locally known-clear sensor cone.  It never consults the
+    simulator's global cave map.
+    """
+    if not cells or sensor_range <= 0.0 or sensor_fov_deg <= 0.0:
+        return None
+
+    route: list[Position] = [
+        (int(origin[0]), int(origin[1])),
+    ]
+    for point in path:
+        normalized = (int(point[0]), int(point[1]))
+        if normalized != route[-1]:
+            route.append(normalized)
+
+    occupancy = np.asarray(slam.occupancy)
+    confidence = np.asarray(slam.confidence)
+    offset_x, offset_y = (int(value) for value in slam.origin)
+    height, width = occupancy.shape
+    threshold = float(confidence_threshold)
+
+    def local_index(point: Position) -> tuple[int, int] | None:
+        local_x = int(point[0]) - offset_x
+        local_y = int(point[1]) - offset_y
+        if 0 <= local_x < width and 0 <= local_y < height:
+            return local_x, local_y
+        return None
+
+    def known_free(point: Position) -> bool:
+        index = local_index(point)
+        if index is None:
+            return False
+        local_x, local_y = index
+        return bool(
+            occupancy[local_y, local_x] == FREE
+            and confidence[local_y, local_x] >= threshold
+        )
+
+    unknown_support: set[Position] = set()
+    for x, y in cells:
+        for neighbor_y in range(y - 1, y + 2):
+            for neighbor_x in range(x - 1, x + 2):
+                point = (neighbor_x, neighbor_y)
+                index = local_index(point)
+                if index is None:
+                    continue
+                local_x, local_y = index
+                if (
+                    occupancy[local_y, local_x] == UNKNOWN
+                    or confidence[local_y, local_x] < threshold
+                ):
+                    unknown_support.add(point)
+
+    if not unknown_support:
+        return None
+    aim_points = unknown_support
+    aim_x = sum(point[0] for point in aim_points) / len(aim_points)
+    aim_y = sum(point[1] for point in aim_points) / len(aim_points)
+    required_points = tuple(sorted(
+        set(cells) | unknown_support,
+        key=lambda point: (point[1], point[0]),
+    ))
+
+    suffix_distance = [0.0] * len(route)
+    for index in range(len(route) - 2, -1, -1):
+        suffix_distance[index] = (
+            suffix_distance[index + 1]
+            + math.dist(route[index], route[index + 1])
+        )
+
+    def line_is_known_clear(
+        start: Position,
+        end: Position,
+        *,
+        allow_unknown_endpoint: bool,
+    ) -> bool:
+        segment = bresenham_line_points(*start, *end)
+        checked = segment[:-1] if allow_unknown_endpoint else segment
+        return all(known_free(point) for point in checked)
+
+    for index, candidate in enumerate(route):
+        if not known_free(candidate):
+            continue
+        heading = int(round(math.degrees(math.atan2(
+            aim_x - candidate[0],
+            -(aim_y - candidate[1]),
+        )))) % 360
+        if not all(
+            _inside_scan_footprint(
+                candidate,
+                heading,
+                point,
+                sensor_range=sensor_range,
+                sensor_fov_deg=sensor_fov_deg,
+            )
+            for point in required_points
+        ):
+            continue
+        if not all(
+            line_is_known_clear(
+                candidate,
+                point,
+                allow_unknown_endpoint=False,
+            )
+            for point in cells
+        ):
+            continue
+        if not all(
+            line_is_known_clear(
+                candidate,
+                point,
+                allow_unknown_endpoint=True,
+            )
+            for point in unknown_support
+        ):
+            continue
+        return FrontierObservationPose(
+            position=candidate,
+            heading=heading,
+            route_prefix=tuple(route[:index + 1]),
+            saved_route_distance=suffix_distance[index],
+        )
+    return None
 
 
 def local_node_pose(

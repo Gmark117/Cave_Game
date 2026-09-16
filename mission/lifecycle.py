@@ -36,6 +36,10 @@ class MissionControlLifecycleMixin:
         for thread in threads:
             thread.join()
 
+        clear_docks = getattr(self, "_clear_exploration_docks", None)
+        if callable(clear_docks):
+            clear_docks(reason="shutdown")
+
         self.pathfinding.shutdown()
 
         self.clock = None

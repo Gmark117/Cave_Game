@@ -79,6 +79,11 @@ class MissionRendererTests(unittest.TestCase):
                 "exploration_complete",
                 False,
             ),
+            get_docked_drone_ids=lambda: frozenset(getattr(
+                control,
+                "docked_drone_ids",
+                (),
+            )),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -199,6 +204,59 @@ class MissionRendererTests(unittest.TestCase):
         self.assertFalse(control_center_values["music_enabled"])
         self.assertFalse(control_center_values["show_full_map"])
         self.assertTrue(control_center_values["exploration_complete"])
+
+    def test_draw_omits_vision_overlay_for_docked_drone(self) -> None:
+        events = []
+        snapshot = DroneSnapshot(
+            position=(2, 3),
+            direction=0,
+            direction_history=(),
+            path_history=((2, 3),),
+            frontiers=(),
+            returning_home=False,
+            done=False,
+            explored=True,
+            heading_deg=0.0,
+            ray_points=((2, 1),),
+            battery=100,
+            show_path=True,
+            show_vision=True,
+            frontier_rebuild_cooldown=0.25,
+            last_frontier_rebuild=0.0,
+        )
+        drone_renderer = RecordingAgentRenderer("drone", events)
+        drone = SimpleNamespace(
+            id=2,
+            color=(1, 2, 3),
+            snapshot=Mock(return_value=snapshot),
+            renderer=drone_renderer,
+        )
+        control = SimpleNamespace(
+            game=SimpleNamespace(window=RecordingWindow(events)),
+            slam_view=SimpleNamespace(draw=lambda: events.append("slam")),
+            debug_info=SimpleNamespace(
+                build_debug_lines=lambda _snapshots: [],
+                build_system_lines=lambda _snapshots: [],
+            ),
+            control_center=SimpleNamespace(
+                draw_control_center=lambda **_kwargs: None,
+            ),
+            drones=[drone],
+            rovers=[],
+            presentation=SimpleNamespace(
+                show_terrain_heatmap=False,
+                selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
+                show_full_map=False,
+            ),
+            docked_drone_ids={2},
+        )
+
+        MissionRenderer(self.make_dependencies(control)).draw()
+
+        self.assertNotIn("drone_vision", events)
+        self.assertIn("drone_path", events)
+        self.assertIn("drone_icon", events)
 
     def test_draw_skips_black_clear_when_static_background_draws(self) -> None:
         events = []

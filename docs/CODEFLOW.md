@@ -61,8 +61,8 @@ runtime are not started until `_initialize_runtime()`.
 ## Drone Movement
 
 The production policy executes bounded rover directives. A* handles task,
-probe, check-in, and homing transit; exact flown paths are stored for DFS
-backtracking and return fallback.
+logical DFS reposition, probe, check-in, and homing transit; exact flown paths
+are stored for breadcrumb and return fallback.
 
 ```mermaid
 flowchart TD
@@ -77,18 +77,20 @@ flowchart TD
     Kind -->|component| Route["A* to claimed anchor or follow leader"]
     Route --> WaitScan
     WaitScan --> Successors["extract significant local successors"]
-    Successors --> DFS["push child or reverse recorded path"]
-    DFS --> Recover{"recorded reverse still valid?"}
-    Recover -->|no| Replan["A* to DFS continuation; suspend after two failures"]
-    Replan --> DFS
-    Recover -->|yes| CheckIn["continue DFS or physical rover upload"]
+    Successors --> DFS["push child or unwind completed frames in memory"]
+    DFS --> Reposition["A* directly to next sibling or sweep anchor"]
+    Reposition -->|A* unavailable| Breadcrumb["recorded path to last visited parent"]
+    Breadcrumb -->|recovered| DFS
+    Breadcrumb -->|unreachable| Suspend
+    Reposition -->|reached| DFS
+    DFS -->|complete| CheckIn["A* or breadcrumb to physical rover upload"]
     Suspend --> CheckIn
     Probe --> CheckIn
 ```
 
 `DroneMovementController.activity_snapshot()` projects this state machine into
 immutable control-center values. The drone tab shows the active phase (task
-transit, frontier scan, DFS backtrack, return, reporting, or assignment wait),
+transit, frontier scan, DFS reposition, return, reporting, or assignment wait),
 and the debug tab includes directive/task/component identity, depth, and target.
 Rover snapshots similarly expose position, route remainder, target, battery,
 and hold/staging state. Selecting `T` on either agent tab switches the main map
@@ -310,8 +312,11 @@ drone, not by the rover coordinator.
 The configured map diagonal bounds the total rings.
 Radial rounds exist only in bootstrap. The first reconciled significant
 component moves the coordinator permanently into component exploration. Spare
-drones then follow assigned leaders; deterministic branch reservations keep
-the leader off the child a follower claims when the lineage separates.
+drones can follow leaders at the first component dispatch; that bootstrap
+opportunity closes even when every drone received its own task. Deterministic
+branch reservations keep the leader off the child a follower claims when the
+lineage separates. A follower that sees no branch and no leader movement for
+15 seconds reports back instead of waiting beside a stopped leader forever.
 
 `FrontierComponentRegistry` applies the existing significant-frontier filter
 to eight-connected geometry. Components below the ordinary size threshold
@@ -347,8 +352,11 @@ The executor discovers causally related significant frontiers from its own
 SLAM and the last sensor footprint, then explores them with `LocalDFSStack`.
 A zero-delta directed scan still follows an already visible successor because
 the ordinary sensor scheduler may have exposed it moments earlier. Every DFS
-frame stores the actual outbound path. Children are visited depth-first, siblings remain LIFO-local,
-and backtracking reverses the stored route. The depth and node count are
+frame stores the actual outbound path. Children are visited depth-first, and
+completed ancestors unwind in memory. The next sibling or sweep anchor is
+reached directly by A*; a recorded path to the last visited parent is a
+fallback if that route fails. Final reporting returns to the rover by A* with
+the complete outbound history as fallback. The depth and node count are
 bounded. The rover converts returned causal geometry into authoritative
 lineage; it does not expose global occupancy to local decisions.
 
@@ -360,9 +368,19 @@ its DFS frames, local SLAM version, remaining work, and actual return path;
 reassignment always receives a fresh claim token.
 
 Wall coverage is diagnostic only and never changes the coordinator phase.
-After bootstrap, homing begins only when every drone is physically waiting at
-the rover and no ready, blocked, claimed, active, suspended, or follower-held
-component work remains. Sensors retain their existing schedule.
+After bootstrap, the coordinator begins homing only after every drone has
+checked in and docked to the rover and no ready, blocked, claimed, active,
+suspended, or follower-held component work remains. Stale waiting check-ins
+are removed before each rover-side completion decision unless the drone is
+mechanically docked. Docked drones do not move, rotate, run A*, advance DFS, or
+sense independently.
+An awaiting drone remains docked and is carried at the rover's logical position
+through each serialized rover step. A component task, branch follow, or radial
+probe performs its existing departure exchange and then releases from the
+current rover pose. A rover scan releases in place so its explicit rotation and
+sensing can run. A HOME directive completes while the drone stays docked. If the
+coordinator finishes while every drone is docked, the rover holds its current
+position rather than finishing an already authorized route.
 The analyzer reports discovery rounds, registry state and modes, lineage,
 claims, per-unit outcomes, suspensions, wait time, and quiescence.
 
@@ -372,10 +390,21 @@ routes; service distance, terrain asperity, and wall clearance rank staging.
 Each new endpoint is immutable until reached. Endpoint announcements and
 acknowledgements move only on verified drone-drone or drone-rover contact, and
 the rover cannot depart until all drone acknowledgements have reached it.
-Drones distinguish a known proposal from their last physically confirmed
-rendezvous target. A report first returns to the confirmed endpoint so its
-acknowledgement can reach the stationary rover; if that endpoint is physically
-empty, the drone falls forward to its newer contact-carried proposal.
+Drones distinguish a known proposal from rover-confirmed endpoint knowledge
+carried by physical contact or peer relay. A returning drone that physically
+meets the rover reserves a stop, ends its return route, and queues its report
+at that encounter. The queued check-in atomically docks the drone, after which
+the rover may resume its retained route and carry it while the report is
+processed. An empty-handed check-in uses the same physical predicate at its
+current pose and after every route step, so meeting the rover ends that route
+and docks immediately. An undocked drone still returns to its selected endpoint;
+if that endpoint is physically empty, it falls forward to the freshest
+rover-confirmed stop before trying a newer proposal. Dock sessions emit one
+acquisition event and one release summary with carried distance, path, duration,
+learned endpoint epochs, and release directive. The trace analyzer separately
+reports docking, late-run display coverage,
+travel cost, and rover-local knowledge sampled at physical check-ins; display
+coverage never enters coordinator decisions.
 
 ## Pathfinding
 

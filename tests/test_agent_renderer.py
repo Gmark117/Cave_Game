@@ -152,6 +152,36 @@ class AgentRendererTests(unittest.TestCase):
 
         self.assertEqual(draw_polygon.call_count, 2)
 
+    def test_empty_sensor_rays_clear_the_cached_vision_overlay(self) -> None:
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        drone = Drone(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (255, 0, 0),
+            icon,
+            self.cave,
+        )
+        drone.runtime_state.set_ray_points([(40, 20), (24, 20)])
+        drone.renderer.draw_vision_overlay(drone.snapshot())
+        self.assertGreater(
+            int(np.count_nonzero(pygame.surfarray.array_alpha(
+                drone.renderer.vision_surface
+            ))),
+            0,
+        )
+
+        drone.runtime_state.clear_ray_points()
+        drone.renderer.draw_vision_overlay(drone.snapshot())
+
+        self.assertEqual(
+            int(np.count_nonzero(pygame.surfarray.array_alpha(
+                drone.renderer.vision_surface
+            ))),
+            0,
+        )
+
     def test_rover_renderer_owns_path_surface(self) -> None:
         icon = pygame.Surface((4, 4), pygame.SRCALPHA)
         icon.fill((255, 255, 255, 255))

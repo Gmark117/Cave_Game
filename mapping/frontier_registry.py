@@ -188,6 +188,20 @@ class RegistryReconcileResult:
     transitions: tuple[LineageTransition, ...]
     active_component_ids: tuple[ComponentId, ...]
     ready_work_unit_ids: tuple[WorkUnitId, ...]
+    low_gain_deferred_work_unit_ids: tuple[WorkUnitId, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ScanEvidence:
+    component_id: ComponentId
+    cells: frozenset[Position]
+    position: Position
+    anchor_position: Position
+    heading: int
+    anchor_heading: int
+    unknown_support: frozenset[Position]
+    newly_known_cells: int
+    confidence_gain: float
 
 
 class FrontierComponentRegistry:
@@ -229,6 +243,44 @@ class FrontierComponentRegistry:
         self._next_work_unit_id = 0
         self.components: dict[ComponentId, FrontierComponentRecord] = {}
         self.work_units: dict[WorkUnitId, ComponentWorkUnit] = {}
+        self._scan_evidence: list[_ScanEvidence] = []
+
+    def record_scan_result(
+        self,
+        work_unit_id: WorkUnitId,
+        *,
+        scan_position: Position,
+        scan_heading: int,
+        frontier_position: Position | None = None,
+        frontier_heading: int | None = None,
+        newly_known_cells: int,
+        confidence_gain: float,
+        rover_slam: SlamSnapshot,
+    ) -> None:
+        """Remember only evidence delivered with an accepted physical report."""
+        unit = self.work_units.get(int(work_unit_id))
+        if unit is None:
+            return
+        unknown = self._unknown_mask(rover_slam)
+        self._scan_evidence.append(_ScanEvidence(
+            component_id=unit.component_id,
+            cells=unit.cells,
+            position=tuple(scan_position),
+            anchor_position=(
+                unit.anchor_position
+                if frontier_position is None
+                else tuple(frontier_position)
+            ),
+            heading=int(scan_heading) % 360,
+            anchor_heading=int(
+                scan_heading if frontier_heading is None else frontier_heading
+            ) % 360,
+            unknown_support=self._unknown_support(unit.cells, unknown),
+            newly_known_cells=max(0, int(newly_known_cells)),
+            confidence_gain=max(0.0, float(confidence_gain)),
+        ))
+        # Only recent actual service is relevant to repeated endgame anchors.
+        del self._scan_evidence[:-512]
 
     def snapshot(self) -> FrontierRegistrySnapshot:
         """Return detached records in deterministic ID order."""
@@ -344,6 +396,7 @@ class FrontierComponentRegistry:
     ) -> RegistryReconcileResult:
         """Reconcile one authoritative rover snapshot into the lineage DAG."""
         started_at = time.perf_counter()
+        first_new_work_unit_id = self._next_work_unit_id
         causal = tuple(causal_transitions)
         occupancy = np.asarray(rover_slam.occupancy)
         confidence = np.asarray(rover_slam.confidence)
@@ -514,6 +567,10 @@ class FrontierComponentRegistry:
             causal,
             tuple(transitions),
         )
+        low_gain_deferred = self._apply_low_gain_memory(
+            unknown,
+            first_new_work_unit_id,
+        )
 
         return RegistryReconcileResult(
             revision=self.revision,
@@ -528,7 +585,119 @@ class FrontierComponentRegistry:
             ready_work_unit_ids=tuple(
                 unit.work_unit_id for unit in self.ready_work_units()
             ),
+            low_gain_deferred_work_unit_ids=low_gain_deferred,
         )
+
+    def _unknown_mask(self, slam: SlamSnapshot) -> np.ndarray:
+        occupancy = np.asarray(slam.occupancy)
+        confidence = np.asarray(slam.confidence)
+        return (
+            (occupancy == UNKNOWN)
+            | (confidence < self.confidence_threshold)
+        )
+
+    @staticmethod
+    def _unknown_support(
+        cells: Iterable[Position],
+        unknown: np.ndarray,
+    ) -> frozenset[Position]:
+        height, width = unknown.shape
+        return frozenset(
+            (neighbor_x, neighbor_y)
+            for x, y in cells
+            for neighbor_y in range(max(0, y - 1), min(height, y + 2))
+            for neighbor_x in range(max(0, x - 1), min(width, x + 2))
+            if unknown[neighbor_y, neighbor_x]
+        )
+
+    def _ancestor_ids(self, component_id: ComponentId) -> set[ComponentId]:
+        ancestors: set[ComponentId] = set()
+        pending = [int(component_id)]
+        while pending:
+            current = pending.pop()
+            if current in ancestors:
+                continue
+            ancestors.add(current)
+            component = self.components.get(current)
+            if component is not None:
+                pending.extend(component.parent_ids)
+        return ancestors
+
+    def _apply_low_gain_memory(
+        self,
+        unknown: np.ndarray,
+        first_new_work_unit_id: WorkUnitId,
+    ) -> tuple[WorkUnitId, ...]:
+        """Retire repeated low-yield anchors, preserving sibling work."""
+        deferred: list[WorkUnitId] = []
+        for unit_id in range(first_new_work_unit_id, self._next_work_unit_id):
+            unit = self.work_units[unit_id]
+            component = self.components[unit.component_id]
+            if unit.state != WorkUnitState.READY:
+                continue
+            if len(component.geometry.cells) < self.minimum_component_cells:
+                # Small significant gateways are eligible on their own merit.
+                continue
+            if any(
+                self.components[parent_id].state == ComponentState.SPLIT
+                for parent_id in component.parent_ids
+            ):
+                continue
+            ancestors = self._ancestor_ids(unit.component_id)
+            matches: list[_ScanEvidence] = []
+            for evidence in reversed(self._scan_evidence):
+                if evidence.component_id not in ancestors:
+                    continue
+                if unit.anchor_position != evidence.anchor_position:
+                    # A moved gateway is new service opportunity, even when
+                    # its component remains inside an old sensor footprint.
+                    continue
+                heading_difference = abs(
+                    (
+                        unit.scan_headings[0]
+                        - evidence.anchor_heading
+                        + 180
+                    ) % 360
+                    - 180
+                ) if unit.scan_headings else 0
+                if heading_difference > self.footprint.fov_deg / 2:
+                    continue
+                shared_cells = len(unit.cells & evidence.cells)
+                if shared_cells < max(
+                    1, math.ceil(min(len(unit.cells), len(evidence.cells)) / 4),
+                ):
+                    continue
+                matches.append(evidence)
+                if len(matches) == 2:
+                    break
+            if len(matches) < 2 or any(
+                evidence.newly_known_cells > 1
+                or evidence.confidence_gain > 1.0
+                for evidence in matches
+            ):
+                continue
+            newest, older = matches
+            current_support = self._unknown_support(unit.cells, unknown)
+            if (
+                newest.unknown_support - older.unknown_support
+                or current_support - newest.unknown_support
+            ):
+                continue
+            unit.state = WorkUnitState.VISITED
+            unit.terminal_reason = "lineage_low_gain"
+            deferred.append(unit_id)
+            if not any(
+                self.work_units[other_id].state in {
+                    WorkUnitState.READY,
+                    WorkUnitState.CLAIMED,
+                    WorkUnitState.ACTIVE,
+                    WorkUnitState.BLOCKED,
+                }
+                for other_id in component.work_unit_ids
+            ):
+                component.state = ComponentState.DORMANT
+                component.dormant_reason = "lineage_low_gain"
+        return tuple(deferred)
 
     def _apply_causal_visits(
         self,

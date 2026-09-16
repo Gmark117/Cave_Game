@@ -133,6 +133,11 @@ class Rover:
 
     def move(self) -> None:
         """Move only after the next endpoint is universally acknowledged."""
+        if self.navigation.rover_targets.should_hold(self.id):
+            # A physical report encounter can happen halfway along a route.
+            # Keep the remaining steps so movement resumes after acceptance.
+            self.status = 'Rendezvous'
+            return
         if self.current_path:
             self.status = 'Advancing'
             self.pos = self.current_path.pop(0)
@@ -147,10 +152,6 @@ class Rover:
                     target=self.target,
                     position=self.pos,
                 )
-            return
-
-        if self.navigation.rover_targets.should_hold(self.id):
-            self.status = 'Rendezvous'
             return
 
         if (
@@ -193,13 +194,28 @@ class Rover:
             return
 
         self.status = 'Updating'
-        target = self.navigation.rover_targets.acquire(self.id, self.pos)
+        target = self.navigation.rover_targets.acquire(
+            self.id,
+            self.pos,
+            sim_time=self.navigation.simulation_time(),
+        )
         if target is None:
             self.status = 'Ready'
             return
 
         path = self.navigation.compute_rover_path(self.id, self.pos, target)
         if len(path) <= 1 and self.pos != target:
+            self.navigation.rover_targets.reject_failed_route(
+                self.id,
+                self.pos,
+                target,
+                sim_time=self.navigation.simulation_time(),
+            )
+            self._trace(
+                "rover_frontier_route_failed",
+                start=self.pos,
+                target=target,
+            )
             self.navigation.rover_targets.release(self.id, completed=False)
             self.status = 'Ready'
             return

@@ -7,20 +7,22 @@ import math
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Tuple
+from typing import Any, Callable, Iterable, Tuple
 
 import numpy as np
 
 from agents.component_explorer import (
+    FrontierObservationPose,
     LocalComponentNode,
     LocalDFSStack,
     ScanPlanProgress,
     local_node_pose,
+    observation_pose_on_path,
     related_local_successors,
 )
 from asset_config.helpers import next_cell_coords
 from contracts import DroneMovementDependencies
-from mapping.frontier_registry import CausalTransition
+from mapping.frontier_registry import CausalTransition, WorkUnitKind
 from mapping.frontiers import (
     eight_connected_components,
     eight_neighbor_adjacency,
@@ -79,7 +81,10 @@ class _CoordinationExecution:
     outbound_actual_path: tuple[Position, ...] = ()
     return_actual_path: tuple[Position, ...] = ()
     return_path_source: str = "none"
-    pending_backtrack: tuple[Position, ...] = ()
+    root_outbound_distance: float = 0.0
+    service_distance: float = 0.0
+    reposition_target: Position | None = None
+    reposition_fallback_target: Position | None = None
     route_attempts: int = 0
     completed_scan_headings: list[int] | None = None
     timed_out_scan_headings: list[int] | None = None
@@ -88,6 +93,9 @@ class _CoordinationExecution:
     local_routes: dict[int, tuple[Position, ...]] | None = None
     transit_node_id: int | None = None
     transit_path_start_index: int | None = None
+    observation_node_id: int | None = None
+    observation_position: Position | None = None
+    observation_heading: int | None = None
     return_path_start_index: int | None = None
     pending_return_breadcrumb: tuple[Position, ...] = ()
     suspension_reason: str | None = None
@@ -96,10 +104,13 @@ class _CoordinationExecution:
     visited_successor_anchors: list[Position] | None = None
     pending_authoritative_nodes: list[LocalComponentNode] | None = None
     energy_checkpoint_key: tuple[Any, ...] | None = None
-    backtrack_attempts: int = 0
+    reposition_attempts: int = 0
     reserved_branch_count: int = 0
+    thin_successor_count: int = 0
     follow_started_at: float | None = None
     follow_last_leader_seen_at: float | None = None
+    follow_last_leader_progress_at: float | None = None
+    follow_last_leader_position: Position | None = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +486,11 @@ class DroneMovementController:
         """Request a frontier refresh on the owning movement thread."""
         self._shared_slam_changed.set()
 
+    def is_docked(self) -> bool:
+        """Return the mission controller's physical dock state for this drone."""
+        callback = self.dependencies.is_exploration_docked
+        return bool(callable(callback) and callback(self.drone.id))
+
     def activity_snapshot(self) -> DroneActivitySnapshot:
         """Describe the current policy phase without exposing mutable cursors."""
         runtime = self.drone.snapshot()
@@ -485,6 +501,20 @@ class DroneMovementController:
                 "Homing",
                 f"home {self.drone.start_pos[0]},{self.drone.start_pos[1]}",
                 target=tuple(self.drone.start_pos),
+            )
+
+        if self.is_docked():
+            report = self._coordination_report
+            if report is not None:
+                return DroneActivitySnapshot(
+                    "Docked",
+                    f"at rover; report {report.report_id} pending",
+                    directive_id=report.directive_id,
+                    directive_kind=report.kind.value,
+                )
+            return DroneActivitySnapshot(
+                "Docked",
+                "with rover; coordinator reply pending",
             )
 
         execution = self._coordination_execution
@@ -498,12 +528,8 @@ class DroneMovementController:
                 None if frame is None else frame.node.work_unit_id
             )
             target: Position | None = None
-            if execution.phase == "backtracking":
-                target = (
-                    execution.pending_backtrack[-1]
-                    if execution.pending_backtrack
-                    else None
-                )
+            if execution.phase == "repositioning":
+                target = execution.reposition_target
             elif execution.phase == "returning":
                 target = self._rendezvous_position()
             elif frame is not None:
@@ -516,12 +542,12 @@ class DroneMovementController:
             states = {
                 (DirectiveKind.COMPONENT_TASK, "transit"): "Task transit",
                 (DirectiveKind.COMPONENT_TASK, "scanning"): "Frontier scan",
-                (DirectiveKind.COMPONENT_TASK, "backtracking"): "DFS backtrack",
+                (DirectiveKind.COMPONENT_TASK, "repositioning"): "DFS reposition",
                 (DirectiveKind.COMPONENT_TASK, "returning"): "Rover return",
                 (DirectiveKind.COMPONENT_FOLLOW, "following"): "Branch follow",
                 (DirectiveKind.COMPONENT_FOLLOW, "transit"): "Branch transit",
                 (DirectiveKind.COMPONENT_FOLLOW, "scanning"): "Branch scan",
-                (DirectiveKind.COMPONENT_FOLLOW, "backtracking"): "DFS backtrack",
+                (DirectiveKind.COMPONENT_FOLLOW, "repositioning"): "DFS reposition",
                 (DirectiveKind.COMPONENT_FOLLOW, "returning"): "Rover return",
                 (DirectiveKind.RADIAL_PROBE, "transit"): "Probe transit",
                 (DirectiveKind.RADIAL_PROBE, "scanning"): "Probe scan",
@@ -549,9 +575,9 @@ class DroneMovementController:
                 )
             if target is not None:
                 detail_parts.append(f"target {target[0]},{target[1]}")
-            if execution.phase == "backtracking":
+            if execution.phase == "repositioning":
                 detail_parts.append(
-                    f"retry {execution.backtrack_attempts}"
+                    f"retry {execution.reposition_attempts}"
                 )
             return DroneActivitySnapshot(
                 state=state,
@@ -565,7 +591,8 @@ class DroneMovementController:
                 dfs_depth=0 if dfs is None else len(dfs.frames),
             )
 
-        if self._coordination_report is not None:
+        report = self._coordination_report
+        if report is not None:
             rover = self._rendezvous_position()
             rendezvous = (
                 ""
@@ -575,7 +602,7 @@ class DroneMovementController:
             return DroneActivitySnapshot(
                 "Reporting",
                 (
-                    f"directive {self._coordination_report.directive_id}"
+                    f"directive {report.directive_id}"
                     f"{rendezvous}"
                 ),
                 target=rover,
@@ -753,6 +780,11 @@ class DroneMovementController:
 
     def _move_component_policy(self) -> None:
         """Advance one rover directive while keeping sensing drone-local."""
+        if self.is_docked():
+            ready = self._coordination_ready
+            if ready is not None and ready.is_set():
+                self._advance_component_check_in()
+            return
         shared_change = self._refresh_frontiers_before_mission_state()
         if shared_change and self._coordination_execution is not None:
             self._revalidate_component_target_after_share(
@@ -773,25 +805,28 @@ class DroneMovementController:
     def _revalidate_component_target_after_share(
         self,
         execution: _CoordinationExecution,
-    ) -> None:
+    ) -> bool:
         """Retarget stale local work from newly received peer SLAM."""
-        if execution.directive.kind != DirectiveKind.COMPONENT_TASK:
-            return
-        if execution.phase not in {"transit", "scanning"}:
-            return
+        if execution.directive.kind not in {
+            DirectiveKind.COMPONENT_TASK,
+            DirectiveKind.COMPONENT_FOLLOW,
+        }:
+            return False
+        if execution.phase not in {"transit", "scanning", "repositioning"}:
+            return False
         if execution.scan is not None and execution.scan.requested_at is not None:
-            return
+            return False
         dfs = execution.dfs
         frame = None if dfs is None else dfs.current
         if dfs is None or frame is None:
-            return
+            return False
         anchor = frame.node.anchor_position
         active_radius = max(2.0, float(self.frontier_stride * 2))
         if any(
             math.dist(anchor, frontier) <= active_radius
             for frontier in self._last_raw_frontiers
         ):
-            return
+            return False
 
         local_slam = self.drone.slam_map.snapshot(point_limit=0)
         successors = related_local_successors(
@@ -834,6 +869,12 @@ class DroneMovementController:
             execution.route_attempts = 0
             execution.transit_node_id = None
             execution.transit_path_start_index = None
+            execution.observation_node_id = None
+            execution.observation_position = None
+            execution.observation_heading = None
+            execution.reposition_target = None
+            execution.reposition_fallback_target = None
+            execution.reposition_attempts = 0
             self._trace(
                 "drone_component_target_adjusted_after_share",
                 directive_id=execution.directive.directive_id,
@@ -843,7 +884,7 @@ class DroneMovementController:
                 replacement_anchor=replacement.anchor_position,
                 shared_slam_version=local_slam.version,
             )
-            return
+            return True
 
         if frame.node.work_unit_id is not None:
             execution.work_unit_outcomes.append(WorkUnitOutcome(
@@ -865,8 +906,24 @@ class DroneMovementController:
             shared_slam_version=local_slam.version,
         )
         self._pop_component_frame(execution)
+        return True
 
-    def _advance_component_check_in(self) -> None:
+    def _component_route_invalidated_after_share(
+        self,
+        execution: _CoordinationExecution,
+    ) -> bool:
+        """Apply a received peer map and stop only if it changes local work."""
+        if not self._shared_slam_changed.is_set():
+            return False
+        if not self._refresh_frontiers_before_mission_state():
+            return False
+        return self._revalidate_component_target_after_share(execution)
+
+    def _advance_component_check_in(
+        self,
+        *,
+        encounter_source: str | None = None,
+    ) -> None:
         """Return/upload once, then consume the rover's signalled directive."""
         callback = self.dependencies.exploration_check_in
         assignment_callback = self.dependencies.exploration_assignment
@@ -878,33 +935,107 @@ class DroneMovementController:
             return
         ready = self._coordination_ready
         if ready is not None:
-            if not ready.is_set():
+            contact = self.dependencies.exploration_contact
+            if callable(contact) and not contact(self.drone.id):
+                # The rover can leave an acknowledged rendezvous while this
+                # drone awaits teammates. Rejoin before claiming any directive.
+                self._coordination_ready = None
+                self._coordination_wait_started_at = None
+                self._trace("drone_coordination_wait_contact_lost")
+            elif not ready.is_set():
                 return
-            result = assignment_callback(self.drone.id)
-            if (
-                isinstance(result, CoordinationResult)
-                and result.report_accepted
-            ):
-                self._coordination_report = None
-            self._apply_coordination_result(result)
-            return
+            else:
+                result = assignment_callback(self.drone.id)
+                if isinstance(result, CoordinationResult) and not result.arrived:
+                    # A worker-side contact check may fail after a queued
+                    # attempt. Keep the report for a fresh physical check-in.
+                    self._coordination_ready = None
+                    self._coordination_wait_started_at = None
+                    return
+                if (
+                    isinstance(result, CoordinationResult)
+                    and result.report_accepted
+                ):
+                    self._coordination_report = None
+                self._apply_coordination_result(result)
+                return
 
         current = self.drone.snapshot().position
         rover_position = self._rendezvous_position()
         if rover_position is None:
             return
-        if current != rover_position:
-            if not self._return_to_coordination_point(rover_position):
-                return
         report = self._coordination_report
-        result = callback(self.drone.id, report)
+
+        def trace_encounter(source: str, result: Any) -> None:
+            if report is None:
+                return
+            self._trace(
+                "drone_report_encounter",
+                report_id=report.report_id,
+                directive_id=report.directive_id,
+                source=source,
+                position=self.drone.snapshot().position,
+                remembered_endpoint=rover_position,
+                queued=(
+                    isinstance(result, CoordinationResult) and result.arrived
+                ),
+            )
+
+        result = None
+        if report is not None:
+            # A moving rover may be in direct contact even while this drone's
+            # remembered endpoint is elsewhere. The callback performs its
+            # physical check and queues under the same lock as rover movement.
+            result = callback(self.drone.id, report)
+            if encounter_source is not None:
+                trace_encounter(encounter_source, result)
+                encounter_source = None
+            elif (
+                isinstance(result, CoordinationResult)
+                and result.arrived
+                and current != rover_position
+            ):
+                trace_encounter("reporting_contact", result)
+            if isinstance(result, CoordinationResult) and result.arrived:
+                if result.report_accepted:
+                    self._coordination_report = None
+                self._apply_coordination_result(result)
+                return
+        else:
+            request_dock = self.dependencies.request_exploration_dock
+            if callable(request_dock):
+                result = request_dock(self.drone.id)
+                if isinstance(result, CoordinationResult) and result.arrived:
+                    self._apply_coordination_result(result)
+                    return
+        if current != rover_position:
+            reached, encountered = self._return_to_coordination_point(
+                rover_position,
+                dock_during_check_in=(report is None),
+            )
+            if not reached:
+                return
+            if encountered and report is None:
+                return
+            result = callback(self.drone.id, report)
+            if encountered:
+                trace_encounter("reporting_path", result)
+        elif result is None:
+            result = callback(self.drone.id, report)
         if (
             isinstance(result, CoordinationResult)
             and result.arrived
             and (report is None or result.report_accepted)
         ):
             self._coordination_report = None
-        elif self.drone.snapshot().position == rover_position:
+        elif (
+            isinstance(result, CoordinationResult)
+            and not result.arrived
+            and self.drone.snapshot().position == rover_position
+        ):
+            # A queued physical check-in has arrived even while its report is
+            # pending rover-worker acceptance. Only an actual missed contact
+            # can justify abandoning this rendezvous point.
             missed = self.dependencies.rendezvous_endpoint_missed
             if callable(missed):
                 next_endpoint = missed(self.drone.id, rover_position)
@@ -997,6 +1128,9 @@ class DroneMovementController:
                     unit.anchor_position,
                     unit.scan_headings[0] if unit.scan_headings else 0,
                     work_unit_id=unit.work_unit_id,
+                    allow_standoff=(
+                        unit.kind == WorkUnitKind.FOCUSED_ANCHOR
+                    ),
                 )
                 for unit in directive.work_units
             )
@@ -1020,6 +1154,7 @@ class DroneMovementController:
             )
             execution.follow_started_at = self._simulation_time()
             execution.follow_last_leader_seen_at = self._simulation_time()
+            execution.follow_last_leader_progress_at = self._simulation_time()
         self._coordination_execution = execution
         self._trace(
             "drone_component_directive_started",
@@ -1050,7 +1185,7 @@ class DroneMovementController:
         kind = execution.directive.kind
         if (
             kind != DirectiveKind.ROVER_SCAN
-            and execution.phase not in {"returning", "backtracking"}
+            and execution.phase not in {"returning", "repositioning"}
             and self._coordination_energy_checkpoint_due(execution)
             and self._energy_requires_return(execution)
         ):
@@ -1145,6 +1280,24 @@ class DroneMovementController:
         now = self._simulation_time()
         if leader_position is not None:
             execution.follow_last_leader_seen_at = now
+            last_position = execution.follow_last_leader_position
+            if (
+                last_position is None
+                or math.dist(last_position, leader_position) >= 2.0
+            ):
+                execution.follow_last_leader_position = leader_position
+                execution.follow_last_leader_progress_at = now
+            last_progress = execution.follow_last_leader_progress_at
+            if last_progress is not None and now - last_progress >= 15.0:
+                self._trace(
+                    "drone_component_branch_follow_ended",
+                    directive_id=directive.directive_id,
+                    leader_drone_id=leader_id,
+                    component_id=execution.root_component_id,
+                    reason="leader_visible_without_progress",
+                )
+                self._finish_coordination_execution(execution)
+                return
             current = self.drone.snapshot().position
             if math.dist(current, leader_position) > max(
                 2.0,
@@ -1200,14 +1353,19 @@ class DroneMovementController:
             rover = self._rendezvous_position()
             if rover is None:
                 return
-            if not self._return_to_coordination_point(
+            reached, encountered = self._return_to_coordination_point(
                 rover,
                 breadcrumb=execution.pending_return_breadcrumb
                 or tuple(reversed(execution.outbound_actual_path)),
                 execution=execution,
-            ):
+            )
+            if not reached:
                 return
             self._finish_coordination_execution(execution)
+            if encountered:
+                self._advance_component_check_in(
+                    encounter_source="returning_path",
+                )
 
     def _advance_component_task(self, execution: _CoordinationExecution) -> None:
         dfs = execution.dfs
@@ -1216,76 +1374,24 @@ class DroneMovementController:
             rover = self._rendezvous_position()
             if rover is None:
                 return
-            if not self._return_to_coordination_point(
+            reached, encountered = self._return_to_coordination_point(
                 rover,
                 breadcrumb=execution.pending_return_breadcrumb,
                 execution=execution,
-            ):
+            )
+            if not reached:
                 return
             self._finish_coordination_execution(execution)
+            if encountered:
+                self._advance_component_check_in(
+                    encounter_source="returning_path",
+                )
             return
         if dfs is None or frame is None:
             self._finish_coordination_execution(execution)
             return
-        if execution.phase == "backtracking":
-            if execution.pending_backtrack:
-                return_start = max(
-                    0, len(self.drone.snapshot().path_history) - 1,
-                )
-                destination = execution.pending_backtrack[-1]
-                followed = self._follow_path(
-                    execution.pending_backtrack,
-                    source="component_dfs_backtrack",
-                )
-                if (
-                    not followed
-                    or self.drone.snapshot().position != destination
-                ):
-                    execution.backtrack_attempts += 1
-                    current = self.drone.snapshot().position
-                    recovery = self._compute_path(current, destination)
-                    recovered = bool(recovery.path) and self._follow_path(
-                        recovery.path,
-                        source="component_dfs_backtrack_replan",
-                    )
-                    self._trace(
-                        "drone_dfs_backtrack_replanned",
-                        directive_id=execution.directive.directive_id,
-                        start=current,
-                        target=destination,
-                        path_status=recovery.status,
-                        path_length=len(recovery.path),
-                        attempt=execution.backtrack_attempts,
-                        recovered=(
-                            recovered
-                            and self.drone.snapshot().position == destination
-                        ),
-                    )
-                    if (
-                        not recovered
-                        or self.drone.snapshot().position != destination
-                    ):
-                        if execution.backtrack_attempts >= 2:
-                            execution.pending_backtrack = ()
-                            self._prepare_execution_return(
-                                execution,
-                                reason="dfs_backtrack_unreachable",
-                            )
-                        return
-                self._trace(
-                    "drone_dfs_backtracked",
-                    directive_id=execution.directive.directive_id,
-                    point_count=len(execution.pending_backtrack),
-                    depth=len(dfs.frames),
-                )
-                execution.pending_backtrack = ()
-                execution.backtrack_attempts = 0
-                if dfs.current is None:
-                    execution.return_actual_path = self._path_history_since(
-                        return_start
-                    )
-                    execution.return_path_source = "dfs_breadcrumb"
-            self._continue_component_dfs(execution)
+        if execution.phase == "repositioning":
+            self._advance_component_reposition(execution)
             return
         if execution.phase == "transit":
             if execution.transit_node_id != frame.node.local_id:
@@ -1293,6 +1399,9 @@ class DroneMovementController:
                 execution.transit_path_start_index = max(
                     0, len(self.drone.snapshot().path_history) - 1,
                 )
+                execution.observation_node_id = None
+                execution.observation_position = None
+                execution.observation_heading = None
             preferred = (
                 execution.directive.outbound_route
                 if frame.node.local_id == 0
@@ -1305,6 +1414,7 @@ class DroneMovementController:
                 frame.node.anchor_position,
                 source="component_task_transit",
                 preferred_route=preferred,
+                observation_node=frame.node,
             ):
                 return
             actual_path = self._path_history_since(
@@ -1315,9 +1425,19 @@ class DroneMovementController:
             dfs.record_outbound(actual_path)
             if frame.node.local_id == 0:
                 execution.outbound_actual_path = actual_path
+                execution.root_outbound_distance = (
+                    self._polyline_distance(actual_path)
+                )
             execution.scan = ScanPlanProgress(
-                position=frame.node.anchor_position,
-                headings=(frame.node.scan_heading,),
+                position=(
+                    execution.observation_position
+                    or frame.node.anchor_position
+                ),
+                headings=((
+                    execution.observation_heading
+                    if execution.observation_heading is not None
+                    else frame.node.scan_heading
+                ),),
                 started_at=self._simulation_time(),
             )
             execution.phase = "scanning"
@@ -1363,6 +1483,13 @@ class DroneMovementController:
                 disposition=disposition,
                 sensor_newly_known_cells=scan.newly_known_cells,
                 sensor_confidence_gain=scan.confidence_gain,
+                scan_position=scan.position,
+                scan_heading=(
+                    scan.headings[0]
+                    if scan.headings else frame.node.scan_heading
+                ),
+                frontier_position=frame.node.anchor_position,
+                frontier_heading=frame.node.scan_heading,
             ))
             if work_unit_id == execution.root_work_unit_id:
                 execution.root_scanned = True
@@ -1409,6 +1536,11 @@ class DroneMovementController:
             execution.causal_successors.extend(successors)
 
         nodes = self._reachable_local_nodes(execution, successors)
+        thin_node = None
+        if not nodes and successors:
+            thin_node = self._thin_local_successor(execution, successors)
+            if thin_node is not None:
+                nodes = (thin_node,)
         if execution.reserved_branch_count > 0 and len(nodes) > 1:
             nodes = self._ordered_branch_nodes(nodes)
             reserved = min(
@@ -1425,6 +1557,14 @@ class DroneMovementController:
                 remaining_reservations=execution.reserved_branch_count,
             )
         child = dfs.record_scan(nodes)
+        if child is not None and child is thin_node:
+            execution.thin_successor_count += 1
+            self._trace(
+                "drone_component_thin_successor_followed",
+                directive_id=execution.directive.directive_id,
+                anchor=child.anchor_position,
+                count=execution.thin_successor_count,
+            )
         self._trace(
             "drone_work_unit_completed",
             directive_id=execution.directive.directive_id,
@@ -1506,7 +1646,12 @@ class DroneMovementController:
             route = self._compute_path(current, anchor)
             if route.status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
                 continue
-            node = dfs.new_node(cells, anchor, heading)
+            node = dfs.new_node(
+                cells,
+                anchor,
+                heading,
+                allow_standoff=True,
+            )
             path = tuple(route.path)
             ranked.append((
                 self._path_distance(current, path, len(path)),
@@ -1519,32 +1664,104 @@ class DroneMovementController:
             execution.local_routes[node.local_id] = path
         return tuple(item[2] for item in ranked)
 
+    def _thin_local_successor(
+        self,
+        execution: _CoordinationExecution,
+        successors: Iterable[frozenset[Position]],
+    ) -> LocalComponentNode | None:
+        """Continue a locally advancing frontier inside normal scan spacing."""
+        dfs = execution.dfs
+        frame = None if dfs is None else dfs.current
+        if (
+            dfs is None
+            or frame is None
+            or execution.thin_successor_count >= 8
+            or dfs.created_nodes >= dfs.maximum_nodes
+            or len(dfs.frames) >= dfs.maximum_depth
+        ):
+            return None
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+        current = self.drone.snapshot().position
+        old_support = self._local_unknown_support(slam, frame.node.cells)
+        excluded = set(dfs.visited_anchors)
+        excluded.add(frame.node.anchor_position)
+        for cells in successors:
+            if not (self._local_unknown_support(slam, cells) - old_support):
+                continue
+            pose = local_node_pose(
+                cells,
+                slam,
+                origin=current,
+                excluded_anchors=excluded,
+                minimum_anchor_spacing=1.0,
+            )
+            if pose is None:
+                continue
+            anchor, heading = pose
+            if math.dist(
+                anchor, frame.node.anchor_position,
+            ) + 1e-9 >= self._sweep_anchor_spacing():
+                # A distant or unreachable successor is ordinary component
+                # work, not a thin continuation of this scan footprint.
+                continue
+            route = self._compute_path(current, anchor)
+            if route.status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
+                continue
+            node = dfs.new_node(
+                cells,
+                anchor,
+                heading,
+                allow_standoff=True,
+            )
+            execution.local_routes[node.local_id] = tuple(route.path)
+            return node
+        return None
+
+    def _local_unknown_support(
+        self,
+        slam: Any,
+        cells: Iterable[Position],
+    ) -> frozenset[Position]:
+        occupancy = np.asarray(slam.occupancy)
+        confidence = np.asarray(slam.confidence)
+        unknown = (
+            (occupancy == UNKNOWN)
+            | (confidence < self.frontier_confidence_threshold)
+        )
+        height, width = unknown.shape
+        return frozenset(
+            (neighbor_x, neighbor_y)
+            for x, y in cells
+            for neighbor_y in range(max(0, y - 1), min(height, y + 2))
+            for neighbor_x in range(max(0, x - 1), min(width, x + 2))
+            if unknown[neighbor_y, neighbor_x]
+        )
+
     def _pop_component_frame(self, execution: _CoordinationExecution) -> None:
         dfs = execution.dfs
         if dfs is None:
             self._finish_coordination_execution(execution)
             return
-        if (
-            len(dfs.frames) == 1
-            and execution.pending_authoritative_nodes
-            and dfs.current is not None
-        ):
-            # Sweep anchors belong to one component claim.  Continue along the
-            # frontier from the current anchor instead of returning to the
-            # previous anchor between every footprint-sized scan.
-            dfs.current.outbound_actual_path = ()
+        if len(dfs.frames) > 1:
+            parent = dfs.frames[-2]
+            parent.pending_children = self._rank_pending_component_nodes(
+                execution,
+                parent.pending_children,
+            )
         backtrack, sibling = dfs.pop_completed()
         self._trace(
             "drone_dfs_popped",
             directive_id=execution.directive.directive_id,
             remaining_depth=len(dfs.frames),
-            backtrack_point_count=len(backtrack),
+            recorded_breadcrumb_points=len(backtrack),
             next_sibling_id=None if sibling is None else sibling.local_id,
         )
-        if backtrack:
-            execution.pending_backtrack = backtrack
-            execution.backtrack_attempts = 0
-            execution.phase = "backtracking"
+        if sibling is not None and dfs.current is not None:
+            self._begin_component_reposition(
+                execution,
+                target=sibling.anchor_position,
+                fallback_target=dfs.current.parent_position,
+            )
             return
         self._continue_component_dfs(execution)
 
@@ -1557,12 +1774,24 @@ class DroneMovementController:
         if frame is None:
             pending = execution.pending_authoritative_nodes or []
             if dfs is not None and pending:
+                pending[:] = self._rank_pending_component_nodes(
+                    execution,
+                    pending,
+                )
+            if dfs is not None and pending:
                 node = pending.pop(0)
+                history = self._path_history_since(
+                    execution.path_start_index
+                )
                 dfs.start(
                     node,
                     parent_position=self.drone.snapshot().position,
                 )
-                execution.phase = "transit"
+                self._begin_component_reposition(
+                    execution,
+                    target=node.anchor_position,
+                    fallback_target=history[0] if history else None,
+                )
                 self._trace(
                     "drone_component_sweep_advanced",
                     directive_id=execution.directive.directive_id,
@@ -1572,11 +1801,16 @@ class DroneMovementController:
                     remaining_anchor_count=len(pending),
                 )
                 return
-            self._finish_coordination_execution(execution)
+            self._prepare_completed_component_return(execution)
             return
         if not frame.scanned:
             execution.phase = "transit"
             return
+        if frame.pending_children:
+            frame.pending_children = self._rank_pending_component_nodes(
+                execution,
+                frame.pending_children,
+            )
         if frame.pending_children:
             child = frame.pending_children.pop(0)
             dfs.frames.append(type(frame)(
@@ -1587,6 +1821,384 @@ class DroneMovementController:
             return
         self._pop_component_frame(execution)
 
+    def _rank_pending_component_nodes(
+        self,
+        execution: _CoordinationExecution,
+        pending: Iterable[LocalComponentNode],
+    ) -> list[LocalComponentNode]:
+        """Prune stale siblings, then use cheap current-position ordering."""
+        nodes = tuple(pending)
+        if not nodes:
+            return []
+        if self.drone.slam_map.version != self._frontier_slam_version:
+            self.rebuild_frontiers(
+                stride=self.frontier_stride,
+                confidence_threshold=self.frontier_confidence_threshold,
+            )
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+        frontier_mask = self._last_frontier_mask
+        current = self.drone.snapshot().position
+        if frontier_mask is None:
+            return sorted(
+                nodes,
+                key=lambda node: (
+                    math.dist(current, node.anchor_position),
+                    node.local_id,
+                ),
+            )
+        dfs = execution.dfs
+        visited = () if dfs is None else tuple(dfs.visited_anchors)
+        radius = max(2, self.frontier_stride * 2)
+        height, width = frontier_mask.shape
+        near_by_id: dict[int, bool] = {}
+        for node in nodes:
+            x, y = node.anchor_position
+            near_by_id[node.local_id] = bool(
+                0 <= x < width
+                and 0 <= y < height
+                and np.any(frontier_mask[
+                    max(0, y - radius):min(height, y + radius + 1),
+                    max(0, x - radius):min(width, x + radius + 1),
+                ])
+            )
+        stale = tuple(
+            node for node in nodes if not near_by_id[node.local_id]
+        )
+        lineage_radius = max(
+            self.frontier_stride * 2,
+            min(
+                self.global_frontier_cell_size,
+                int(math.ceil(self._sensor_range() / 2.0)),
+            ),
+        )
+        successors = (
+            related_local_successors(
+                slam,
+                frozenset(point for node in stale for point in node.cells),
+                confidence_threshold=self.frontier_confidence_threshold,
+                minimum_component_cells=self.minimum_frontier_cluster_cells,
+                minimum_unknown_support_cells=max(
+                    1,
+                    int(getattr(
+                        self.drone.settings.frontier,
+                        "minimum_unknown_support_cells",
+                        64,
+                    )),
+                ),
+                lineage_radius=lineage_radius,
+            )
+            if stale else ()
+        )
+        viable: list[LocalComponentNode] = []
+        reserved_anchors = set(visited)
+        for node in nodes:
+            replacement = node
+            if not near_by_id[node.local_id]:
+                replacement = None
+                for cells in successors:
+                    if min(
+                        (math.dist(node.anchor_position, point)
+                         for point in cells),
+                        default=math.inf,
+                    ) > lineage_radius:
+                        continue
+                    pose = local_node_pose(
+                        cells,
+                        slam,
+                        origin=current,
+                        excluded_anchors=reserved_anchors,
+                        minimum_anchor_spacing=1.0,
+                    )
+                    if pose is not None:
+                        replacement = replace(
+                            node,
+                            cells=cells,
+                            anchor_position=pose[0],
+                            scan_heading=pose[1],
+                        )
+                        break
+            if replacement is None:
+                if node.work_unit_id is not None:
+                    execution.work_unit_outcomes.append(WorkUnitOutcome(
+                        work_unit_id=node.work_unit_id,
+                        disposition="shared_resolved",
+                    ))
+                self._trace(
+                    "drone_component_pending_node_retired",
+                    directive_id=execution.directive.directive_id,
+                    local_node_id=node.local_id,
+                    work_unit_id=node.work_unit_id,
+                )
+                continue
+            if replacement is not node:
+                execution.local_routes.pop(node.local_id, None)
+            viable.append(replacement)
+            reserved_anchors.add(replacement.anchor_position)
+        return sorted(
+            viable,
+            key=lambda node: (
+                math.dist(current, node.anchor_position),
+                node.local_id,
+            ),
+        )
+
+    def _begin_component_reposition(
+        self,
+        execution: _CoordinationExecution,
+        *,
+        target: Position,
+        fallback_target: Position | None,
+    ) -> None:
+        """Reposition to the next logical DFS node, not its ancestors."""
+        dfs = execution.dfs
+        frame = None if dfs is None else dfs.current
+        execution.reposition_target = tuple(target)
+        execution.reposition_fallback_target = fallback_target
+        execution.reposition_attempts = 0
+        execution.transit_node_id = (
+            None if frame is None else frame.node.local_id
+        )
+        execution.observation_node_id = None
+        execution.observation_position = None
+        execution.observation_heading = None
+        execution.transit_path_start_index = max(
+            0, len(self.drone.snapshot().path_history) - 1,
+        )
+        execution.phase = "repositioning"
+        self._trace(
+            "drone_dfs_reposition_started",
+            directive_id=execution.directive.directive_id,
+            start=self.drone.snapshot().position,
+            target=target,
+            fallback_target=fallback_target,
+            depth=0 if dfs is None else len(dfs.frames),
+        )
+
+    def _advance_component_reposition(
+        self,
+        execution: _CoordinationExecution,
+    ) -> None:
+        target = execution.reposition_target
+        if target is None:
+            self._prepare_execution_return(
+                execution,
+                reason="dfs_reposition_target_missing",
+            )
+            return
+        current = self.drone.snapshot().position
+        dfs = execution.dfs
+        frame = None if dfs is None else dfs.current
+        if (
+            frame is not None
+            and execution.observation_node_id == frame.node.local_id
+            and execution.observation_position == current
+        ):
+            self._finish_component_reposition(execution)
+            return
+        if current == target:
+            self._finish_component_reposition(execution)
+            return
+
+        interrupted_by_share = False
+
+        def stop_for_shared_target() -> bool:
+            nonlocal interrupted_by_share
+            interrupted_by_share = (
+                self._component_route_invalidated_after_share(execution)
+            )
+            return interrupted_by_share
+
+        result = self._compute_path(current, target)
+        path = tuple(result.path)
+        effective_target = target
+        if (
+            result.status == PATH_COMPLETE
+            and frame is not None
+            and frame.node.allow_standoff
+        ):
+            observation = self._component_observation_pose(
+                frame.node,
+                path,
+                origin=current,
+            )
+            if observation is not None:
+                path = observation.route_prefix
+                effective_target = observation.position
+                first_selection = (
+                    execution.observation_node_id != frame.node.local_id
+                )
+                execution.observation_node_id = frame.node.local_id
+                execution.observation_position = observation.position
+                execution.observation_heading = observation.heading
+                if first_selection:
+                    self._trace(
+                        "drone_component_observation_pose_selected",
+                        directive_id=execution.directive.directive_id,
+                        component_id=execution.root_component_id,
+                        work_unit_id=frame.node.work_unit_id,
+                        local_node_id=frame.node.local_id,
+                        source="component_dfs_reposition_astar",
+                        frontier_position=target,
+                        observation_position=observation.position,
+                        scan_heading=observation.heading,
+                        frontier_cells=len(frame.node.cells),
+                        saved_route_distance=(
+                            observation.saved_route_distance
+                        ),
+                    )
+        followed = bool(path) and self._follow_path(
+            path,
+            source="component_dfs_reposition_astar",
+            stop_when=stop_for_shared_target,
+            stop_reason="shared_slam_invalidated",
+        )
+        reached = (
+            followed
+            and self.drone.snapshot().position == effective_target
+        )
+        self._trace(
+            "drone_dfs_reposition_path",
+            directive_id=execution.directive.directive_id,
+            start=current,
+            target=target,
+            observation_target=effective_target,
+            path_status=result.status,
+            path_length=len(result.path),
+            reached=reached,
+        )
+        if interrupted_by_share:
+            return
+        if reached:
+            self._finish_component_reposition(execution)
+            return
+        execution.reposition_attempts += 1
+        if (
+            followed
+            and result.status == PATH_PARTIAL_LIMIT
+            and self.drone.snapshot().position != current
+            and execution.reposition_attempts < 8
+        ):
+            return
+        if not result.path and execution.reposition_attempts < 2:
+            return
+
+        fallback_target = execution.reposition_fallback_target
+        breadcrumb = self._component_reposition_breadcrumb(
+            execution,
+            fallback_target,
+        )
+        fallback_start = self.drone.snapshot().position
+        fallback_followed = bool(breadcrumb) and self._follow_path(
+            breadcrumb,
+            source="component_dfs_breadcrumb_fallback",
+            stop_when=stop_for_shared_target,
+            stop_reason="shared_slam_invalidated",
+        )
+        fallback_reached = bool(
+            fallback_followed
+            and self.drone.snapshot().position == fallback_target
+        )
+        self._trace(
+            "drone_dfs_reposition_fallback",
+            directive_id=execution.directive.directive_id,
+            start=fallback_start,
+            target=target,
+            fallback_target=fallback_target,
+            breadcrumb_points=len(breadcrumb),
+            reached=fallback_reached,
+        )
+        if interrupted_by_share:
+            return
+        if fallback_reached and fallback_target != target:
+            # From the last physical parent, ordinary transit plans the short
+            # remaining leg to the same logical target.
+            self._finish_component_reposition(execution)
+            return
+        if fallback_reached:
+            self._finish_component_reposition(execution)
+            return
+        dfs = execution.dfs
+        frame = None if dfs is None else dfs.current
+        if (
+            dfs is not None
+            and frame is not None
+            and frame.node.work_unit_id is None
+            and len(dfs.frames) > 1
+        ):
+            self._trace(
+                "drone_component_pending_node_retired",
+                directive_id=execution.directive.directive_id,
+                local_node_id=frame.node.local_id,
+                work_unit_id=None,
+                reason="route_unreachable",
+            )
+            dfs.frames.pop()
+            execution.reposition_target = None
+            execution.reposition_fallback_target = None
+            self._continue_component_dfs(execution)
+            return
+        self._prepare_execution_return(
+            execution,
+            reason="dfs_reposition_unreachable",
+        )
+
+    def _component_reposition_breadcrumb(
+        self,
+        execution: _CoordinationExecution,
+        target: Position | None,
+    ) -> tuple[Position, ...]:
+        """Find an actual traversed suffix to a previously visited anchor."""
+        if target is None:
+            return ()
+        history = self._path_history_since(execution.path_start_index)
+        for index in range(len(history) - 1, -1, -1):
+            if history[index] == target:
+                return tuple(reversed(history[index:]))
+        return ()
+
+    @staticmethod
+    def _finish_component_reposition(
+        execution: _CoordinationExecution,
+    ) -> None:
+        execution.reposition_target = None
+        execution.reposition_fallback_target = None
+        execution.reposition_attempts = 0
+        execution.route_attempts = 0
+        execution.phase = "transit"
+
+    def _prepare_completed_component_return(
+        self,
+        execution: _CoordinationExecution,
+    ) -> None:
+        """Return with a complete claim; only upload after physical contact."""
+        execution.outbound_actual_path = self._path_history_since(
+            execution.path_start_index
+        )
+        total_outward_distance = self._polyline_distance(
+            execution.outbound_actual_path
+        )
+        if execution.root_outbound_distance <= 1e-9:
+            execution.root_outbound_distance = total_outward_distance
+            execution.service_distance = 0.0
+        else:
+            execution.service_distance = max(
+                0.0,
+                total_outward_distance - execution.root_outbound_distance,
+            )
+        execution.pending_return_breadcrumb = tuple(reversed(
+            execution.outbound_actual_path
+        ))
+        execution.return_path_start_index = max(
+            0, len(self.drone.snapshot().path_history) - 1,
+        )
+        execution.phase = "returning"
+        self._trace(
+            "drone_component_return_after_logical_dfs",
+            directive_id=execution.directive.directive_id,
+            position=self.drone.snapshot().position,
+            breadcrumb_point_count=len(execution.pending_return_breadcrumb),
+        )
+
     def _advance_directive_transit(
         self,
         execution: _CoordinationExecution,
@@ -1594,8 +2206,16 @@ class DroneMovementController:
         *,
         source: str,
         preferred_route: Iterable[Position] = (),
+        observation_node: LocalComponentNode | None = None,
     ) -> bool:
         current = self.drone.snapshot().position
+        if (
+            observation_node is not None
+            and execution.observation_node_id == observation_node.local_id
+            and execution.observation_position == current
+        ):
+            execution.route_attempts = 0
+            return True
         if current == target:
             execution.route_attempts = 0
             return True
@@ -1622,10 +2242,62 @@ class DroneMovementController:
                     reason="route_unreachable",
                 )
             return False
-        followed = self._follow_path(path, source=source)
+        effective_target = target
+        if (
+            status == PATH_COMPLETE
+            and observation_node is not None
+            and observation_node.allow_standoff
+        ):
+            observation = self._component_observation_pose(
+                observation_node,
+                path,
+                origin=current,
+            )
+            if observation is not None:
+                path = observation.route_prefix
+                effective_target = observation.position
+                first_selection = (
+                    execution.observation_node_id
+                    != observation_node.local_id
+                )
+                execution.observation_node_id = observation_node.local_id
+                execution.observation_position = observation.position
+                execution.observation_heading = observation.heading
+                if first_selection:
+                    self._trace(
+                        "drone_component_observation_pose_selected",
+                        directive_id=execution.directive.directive_id,
+                        component_id=execution.root_component_id,
+                        work_unit_id=observation_node.work_unit_id,
+                        local_node_id=observation_node.local_id,
+                        source=source,
+                        frontier_position=target,
+                        observation_position=observation.position,
+                        scan_heading=observation.heading,
+                        frontier_cells=len(observation_node.cells),
+                        saved_route_distance=(
+                            observation.saved_route_distance
+                        ),
+                    )
+        stop_when = None
+        stop_reason = None
+        if execution.directive.kind in {
+            DirectiveKind.COMPONENT_TASK,
+            DirectiveKind.COMPONENT_FOLLOW,
+        }:
+            stop_when = lambda: self._component_route_invalidated_after_share(
+                execution
+            )
+            stop_reason = "shared_slam_invalidated"
+        followed = self._follow_path(
+            path,
+            source=source,
+            stop_when=stop_when,
+            stop_reason=stop_reason,
+        )
         if not followed:
             return False
-        if self.drone.snapshot().position == target:
+        if self.drone.snapshot().position == effective_target:
             execution.route_attempts = 0
             return True
         if status == PATH_PARTIAL_LIMIT and execution.route_attempts < 8:
@@ -1636,6 +2308,24 @@ class DroneMovementController:
                 reason="route_progress_limit",
             )
         return False
+
+    def _component_observation_pose(
+        self,
+        node: LocalComponentNode,
+        path: Iterable[Position],
+        *,
+        origin: Position,
+    ) -> FrontierObservationPose | None:
+        """Trim a focused route only when local SLAM proves one safe cone."""
+        return observation_pose_on_path(
+            node.cells,
+            self.drone.slam_map.snapshot(point_limit=0),
+            path,
+            origin=origin,
+            sensor_range=self._sensor_range(),
+            sensor_fov_deg=self._sensor_fov(),
+            confidence_threshold=self.frontier_confidence_threshold,
+        )
 
     def _advance_coordination_scan(
         self,
@@ -1779,6 +2469,11 @@ class DroneMovementController:
             outbound_actual_path=execution.outbound_actual_path,
             return_actual_path=execution.return_actual_path,
             return_path_source=execution.return_path_source,
+            outbound_distance=execution.root_outbound_distance,
+            service_distance=execution.service_distance,
+            return_distance=self._polyline_distance(
+                execution.return_actual_path
+            ),
         )
         self._trace(
             "drone_component_directive_completed",
@@ -1794,6 +2489,11 @@ class DroneMovementController:
             ),
             sensor_newly_known_cells=execution.sensor_newly_known_cells,
             sensor_confidence_gain=execution.sensor_confidence_gain,
+            outbound_distance=execution.root_outbound_distance,
+            service_distance=execution.service_distance,
+            return_distance=self._polyline_distance(
+                execution.return_actual_path
+            ),
             dfs_leaf_count=(
                 0 if execution.dfs is None
                 else len(execution.dfs.leaf_geometry)
@@ -1892,6 +2592,17 @@ class DroneMovementController:
         execution.outbound_actual_path = self._path_history_since(
             execution.path_start_index
         )
+        total_outward_distance = self._polyline_distance(
+            execution.outbound_actual_path
+        )
+        if execution.root_outbound_distance <= 1e-9:
+            execution.root_outbound_distance = total_outward_distance
+            execution.service_distance = 0.0
+        else:
+            execution.service_distance = max(
+                0.0,
+                total_outward_distance - execution.root_outbound_distance,
+            )
         if execution.directive.kind == DirectiveKind.COMPONENT_TASK:
             execution.suspension_reason = str(reason)
             execution.suspension_position = self.drone.snapshot().position
@@ -2006,10 +2717,14 @@ class DroneMovementController:
         *,
         breadcrumb: Iterable[Position] = (),
         execution: _CoordinationExecution | None = None,
-    ) -> bool:
+        dock_during_check_in: bool = False,
+    ) -> tuple[bool, bool]:
+        """Reach a remembered endpoint or stop at verified rover contact.
+
+        Return ``(reached, encountered_rover)``. Reporting contact reserves a
+        rover stop; an empty check-in atomically docks at the contact instead.
+        """
         current = self.drone.snapshot().position
-        if current == target:
-            return True
         history_start = (
             max(0, len(self.drone.snapshot().path_history) - 1)
             if execution is None
@@ -2021,35 +2736,80 @@ class DroneMovementController:
         )
         if execution is not None and execution.return_path_start_index is None:
             execution.return_path_start_index = history_start
+        request_stop = self.dependencies.request_exploration_report_stop
+        request_dock = self.dependencies.request_exploration_dock
+        can_report = execution is not None or self._coordination_report is not None
+        encountered = False
+        dock_result: CoordinationResult | None = None
+
+        def stop_for_coordination_contact() -> bool:
+            nonlocal dock_result, encountered
+            if can_report and callable(request_stop):
+                encountered = bool(request_stop(self.drone.id))
+            elif dock_during_check_in and callable(request_dock):
+                candidate = request_dock(self.drone.id)
+                if isinstance(candidate, CoordinationResult) and candidate.arrived:
+                    dock_result = candidate
+                    encountered = True
+            return encountered
+
+        def record_return(source: str) -> None:
+            if execution is not None:
+                execution.return_actual_path = self._path_history_since(
+                    history_start
+                )
+                execution.return_path_source = source
+
+        if stop_for_coordination_contact():
+            record_return("rover_encounter")
+            if dock_result is not None:
+                self._apply_coordination_result(dock_result)
+            return True, True
+        if current == target:
+            return True, False
         result = self._compute_path(current, target)
         if result.path:
             followed = self._follow_path(
                 result.path,
                 source="component_checkin_astar",
+                stop_when=(
+                    stop_for_coordination_contact
+                    if can_report or dock_during_check_in
+                    else None
+                ),
+                stop_reason="report" if can_report else "dock",
             )
+            if encountered:
+                record_return("rover_encounter")
+                if dock_result is not None:
+                    self._apply_coordination_result(dock_result)
+                return True, True
             if followed and self.drone.snapshot().position == target:
-                if execution is not None:
-                    execution.return_actual_path = self._path_history_since(
-                        history_start
-                    )
-                    execution.return_path_source = "astar"
-                return True
+                record_return("astar")
+                return True, False
             if result.status == PATH_PARTIAL_LIMIT and followed:
-                return False
+                return False, False
         fallback = tuple(breadcrumb)
         if fallback:
             followed = self._follow_path(
                 fallback,
                 source="component_checkin_breadcrumb_fallback",
+                stop_when=(
+                    stop_for_coordination_contact
+                    if can_report or dock_during_check_in
+                    else None
+                ),
+                stop_reason="report" if can_report else "dock",
             )
+            if encountered:
+                record_return("rover_encounter")
+                if dock_result is not None:
+                    self._apply_coordination_result(dock_result)
+                return True, True
             if followed and self.drone.snapshot().position == target:
-                if execution is not None:
-                    execution.return_actual_path = self._path_history_since(
-                        history_start
-                    )
-                    execution.return_path_source = "breadcrumb_fallback"
-                return True
-        return False
+                record_return("breadcrumb_fallback")
+                return True, False
+        return False, False
 
     def _path_history_since(self, index: int) -> tuple[Position, ...]:
         history = self.drone.snapshot().path_history
@@ -5440,6 +6200,8 @@ class DroneMovementController:
         path: Iterable[Position],
         *,
         source: str = "path",
+        stop_when: Callable[[], bool] | None = None,
+        stop_reason: str | None = None,
     ) -> bool:
         """Walk a path while recording the breadcrumb history used by rendering."""
         points = tuple((int(point[0]), int(point[1])) for point in path)
@@ -5448,6 +6210,7 @@ class DroneMovementController:
         end = start
         moved_points = 0
         completed = True
+        stopped_for_contact = False
         coverage_cell_entries = 0
         coverage_new_cell_entries = 0
         coverage_revisit_entries = 0
@@ -5479,6 +6242,33 @@ class DroneMovementController:
             coverage_new_cell_entries += new_cell_entries
             coverage_revisit_entries += revisit_entries
             coverage_repeated_edge_entries += repeated_edge_entries
+            contact_checkpoint = self.dependencies.physical_contact_checkpoint
+            if callable(contact_checkpoint):
+                contact_checkpoint(self.drone.id)
+            if stop_when is not None and stop_when():
+                # A contact callback either serialized rover arrival or
+                # invalidated this route from newly exchanged peer SLAM.
+                stopped_for_contact = True
+                completed = False
+                if stop_reason == "shared_slam_invalidated":
+                    execution = self._coordination_execution
+                    directive = None if execution is None else execution.directive
+                    self._trace(
+                        "drone_route_interrupted_after_share",
+                        source=source,
+                        position=end,
+                        slam_version=self.drone.slam_map.version,
+                        directive_id=(
+                            None if directive is None else directive.directive_id
+                        ),
+                        directive_kind=(
+                            None if directive is None else directive.kind.value
+                        ),
+                        next_phase=(
+                            None if execution is None else execution.phase
+                        ),
+                    )
+                break
             if not self.dependencies.wait_simulation_delay(
                 self.drone.delay / self.drone.speed_factor
             ):
@@ -5495,6 +6285,10 @@ class DroneMovementController:
             "drone_motion",
             source=source,
             completed=completed,
+            stopped_for_report=(
+                stopped_for_contact and stop_reason in {None, "report"}
+            ),
+            stop_reason=stop_reason if stopped_for_contact else None,
             start=start,
             end=end,
             point_count=moved_points,
@@ -5530,6 +6324,15 @@ class DroneMovementController:
         return sum(
             math.dist(previous, current)
             for previous, current in zip(moved, moved[1:])
+        )
+
+    @staticmethod
+    def _polyline_distance(path: Iterable[Position]) -> float:
+        """Return exact travelled length for an already ordered path."""
+        points = tuple(path)
+        return sum(
+            math.dist(previous, current)
+            for previous, current in zip(points, points[1:])
         )
 
     def _trace(self, event: str, **fields: Any) -> None:

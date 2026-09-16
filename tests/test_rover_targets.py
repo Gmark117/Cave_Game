@@ -69,6 +69,45 @@ class RoverTargetServiceTests(unittest.TestCase):
     def test_returns_none_without_frontier_candidates(self) -> None:
         self.assertIsNone(self.service.acquire(0, (0, 0)))
 
+    def test_failed_route_is_held_across_task_reassignment_then_retried(self) -> None:
+        self.control.frontier_candidates = [
+            RoverFrontierTarget((2, 2), 3, 8, True, 1, 1.0),
+        ]
+        self.assertEqual(
+            self.service.acquire(0, (0, 0), sim_time=10.0), (2, 2)
+        )
+        self.service.reject_failed_route(
+            0, (0, 0), (2, 2), sim_time=10.0,
+        )
+        self.service.release(0)
+        self.control.frontier_candidates = [
+            RoverFrontierTarget((2, 2), 9, 19, True, 2, 1.0),
+        ]
+
+        self.assertIsNone(
+            self.service.acquire(0, (0, 0), sim_time=69.9)
+        )
+        self.assertEqual(
+            self.service.acquire(0, (0, 0), sim_time=70.0), (2, 2)
+        )
+
+    def test_failed_route_keeps_other_goals_eligible(self) -> None:
+        self.control.frontier_candidates = [
+            RoverFrontierTarget((2, 2), 3, 8, True, 1, 1.0),
+            RoverFrontierTarget((1, 1), 4, 9, True, 1, 1.0),
+        ]
+        self.service.reject_failed_route(
+            0, (0, 0), (2, 2), sim_time=10.0,
+        )
+
+        self.assertEqual(
+            self.service.acquire(0, (0, 0), sim_time=11.0), (1, 1)
+        )
+        self.service.release(0)
+        self.assertEqual(
+            self.service.acquire(0, (1, 0), sim_time=11.0), (2, 2)
+        )
+
     def test_claimed_targets_use_service_cost_then_asperity(self) -> None:
         self.control.frontier_candidates = [
             RoverFrontierTarget(
@@ -105,6 +144,48 @@ class RoverTargetServiceTests(unittest.TestCase):
             ),
         ]
         self.assertEqual(self.service.acquire(0, (0, 0)), (1, 1))
+
+    def test_focused_endgame_uses_remaining_distribution_before_claim(self) -> None:
+        self.control.frontier_candidates = [
+            RoverFrontierTarget(
+                (1, 1), 1, 1, True, 3, 1.0,
+                service_cost=1.0,
+                focused_endgame=True,
+                remaining_max_distance=100.0,
+                remaining_total_distance=180.0,
+            ),
+            RoverFrontierTarget(
+                (2, 2), 2, 2, False, 0, 1.0,
+                service_cost=10.0,
+                focused_endgame=True,
+                remaining_max_distance=50.0,
+                remaining_total_distance=90.0,
+            ),
+        ]
+
+        self.assertEqual(self.service.acquire(0, (0, 0)), (2, 2))
+
+    def test_focused_endgame_reranks_a_still_current_target(self) -> None:
+        self.control.frontier_candidates = [
+            RoverFrontierTarget((10, 10), 1, 1, True, 1, 1.0),
+        ]
+        self.assertEqual(self.service.acquire(0, (0, 0)), (10, 10))
+        self.control.frontier_candidates = [
+            RoverFrontierTarget(
+                (10, 10), 1, 1, True, 1, 1.0,
+                focused_endgame=True,
+                remaining_max_distance=80.0,
+                remaining_total_distance=80.0,
+            ),
+            RoverFrontierTarget(
+                (12, 10), 2, 2, False, 0, 1.0,
+                focused_endgame=True,
+                remaining_max_distance=20.0,
+                remaining_total_distance=20.0,
+            ),
+        ]
+
+        self.assertEqual(self.service.acquire(0, (0, 0)), (12, 10))
 
     def test_hold_signal_is_rover_specific(self) -> None:
         self.control.hold_rovers.add(0)

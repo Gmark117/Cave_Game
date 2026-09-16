@@ -97,6 +97,8 @@ class RoverTargetDependencies:
     norm_height: int
     get_frontier_candidates: Callable[[], Sequence[Any]] = lambda: ()
     should_hold_position: Callable[[int], bool] = lambda _rover_id: False
+    simulation_time: Callable[[], float] = lambda: 0.0
+    runtime_trace: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,7 @@ class MissionRendererDependencies:
     sector_renderer: Any | None = None
     get_sector_snapshot: Callable[[], Any] = lambda: None
     is_exploration_complete: Callable[[], bool] = lambda: False
+    get_docked_drone_ids: Callable[[], frozenset[int]] = frozenset
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,7 @@ class DroneMovementDependencies:
     get_drone_positions: Callable[
         [], Sequence[tuple[int, Position]]
     ] = lambda: ()
+    physical_contact_checkpoint: Callable[[int], None] | None = None
     compute_path_segment: Callable[[Position, Position], Any] | None = None
     sector_check_in: Callable[[int, int | None], Any] | None = None
     sector_assignment: Callable[[int], Any] | None = None
@@ -163,6 +167,10 @@ class DroneMovementDependencies:
         [int, Position], Position
     ] | None = None
     exploration_check_in: Callable[[int, Any | None], Any] | None = None
+    request_exploration_report_stop: Callable[[int], bool] | None = None
+    request_exploration_dock: Callable[[int], Any] | None = None
+    is_exploration_docked: Callable[[int], bool] | None = None
+    exploration_contact: Callable[[int], bool] | None = None
     exploration_assignment: Callable[[int], Any] | None = None
     exploration_energy_return: Callable[
         [int, float, float, float], Any

@@ -104,6 +104,22 @@ class DroneRuntimeState:
                 ) % 360.0
             self._graph.add_node(normalized)
 
+    def carry_to(self, position: Position) -> float:
+        """Move with a docked carrier and return the carried distance."""
+        normalized = (int(position[0]), int(position[1]))
+        with self._lock:
+            previous = self._position
+            if normalized == previous:
+                return 0.0
+            delta_x = normalized[0] - previous[0]
+            delta_y = normalized[1] - previous[1]
+            self._position = normalized
+            self._heading_deg = math.degrees(
+                math.atan2(delta_x, -delta_y)
+            ) % 360.0
+            self._graph.add_node(normalized)
+            return math.dist(previous, normalized)
+
     def set_direction(self, direction: int) -> None:
         """Store the selected exploration heading in degrees."""
         with self._lock:
@@ -191,6 +207,11 @@ class DroneRuntimeState:
                 (int(position[0]), int(position[1]))
                 for position in ray_points
             ]
+
+    def clear_ray_points(self) -> None:
+        """Invalidate presentation rays after a physical attachment change."""
+        with self._lock:
+            self._ray_points.clear()
 
     def toggle_path(self) -> None:
         with self._lock:

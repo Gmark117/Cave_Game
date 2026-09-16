@@ -33,7 +33,35 @@ class RendezvousProtocolTests(unittest.TestCase):
         # until one of them physically communicates it to the rover.
         protocol.drone_rover_contact(2)
         self.assertTrue(protocol.can_depart((20, 10)))
-        self.assertEqual(protocol.drone_endpoint(2), (20, 10))
+        self.assertEqual(protocol.drone_endpoint(2), (5, 5))
+
+    def test_relayed_rover_stop_precedes_newer_proposal(self) -> None:
+        protocol = RendezvousProtocol(3, (0, 0))
+        protocol.propose((10, 0))
+        protocol.drone_rover_contact(0)
+        protocol.drone_drone_contact(0, 1)
+        protocol.drone_rover_contact(1)
+        protocol.drone_drone_contact(1, 2)
+        protocol.drone_rover_contact(2)
+        self.assertTrue(protocol.rover_arrived((10, 0)))
+
+        protocol.propose((20, 0))
+        protocol.drone_rover_contact(0)
+        protocol.drone_drone_contact(0, 1)
+
+        self.assertEqual(protocol.drone_endpoint(1), (0, 0))
+        self.assertEqual(
+            protocol.snapshot().drone_confirmed_endpoints[1].position,
+            (10, 0),
+        )
+        self.assertEqual(protocol.drone_missed_endpoint(1, (0, 0)), (10, 0))
+        self.assertFalse(protocol.can_depart((20, 0)))
+        protocol.drone_rover_contact(1)
+        protocol.drone_rover_contact(2)
+        self.assertTrue(protocol.can_depart((20, 0)))
+        self.assertEqual(protocol.drone_endpoint(1), (10, 0))
+        self.assertTrue(protocol.rover_arrived((20, 0)))
+        self.assertEqual(protocol.drone_missed_endpoint(1, (10, 0)), (20, 0))
 
     def test_empty_confirmed_endpoint_falls_forward_to_known_proposal(self) -> None:
         protocol = RendezvousProtocol(2, (5, 5))

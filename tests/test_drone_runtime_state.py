@@ -46,6 +46,16 @@ class DroneRuntimeStateTests(unittest.TestCase):
         self.assertEqual(snapshot.path_history[-1], (4, 2))
         self.assertAlmostEqual(snapshot.heading_deg, 90.0)
 
+    def test_carried_move_updates_pose_and_reports_separate_distance(self) -> None:
+        distance = self.state.carry_to((2, 5))
+        snapshot = self.state.snapshot()
+
+        self.assertEqual(distance, 3.0)
+        self.assertEqual(snapshot.position, (2, 5))
+        self.assertEqual(snapshot.path_history[-1], (2, 5))
+        self.assertAlmostEqual(snapshot.heading_deg, 180.0)
+        self.assertEqual(self.state.carry_to((2, 5)), 0.0)
+
     def test_reorient_updates_heading_without_moving(self) -> None:
         before = self.state.snapshot()
 

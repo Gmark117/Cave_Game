@@ -113,11 +113,12 @@ transit may cross any mapped traversable space.
 
 At a claimed anchor the drone waits for the ordinary sensor scheduler's exact
 scan completion, discovers causally related local successors, and explores them
-depth-first. Each DFS frame records the path actually flown, so backtracking
-and rover return retain a breadcrumb fallback when A* is unavailable. If a
-recorded DFS reversal is no longer executable, the drone replans to the frame's
-continuation point and suspends the task after two failed recoveries instead of
-retrying the same path forever. The rover
+depth-first. Completed frames unwind logically; the drone uses A* directly to
+the next sibling rather than physically revisiting each ancestor. Recorded
+movement remains a breadcrumb fallback to the last visited parent if direct
+A* fails, while rover return is also A*-first with breadcrumb fallback. A
+failed logical reposition suspends the claim instead of retrying indefinitely.
+The rover
 reconciles one-to-one continuation, split, merge, resegmentation, dormancy, and
 resolution into explicit component lineage. Wide wall-connected frontiers are
 divided into wall sub-arcs; wide open frontiers use sensor-footprint sweep
@@ -143,11 +144,13 @@ asperity, and wall clearance rank the safe choices. Before moving, the rover
 announces an immutable endpoint. It cannot depart until every drone has
 acknowledged that endpoint and the complete acknowledgement set has returned
 to the rover through direct or relayed LOS/proximity contacts. An announcement
-does not immediately replace a drone's rendezvous target: reports first return
-to the last physically confirmed rover endpoint. If the rover is absent there,
-the drone falls forward to the newer contact-carried proposal. This keeps an
-acknowledgement carrier from waiting at a destination the rover cannot yet
-legally depart toward.
+does not immediately replace a drone's rendezvous target, even after universal
+acknowledgement: reports first return to the last rover-confirmed endpoint
+learned by physical contact or relay. An empty older endpoint leads to the
+freshest rover-confirmed stop before any newer proposal. A queued check-in is
+not an empty endpoint; the drone waits for the rover worker to accept its
+report. This keeps an acknowledgement carrier from waiting at a destination
+the rover cannot yet legally depart toward.
 
 ### Support Systems
 
@@ -193,8 +196,8 @@ The simulation works as a feedback loop:
    revision. Claims
    are token-fenced and attach to work units, not geography. A drone may cross
    any mapped traversable space, scans its claimed anchor, follows local
-   component successors depth-first, and retraces recorded paths while
-   backtracking. The rover records split and merge lineage explicitly and
+   component successors depth-first, and routes directly to the next logical
+   target by A* rather than physically backtracking. The rover records split and merge lineage explicitly and
    reassigns released or battery-suspended claims with a new token.
    Unknown support contributes relative effort as pixels divided by the square
    of the global cell size. The initial runtime uses unlimited energy, but both
@@ -272,7 +275,10 @@ The sharing model is intentionally limited.
 - Rover sharing is bidirectional for both terrain and SLAM. Periodic proximity
   exchange runs on the primary rover worker; component/probe rendezvous also
   guarantees an arrival exchange and one departure refresh.
-  Waiting for the team performs no map exchange.
+- A checked-in drone is mechanically docked and carried at the rover's logical
+  position while it awaits a directive. Its movement, route planning, rotation,
+  and sensors remain inactive, while physical rover contact can continue map
+  and rendezvous-acknowledgement exchange.
 - The heatmap refresh is also throttled so rendering stays responsive.
 
 This makes the simulation feel distributed rather than centralized. Agents learn locally first, then synchronize when they actually meet.
@@ -309,7 +315,7 @@ The agent typically does the following:
   scan footprint, then push them on a bounded DFS stack even when an immediately
   preceding scheduled scan made the directed scan's incremental gain zero;
 - choose successor anchors by route reachability and cost, record every actual
-  outbound path, and reverse those paths during DFS backtracking;
+  outbound path, and use a recorded suffix only if direct A* reposition fails;
 - report sensor gain, the claimed unit's disposition, and causal successor
   lineage at the next physical rover check-in;
 - suspend unfinished work through the energy interface when return reserve is
@@ -407,6 +413,7 @@ Simulation settings available in-game:
 | Known map visualization | Implemented | Available in current simulation flow |
 | Distributed map sharing | Implemented | Drone pairs and physical rover rendezvous exchange terrain and SLAM |
 | Frontier-component discovery and DFS | Implemented | Rover SLAM drives bounded scan/probe rounds and token-fenced component work |
+| Rover docking | Implemented | Checked-in drones are carried with inactive movement and sensing until work is assigned or HOME completes them |
 | POI and path sharing | Planned | POI model exists; runtime integration is deferred |
 | Drone path rendering | Implemented | Each drone's complete travelled breadcrumb path is rendered incrementally |
 | Battery management | Contract implemented | Unlimited runtime policy uses route-to-task, next-action, route-home, reserve, accept, return, and suspension hooks; drain/charging remain deferred |

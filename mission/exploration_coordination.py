@@ -16,6 +16,7 @@ from mapping.frontier_registry import (
     CausalTransition,
     ComponentState,
     ComponentWorkUnit,
+    ExplorationMode,
     FrontierComponentRecord,
     FrontierComponentRegistry,
     FrontierRegistrySnapshot,
@@ -136,6 +137,10 @@ class WorkUnitOutcome:
     disposition: str
     sensor_newly_known_cells: int = 0
     sensor_confidence_gain: float = 0.0
+    scan_position: Position | None = None
+    scan_heading: int | None = None
+    frontier_position: Position | None = None
+    frontier_heading: int | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,9 @@ class CoordinationReport:
     outbound_actual_path: tuple[Position, ...] = ()
     return_actual_path: tuple[Position, ...] = ()
     return_path_source: str = "none"
+    outbound_distance: float = 0.0
+    service_distance: float = 0.0
+    return_distance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -173,6 +181,9 @@ class ExplorationDirective:
     leader_drone_id: int | None = None
     follow_branch_index: int | None = None
     reserved_branch_count: int = 0
+    assignment_policy: str = "ordinary"
+    estimated_outbound_cost: float = 0.0
+    estimated_round_trip_cost: float = 0.0
     reason: str = ""
 
 
@@ -214,6 +225,7 @@ class ExplorationCoordinatorSnapshot:
     mission_exhausted: bool
     discovery_round: DiscoveryRound | None
     phase: ExplorationPhase = ExplorationPhase.INITIAL_SCAN
+    focused_endgame: bool = False
 
 
 @dataclass(frozen=True)
@@ -307,6 +319,7 @@ class FrontierTaskCoordinator:
             )),
         )
         self._mission_exhausted = False
+        self._focused_endgame = False
         self._last_rover_slam: SlamSnapshot | None = None
         self._last_reconcile_result: RegistryReconcileResult | None = None
         self._published_snapshot = self._snapshot_unlocked()
@@ -359,6 +372,7 @@ class FrontierTaskCoordinator:
             mission_exhausted=self._mission_exhausted,
             discovery_round=round_copy,
             phase=self._phase,
+            focused_endgame=self._focused_endgame,
         )
 
     def update_rover_position(self, position: Position) -> None:
@@ -508,6 +522,11 @@ class FrontierTaskCoordinator:
                 directive=directive,
             )
 
+    def waiting_contact_lost(self, drone_id: int) -> None:
+        """A past check-in no longer counts as physical team quiescence."""
+        with self._lock:
+            self._waiting.discard(int(drone_id))
+
     def stop(self) -> None:
         with self._lock:
             self._mission_exhausted = True
@@ -599,6 +618,20 @@ class FrontierTaskCoordinator:
                     reason=outcome.disposition,
                 ):
                     completed_ids.add(outcome.work_unit_id)
+                    if (
+                        outcome.scan_position is not None
+                        and outcome.scan_heading is not None
+                    ):
+                        self.registry.record_scan_result(
+                            outcome.work_unit_id,
+                            scan_position=outcome.scan_position,
+                            scan_heading=outcome.scan_heading,
+                            frontier_position=outcome.frontier_position,
+                            frontier_heading=outcome.frontier_heading,
+                            newly_known_cells=outcome.sensor_newly_known_cells,
+                            confidence_gain=outcome.sensor_confidence_gain,
+                            rover_slam=rover_slam,
+                        )
             task = self._tasks[claim.task_id]
             rejection_key = (drone_id, claim.task_id)
             if (
@@ -801,6 +834,7 @@ class FrontierTaskCoordinator:
         if self._mission_exhausted or self._discovery_round is not None:
             return
         self._sync_tasks()
+        self._focused_endgame = self._focused_endgame_is_active()
         idle = tuple(sorted(
             drone_id for drone_id in self._waiting
             if drone_id not in self._pending_directives
@@ -832,11 +866,16 @@ class FrontierTaskCoordinator:
             idle,
             tasks,
             reachable_task_ids=reachable_task_ids,
+            focused_endgame=self._focused_endgame,
         )
+        quote_by_pair = {
+            (quote.drone_id, quote.task_id): quote for quote in quotes
+        }
         assigned_drones: set[int] = set()
         leader_tasks: list[tuple[int, ExplorationTask]] = []
         for drone_id, task_id, route in selected:
             task = self._tasks[task_id]
+            quote = quote_by_pair[(drone_id, task_id)]
             if not self.registry.claim_work_units(task.work_unit_ids):
                 continue
             token = self._next_claim_token
@@ -864,6 +903,13 @@ class FrontierTaskCoordinator:
                     task=replace(task),
                     work_units=units,
                     claim=claim,
+                    assignment_policy=(
+                        "focused_endgame_round_trip"
+                        if self._focused_endgame
+                        else "ordinary_depth_continuation"
+                    ),
+                    estimated_outbound_cost=quote.route_cost,
+                    estimated_round_trip_cost=quote.route_cost * 2.0,
                     reason="reachable_component_work",
                 ),
             )
@@ -873,16 +919,20 @@ class FrontierTaskCoordinator:
         remaining = tuple(
             drone_id for drone_id in idle if drone_id not in assigned_drones
         )
-        if not remaining:
-            return
-        reachable_outstanding = bool(self._claims_by_task or quotes)
-        if (
+        # Bootstrap followers belong to the first component dispatch. If all
+        # drones received work then, do not first launch followers at endgame.
+        bootstrap_dispatch = bool(
             self._phase == ExplorationPhase.COMPONENT_EXPLORATION
             and leader_tasks
             and not self._bootstrap_followers_issued
-        ):
-            self._issue_bootstrap_followers(remaining, leader_tasks)
+        )
+        if bootstrap_dispatch:
             self._bootstrap_followers_issued = True
+        if not remaining:
+            return
+        reachable_outstanding = bool(self._claims_by_task or quotes)
+        if bootstrap_dispatch:
+            self._issue_bootstrap_followers(remaining, leader_tasks)
             return
         if self._phase == ExplorationPhase.BOOTSTRAP_PROBING:
             if self._start_radial_round(
@@ -989,6 +1039,7 @@ class FrontierTaskCoordinator:
         tasks: tuple[ExplorationTask, ...],
         *,
         reachable_task_ids: frozenset[int] | None = None,
+        focused_endgame: bool = False,
     ) -> tuple[tuple[RouteQuote, ...], tuple[tuple[int, int, tuple[Position, ...]], ...]]:
         """Assign connected tasks; exact routes belong to drone workers."""
         quotes: dict[tuple[int, int], RouteQuote] = {}
@@ -1051,9 +1102,16 @@ class FrontierTaskCoordinator:
         def solve(
             drone_index: int,
             used: tuple[int, ...],
-        ) -> tuple[int, int, int, float, tuple[tuple[int, int], ...]]:
+        ) -> tuple[
+            int,
+            int,
+            int,
+            float,
+            float,
+            tuple[tuple[int, int], ...],
+        ]:
             if drone_index >= len(drones):
-                return (0, 0, 0, 0.0, ())
+                return (0, 0, 0, 0.0, 0.0, ())
             drone_id = drones[drone_index]
             used_set = set(used)
             candidates = [solve(drone_index + 1, used)]
@@ -1069,9 +1127,22 @@ class FrontierTaskCoordinator:
                     tail[0] + 1,
                     tail[1] + quote.dfs_depth,
                     tail[2] + int(quote.continuation_affinity),
-                    tail[3] + quote.route_cost,
-                    ((drone_id, task_id), *tail[4]),
+                    tail[3] + quote.route_cost * 2.0,
+                    max(tail[4], quote.route_cost * 2.0),
+                    ((drone_id, task_id), *tail[5]),
                 ))
+            if focused_endgame:
+                return min(
+                    candidates,
+                    key=lambda item: (
+                        -item[0],
+                        item[4],
+                        item[3],
+                        -item[2],
+                        -item[1],
+                        item[5],
+                    ),
+                )
             return min(
                 candidates,
                 key=lambda item: (
@@ -1079,16 +1150,37 @@ class FrontierTaskCoordinator:
                     -item[1],
                     -item[2],
                     item[3],
-                    item[4],
+                    item[5],
                 ),
             )
 
-        _count, _depth, _affinity, _cost, pairs = solve(0, ())
+        _count, _depth, _affinity, _cost, _maximum, pairs = solve(0, ())
         selected = tuple(
             (drone_id, task_id, quotes[(drone_id, task_id)].route)
             for drone_id, task_id in pairs
         )
         return tuple(quotes.values()), selected
+
+    def _focused_endgame_is_active(self) -> bool:
+        """Use registry topology, never display-only floor coverage."""
+        actionable = tuple(
+            component
+            for component in self.registry.components.values()
+            if component.state == ComponentState.ACTIVE
+            and any(
+                self.registry.work_units[unit_id].state in {
+                    WorkUnitState.READY,
+                    WorkUnitState.CLAIMED,
+                    WorkUnitState.ACTIVE,
+                    WorkUnitState.BLOCKED,
+                }
+                for unit_id in component.work_unit_ids
+            )
+        )
+        return bool(actionable) and all(
+            component.exploration_mode == ExplorationMode.FOCUSED
+            for component in actionable
+        )
 
     def _known_free_reachable_mask(
         self,

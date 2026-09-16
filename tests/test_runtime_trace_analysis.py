@@ -14,6 +14,48 @@ from tools.analyze_runtime_trace import (
 
 
 class RuntimeTraceAnalysisTests(unittest.TestCase):
+    def test_summary_reports_focused_endgame_economics(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "rover_focused_endgame_changed",
+                "active": True,
+            },
+            {
+                "event": "rover_focused_endgame_assignment",
+                "estimated_outbound_cost": 12.5,
+                "estimated_round_trip_cost": 25.0,
+            },
+            {"event": "rover_focused_endgame_staging_selected"},
+            {"event": "rover_focused_endgame_staging_held"},
+            {"event": "rover_route_negative_cached"},
+            {"event": "rover_route_negative_cache_hit"},
+            {"event": "rover_frontier_route_retry_suppressed"},
+            {
+                "event": "rover_task_completed",
+                "outbound_distance": 12.0,
+                "service_distance": 7.0,
+                "return_distance": 15.0,
+            },
+            {
+                "event": "rover_focused_endgame_changed",
+                "active": False,
+            },
+        ]))
+
+        self.assertIn(
+            "focused endgame economics: activations=1 deactivations=1 "
+            "assignments=1 estimated_outbound=12.5px "
+            "estimated_round_trip=25.0px staging_selected=1 "
+            "staging_held=1 route_cached=1 cache_hits=1 "
+            "retry_suppressed=1",
+            report,
+        )
+        self.assertIn(
+            "reported sortie distance: outbound=12.0px service=7.0px "
+            "return=15.0px",
+            report,
+        )
+
     def test_summary_reports_component_rounds_lineage_and_quiescence(self) -> None:
         report = "\n".join(summarize([
             {
@@ -78,6 +120,20 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
                 "recovered": True,
             },
             {
+                "event": "drone_dfs_popped",
+                "drone_id": 0,
+            },
+            {
+                "event": "drone_dfs_reposition_started",
+                "drone_id": 0,
+            },
+            {
+                "event": "drone_motion",
+                "drone_id": 0,
+                "source": "component_dfs_reposition_astar",
+                "travelled_distance": 12.5,
+            },
+            {
                 "event": "drone_component_check_in_queued",
                 "drone_id": 0,
             },
@@ -118,6 +174,11 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
             report,
         )
         self.assertIn(
+            "DFS navigation: logical_pops=1 repositions=1 "
+            "astar_px=12.5 breadcrumb_px=0.0 legacy_retrace_px=0.0",
+            report,
+        )
+        self.assertIn(
             "async rover check-ins: queued=1 processed=1 "
             "queue_wait_avg=3.00ms queue_wait_max=3.00ms "
             "processing_avg=7.00ms processing_max=7.00ms",
@@ -132,6 +193,81 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         )
         self.assertIn("completed wait by drone: 0=2.50s", report)
         self.assertIn("max_ready_tasks=0 max_live_claims=0", report)
+
+    def test_summary_reports_compact_docking_sessions(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_docked",
+                "drone_id": 0,
+                "source": "check_in_intercept",
+            },
+            {
+                "event": "drone_docked",
+                "drone_id": 1,
+                "source": "report_endpoint",
+            },
+            {
+                "event": "drone_undocked",
+                "drone_id": 0,
+                "reason": "directive_assigned",
+                "carried_distance": 12.5,
+                "carried_steps": 4,
+                "docked_seconds": 8.0,
+                "learned_endpoint_epochs": [2, 3],
+            },
+        ]))
+
+        self.assertIn(
+            "docking: acquired=2 released=1 active_at_trace_end=1 "
+            "intercepts=1 carried=12.5px steps=4 docked=8.00s",
+            report,
+        )
+        self.assertIn("learned_epochs=[2, 3]", report)
+        self.assertIn("'check_in_intercept': 1", report)
+        self.assertIn("releases={'directive_assigned': 1}", report)
+
+    def test_summary_reports_mid_route_peer_share_interruptions(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_route_interrupted_after_share",
+                "drone_id": 0,
+                "source": "component_task_transit",
+            },
+            {
+                "event": "drone_route_interrupted_after_share",
+                "drone_id": 2,
+                "source": "component_dfs_reposition_astar",
+            },
+        ]))
+
+        self.assertIn(
+            "mid-route peer sharing: interruptions=2 sources={"
+            "'component_dfs_reposition_astar': 1, "
+            "'component_task_transit': 1}",
+            report,
+        )
+
+    def test_summary_reports_focused_observation_route_savings(self) -> None:
+        report = "\n".join(summarize([
+            {
+                "event": "drone_component_observation_pose_selected",
+                "source": "component_task_transit",
+                "saved_route_distance": 12.5,
+            },
+            {
+                "event": "drone_component_observation_pose_selected",
+                "source": "component_dfs_reposition_astar",
+                "saved_route_distance": 0.0,
+            },
+        ]))
+
+        self.assertIn(
+            "focused observation poses: selected=2 shortened=1 "
+            "route_suffix_avoided=12.5px sources={"
+            "'component_dfs_reposition_astar': 1, "
+            "'component_task_transit': 1}",
+            report,
+        )
 
     def test_epoch_publication_reports_standby_and_open_wait_at_completion(self) -> None:
         report = "\n".join(summarize([
@@ -356,6 +492,74 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
             {"event": "sensor_scan", "drone_id": 0, "sim_time": 25.0},
         ]))
         self.assertIn("generation 1: duration=15.00s", report)
+
+    def test_endgame_cost_uses_offline_floor_and_rover_local_gain(self) -> None:
+        report = "\n".join(summarize([
+            {"event": "mission_run_started", "sim_time": 0.0},
+            {"event": "frame_summary", "sim_time": 10.0,
+             "floor_exploration_ratio": 0.97,
+             "rover_states": [{"position": [0, 0]}]},
+            {"event": "drone_component_check_in", "sim_time": 19.0,
+             "rover_slam_newly_known_cells": 100,
+             "rover_terrain_known_floor_cells": 1000},
+            {"event": "frame_summary", "sim_time": 20.0,
+             "floor_exploration_ratio": 0.98,
+             "rover_states": [{"position": [0, 0]}]},
+            {"event": "drone_motion", "sim_time": 25.0,
+             "started_sim_time": 15.0, "ended_sim_time": 25.0,
+             "travelled_distance": 100.0},
+            {"event": "sensor_scan", "sim_time": 25.0,
+             "newly_known_cells": 5},
+            {"event": "rover_task_claimed", "sim_time": 25.0},
+            {"event": "frame_summary", "sim_time": 30.0,
+             "floor_exploration_ratio": 0.985,
+             "rover_states": [{"position": [3, 4]}]},
+            {"event": "drone_motion", "sim_time": 40.0,
+             "started_sim_time": 30.0, "ended_sim_time": 40.0,
+             "travelled_distance": 40.0},
+            {"event": "sensor_scan", "sim_time": 35.0,
+             "newly_known_cells": 3},
+            {"event": "rover_task_claimed", "sim_time": 36.0},
+            {"event": "rover_task_completed", "sim_time": 37.0},
+            {"event": "rover_rendezvous_endpoint_proposed",
+             "sim_time": 38.0},
+            {"event": "drone_component_check_in", "sim_time": 39.0,
+             "rover_slam_newly_known_cells": 108,
+             "rover_terrain_known_floor_cells": 1020},
+            {"event": "frame_summary", "sim_time": 40.0,
+             "floor_exploration_ratio": 0.989,
+             "rover_states": [{"position": [6, 8]}]},
+            {"event": "exploration_complete_presented", "sim_time": 40.5,
+             "floor_exploration_ratio": 0.989},
+        ]))
+
+        self.assertIn("Endgame cost (offline floor", report)
+        self.assertIn(
+            "from 98.00% at t=20.0s: floor_gain=0.900pp "
+            "elapsed=20.5s drone=90px rover_sampled=10px "
+            "sensor_slam_gain=8 rover_known_slam_delta=8 "
+            "rover_known_terrain_delta=20 claims=2 reports=1 proposals=1",
+            report,
+        )
+        self.assertIn("from 98.50% at t=30.0s:", report)
+
+    def test_rendezvous_summary_flags_fallback_during_queued_check_in(
+        self,
+    ) -> None:
+        report = "\n".join(summarize([
+            {"event": "drone_component_check_in_queued", "drone_id": 0,
+             "sim_time": 10.0},
+            {"event": "drone_rendezvous_endpoint_fallback", "drone_id": 0,
+             "sim_time": 10.005, "target_source": "rover_confirmed_relay"},
+            {"event": "drone_rendezvous_endpoint_fallback", "drone_id": 1,
+             "sim_time": 11.0, "target_source": "proposal_after_absence"},
+        ]))
+
+        self.assertIn(
+            "rendezvous fallbacks: sources={'proposal_after_absence': 1, "
+            "'rover_confirmed_relay': 1} same_tick_queued_checkins=1",
+            report,
+        )
 
     def test_summary_reports_coverage_memory_and_ingress_recovery(self) -> None:
         report = "\n".join(summarize([
