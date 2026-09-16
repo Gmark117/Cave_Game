@@ -55,6 +55,62 @@ class MissionRenderer:
             if drone.id not in docked_drone_ids:
                 drone.renderer.draw_vision_overlay(snapshot)
 
+        drones_by_id = {int(drone.id): drone for drone in drones}
+        snapshots_by_id = {
+            int(drone.id): snapshot
+            for drone, snapshot in zip(drones, drone_snapshots)
+        }
+        rovers_by_id = {int(rover.id): rover for rover in rovers}
+        drawn_sharing_pairs: set[tuple[str, int, int]] = set()
+        for drone, snapshot in zip(drones, drone_snapshots):
+            controller = getattr(drone, "movement_controller", None)
+            activity_snapshot = getattr(controller, "activity_snapshot", None)
+            activity = (
+                activity_snapshot()
+                if callable(activity_snapshot)
+                else None
+            )
+            peer_id = getattr(activity, "peer_id", None)
+            rover_id = getattr(activity, "rover_id", None)
+            if getattr(activity, "state", None) != "Sharing":
+                continue
+            if peer_id is not None:
+                peer = drones_by_id.get(int(peer_id))
+                peer_snapshot = snapshots_by_id.get(int(peer_id))
+                pair_ids = sorted((int(drone.id), int(peer_id)))
+                pair = ("drone", pair_ids[0], pair_ids[1])
+                if (
+                    pair in drawn_sharing_pairs
+                    or peer is None
+                    or peer_snapshot is None
+                ):
+                    continue
+                drone.renderer.draw_sharing_cue(
+                    snapshot,
+                    peer_snapshot.position,
+                    self._icon_ring_radius(peer),
+                )
+                drawn_sharing_pairs.add(pair)
+                continue
+            if rover_id is None:
+                continue
+            rover = rovers_by_id.get(int(rover_id))
+            pair = ("rover", int(drone.id), int(rover_id))
+            if pair in drawn_sharing_pairs or rover is None:
+                continue
+            rover_snapshot_method = getattr(rover, "snapshot", None)
+            rover_position = (
+                rover_snapshot_method().position
+                if callable(rover_snapshot_method)
+                else tuple(rover.pos)
+            )
+            drone.renderer.draw_sharing_cue(
+                snapshot,
+                rover_position,
+                self._icon_ring_radius(rover),
+            )
+            drawn_sharing_pairs.add(pair)
+
         for i, (drone, snapshot) in enumerate(
             zip(drones, drone_snapshots)
         ):
@@ -98,3 +154,12 @@ class MissionRenderer:
             ),
             exploration_complete=dependencies.is_exploration_complete(),
         )
+
+    @staticmethod
+    def _icon_ring_radius(agent: object) -> int | None:
+        """Return a cue radius just outside an agent sprite, when available."""
+        icon = getattr(agent, "icon", None)
+        get_size = getattr(icon, "get_size", None)
+        if not callable(get_size):
+            return None
+        return max(get_size()) // 2 + 4

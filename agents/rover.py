@@ -4,6 +4,7 @@ This module defines rover movement and mission state. Pygame drawing is
 delegated to `RoverRenderer`.
 """
 
+import math
 import random as rand
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, TYPE_CHECKING
@@ -28,6 +29,7 @@ class RoverSnapshot:
     battery: int
     path_remaining: int
     show_path: bool
+    heading_deg: float
 
 
 class Rover:
@@ -92,6 +94,8 @@ class Rover:
         self.border    = []
         self.start_pos = start_pos
         self.pos       = start_pos
+        # The source sprite faces north; headings increase clockwise.
+        self.heading_deg = 0.0
         self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
         # Rovers maintain their own knowledge store; navigation and the rover
@@ -119,6 +123,7 @@ class Rover:
             battery=int(self.battery),
             path_remaining=len(self.current_path),
             show_path=bool(self.show_path),
+            heading_deg=float(self.heading_deg),
         )
 
     # Define the radius based on the map size
@@ -140,7 +145,14 @@ class Rover:
             return
         if self.current_path:
             self.status = 'Advancing'
+            previous = self.pos
             self.pos = self.current_path.pop(0)
+            delta_x = self.pos[0] - previous[0]
+            delta_y = self.pos[1] - previous[1]
+            if delta_x != 0 or delta_y != 0:
+                self.heading_deg = math.degrees(
+                    math.atan2(delta_x, -delta_y)
+                ) % 360.0
             self.graph.add_node(self.pos)
             self.battery = max(0, self.battery - 1)
 

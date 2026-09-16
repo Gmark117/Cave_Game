@@ -25,6 +25,7 @@ class RecordingAgentRenderer:
         self.path_snapshot = None
         self.vision_snapshot = None
         self.icon_snapshot = None
+        self.sharing_pair = None
 
     def draw_path(self, snapshot=None) -> None:
         self.path_snapshot = snapshot
@@ -37,6 +38,15 @@ class RecordingAgentRenderer:
     def draw_icon(self, snapshot=None) -> None:
         self.icon_snapshot = snapshot
         self.events.append(f"{self.prefix}_icon")
+
+    def draw_sharing_cue(
+        self,
+        snapshot,
+        target_position,
+        target_radius=None,
+    ) -> None:
+        self.sharing_pair = (snapshot, target_position, target_radius)
+        self.events.append(f"{self.prefix}_sharing")
 
 
 class MissionRendererTests(unittest.TestCase):
@@ -288,6 +298,170 @@ class MissionRendererTests(unittest.TestCase):
         self.assertEqual(
             events,
             ["background", "slam", "control_center"],
+        )
+
+    def test_draw_renders_one_cue_for_an_active_sharing_pair(self) -> None:
+        events = []
+
+        def snapshot(position):
+            return DroneSnapshot(
+                position=position,
+                direction=0,
+                direction_history=(),
+                path_history=(position,),
+                frontiers=(),
+                returning_home=False,
+                done=False,
+                explored=True,
+                heading_deg=0.0,
+                ray_points=(),
+                battery=100,
+                show_path=True,
+                show_vision=True,
+                frontier_rebuild_cooldown=0.25,
+                last_frontier_rebuild=0.0,
+            )
+
+        first_snapshot = snapshot((2, 3))
+        second_snapshot = snapshot((6, 3))
+        first_renderer = RecordingAgentRenderer("first", events)
+        second_renderer = RecordingAgentRenderer("second", events)
+        first = SimpleNamespace(
+            id=0,
+            color=(1, 2, 3),
+            snapshot=Mock(return_value=first_snapshot),
+            renderer=first_renderer,
+            movement_controller=SimpleNamespace(
+                activity_snapshot=Mock(return_value=SimpleNamespace(
+                    state="Sharing",
+                    detail="with drone 2",
+                    target=(6, 3),
+                    peer_id=1,
+                )),
+            ),
+        )
+        second = SimpleNamespace(
+            id=1,
+            color=(4, 5, 6),
+            snapshot=Mock(return_value=second_snapshot),
+            renderer=second_renderer,
+            movement_controller=SimpleNamespace(
+                activity_snapshot=Mock(return_value=SimpleNamespace(
+                    state="Sharing",
+                    detail="with drone 1",
+                    target=(2, 3),
+                    peer_id=0,
+                )),
+            ),
+        )
+        control = SimpleNamespace(
+            game=SimpleNamespace(window=RecordingWindow(events)),
+            slam_view=SimpleNamespace(draw=lambda: events.append("slam")),
+            debug_info=SimpleNamespace(
+                build_debug_lines=lambda _snapshots: [],
+                build_system_lines=lambda _snapshots: [],
+            ),
+            control_center=SimpleNamespace(
+                draw_control_center=lambda **_kwargs: events.append(
+                    "control_center"
+                ),
+            ),
+            drones=[first, second],
+            rovers=[],
+            presentation=SimpleNamespace(
+                show_terrain_heatmap=False,
+                selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
+                show_full_map=False,
+            ),
+        )
+
+        MissionRenderer(self.make_dependencies(control)).draw()
+
+        self.assertEqual(
+            [event for event in events if event.endswith("_sharing")],
+            ["first_sharing"],
+        )
+        self.assertEqual(
+            first_renderer.sharing_pair,
+            (first_snapshot, second_snapshot.position, None),
+        )
+
+    def test_draw_renders_cue_for_active_drone_rover_sharing(self) -> None:
+        events = []
+        drone_snapshot = DroneSnapshot(
+            position=(2, 3),
+            direction=0,
+            direction_history=(),
+            path_history=((2, 3),),
+            frontiers=(),
+            returning_home=False,
+            done=False,
+            explored=True,
+            heading_deg=0.0,
+            ray_points=(),
+            battery=100,
+            show_path=True,
+            show_vision=True,
+            frontier_rebuild_cooldown=0.25,
+            last_frontier_rebuild=0.0,
+        )
+        drone_renderer = RecordingAgentRenderer("drone", events)
+        drone = SimpleNamespace(
+            id=0,
+            color=(1, 2, 3),
+            snapshot=Mock(return_value=drone_snapshot),
+            renderer=drone_renderer,
+            movement_controller=SimpleNamespace(
+                activity_snapshot=Mock(return_value=SimpleNamespace(
+                    state="Sharing",
+                    detail="with rover 1",
+                    target=(6, 3),
+                    peer_id=None,
+                    rover_id=0,
+                )),
+            ),
+        )
+        rover_snapshot = SimpleNamespace(
+            position=(6, 3),
+            target=None,
+            status="Ready",
+            battery=2400,
+        )
+        rover = SimpleNamespace(
+            id=0,
+            color=(4, 5, 6),
+            pos=(6, 3),
+            battery=2400,
+            status="Ready",
+            snapshot=Mock(return_value=rover_snapshot),
+            renderer=RecordingAgentRenderer("rover", events),
+        )
+        control = SimpleNamespace(
+            game=SimpleNamespace(window=RecordingWindow(events)),
+            slam_view=SimpleNamespace(draw=lambda: events.append("slam")),
+            debug_info=SimpleNamespace(
+                build_debug_lines=lambda _snapshots: [],
+                build_system_lines=lambda _snapshots: [],
+            ),
+            control_center=SimpleNamespace(
+                draw_control_center=lambda **_kwargs: None,
+            ),
+            drones=[drone],
+            rovers=[rover],
+            presentation=SimpleNamespace(
+                show_terrain_heatmap=False,
+                selected_drone_heatmap_id=None,
+                selected_rover_heatmap_id=None,
+                show_full_map=False,
+            ),
+        )
+
+        MissionRenderer(self.make_dependencies(control)).draw()
+
+        self.assertEqual(
+            drone_renderer.sharing_pair,
+            (drone_snapshot, (6, 3), None),
         )
 
 if __name__ == "__main__":

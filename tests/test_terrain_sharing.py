@@ -44,7 +44,9 @@ def make_agent(
         slam_map=SlamMap(*shape),
         merge_frontiers=runtime_state.merge_frontiers,
         movement_controller=SimpleNamespace(
-            mark_shared_slam_changed=Mock()
+            mark_shared_slam_changed=Mock(),
+            begin_peer_sharing=Mock(),
+            begin_rover_sharing=Mock(),
         ),
     )
 
@@ -143,6 +145,14 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertEqual(service.last_drone_share[0], 10.0)
         self.assertEqual(service.last_pair_share[(0, 1)], 10.0)
         self.assertTrue(control.presentation.terrain_heatmap_dirty)
+        source.movement_controller.begin_peer_sharing.assert_called_once_with(
+            1,
+            (2, 1),
+        )
+        target.movement_controller.begin_peer_sharing.assert_called_once_with(
+            0,
+            (1, 1),
+        )
 
     def test_motion_checkpoint_exchanges_once_on_contact_entry(self) -> None:
         control = make_control()
@@ -424,6 +434,10 @@ class TerrainSharingTests(unittest.TestCase):
         self.assertEqual(int(drone_slam.occupancy[3, 3]), 0)
         self.assertEqual(int(rover_slam.occupancy[0, 0]), 1)
         drone.movement_controller.mark_shared_slam_changed.assert_called_once()
+        drone.movement_controller.begin_rover_sharing.assert_called_once_with(
+            0,
+            (2, 1),
+        )
 
     def test_rover_check_in_requires_physical_proximity(self) -> None:
         control = make_control()

@@ -38,12 +38,12 @@ class ControlCenter:
         self._controller.active_tab = str(value)
 
     @property
-    def explored_percent(self) -> int:
-        """Latest wall-mapping percentage shown in the header."""
+    def explored_percent(self) -> float:
+        """Latest floor-exploration percentage shown in the header."""
         return self._controller.explored_percent
 
     @explored_percent.setter
-    def explored_percent(self, value: int) -> None:
+    def explored_percent(self, value: float) -> None:
         """Update the mission explored percentage."""
         self.set_explored_percent(value)
 
@@ -73,8 +73,8 @@ class ControlCenter:
         """Return the mission elapsed time as ``MM:SS``."""
         return self._controller.format_timer()
 
-    def set_explored_percent(self, value: int) -> None:
-        """Update wall-mapping progress without exposing internals."""
+    def set_explored_percent(self, value: float) -> None:
+        """Update floor-exploration progress without exposing internals."""
         self._controller.set_explored_percent(value)
 
     def draw_control_center(

@@ -1,5 +1,6 @@
 import os
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,7 @@ import pygame
 
 from agents.drone import Drone
 from agents.rover import Rover
+from asset_config.rendering import Colors
 from config.simulation_config import MissionConfig, SimulationConfig, SlamConfig
 from rendering.agent_renderer import DroneRenderer, RoverRenderer
 
@@ -236,6 +238,60 @@ class AgentRendererTests(unittest.TestCase):
             rover.renderer.draw_path()
 
         self.assertEqual(draw_line.call_count, 2)
+
+    def test_rover_icon_rotates_clockwise_with_heading_and_caches_surface(
+        self,
+    ) -> None:
+        icon = pygame.Surface((4, 6), pygame.SRCALPHA)
+        rover = Rover(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (0, 255, 0),
+            icon,
+            self.cave,
+        )
+        rover.heading_deg = 90.0
+
+        with patch(
+            "rendering.agent_renderer.pygame.transform.rotate",
+            wraps=pygame.transform.rotate,
+        ) as rotate:
+            rover.renderer.draw_icon()
+            rover.renderer.draw_icon()
+
+        rotate.assert_called_once_with(icon, -90)
+
+    def test_drone_sharing_cue_draws_link_and_endpoint_rings(self) -> None:
+        icon = pygame.Surface((4, 4), pygame.SRCALPHA)
+        drone = Drone(
+            self.game,
+            self.control,
+            0,
+            (32, 32),
+            (255, 0, 0),
+            icon,
+            self.cave,
+        )
+        first = drone.snapshot()
+        second = replace(first, position=(40, 32))
+
+        with patch(
+            "rendering.agent_renderer.pygame.draw.line",
+        ) as draw_line, patch(
+            "rendering.agent_renderer.pygame.draw.circle",
+        ) as draw_circle:
+            drone.renderer.draw_sharing_cue(first, second.position, 9)
+
+        draw_line.assert_called_once_with(
+            self.window,
+            Colors.YELLOW.value,
+            (32, 32),
+            (40, 32),
+            2,
+        )
+        self.assertEqual(draw_circle.call_count, 2)
 
 
 if __name__ == "__main__":

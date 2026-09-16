@@ -674,7 +674,9 @@ class MissionLifecycleTests(unittest.TestCase):
         ):
             mission._update_wall_mapping_progress()
 
-        mission.control_center.set_explored_percent.assert_called_once_with(98)
+        mission.control_center.set_explored_percent.assert_called_once_with(
+            98.44
+        )
         runtime_state.start_returning_home.assert_not_called()
 
     def test_wall_tolerance_does_not_trigger_homing_or_completion(self) -> None:

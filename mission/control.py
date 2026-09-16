@@ -2205,9 +2205,12 @@ class MissionControl(MissionControlLifecycleMixin):
             )
         ):
             displayed_percent = (
-                100
+                100.0
                 if self.floor_exploration_ratio >= 1.0
-                else min(99, int(self.floor_exploration_ratio * 100.0))
+                else min(
+                    99.99,
+                    round(self.floor_exploration_ratio * 100.0, 2),
+                )
             )
             self.control_center.set_explored_percent(displayed_percent)
             self.last_explored_update = now

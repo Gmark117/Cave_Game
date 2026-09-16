@@ -278,6 +278,37 @@ class ControlCenterRendererTests(unittest.TestCase):
         completion.assert_called_once_with()
         self.assertEqual(len(hit_map.mission_controls), 5)
 
+    def test_statistics_use_short_label_and_two_decimal_percentage(self) -> None:
+        window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
+        game = SimpleNamespace(window=window)
+        with patch.object(ControlCenterRenderer, "_load_tab_sprites"):
+            renderer = ControlCenterRenderer(game)
+        view = ControlCenterViewModel(
+            elapsed_time="00:12",
+            explored_percent=98.765,
+            active_tab="drones",
+            drone_statuses=(),
+            rover_statuses=(),
+            show_terrain_heatmap=False,
+            selected_drone_heatmap_id=None,
+            debug_lines=(),
+        )
+
+        with patch.object(
+            renderer,
+            "_get_cached_text_surface",
+            wraps=renderer._get_cached_text_surface,
+        ) as text_surface:
+            renderer.draw_statistics(view)
+
+        explored_call = next(
+            call for call in text_surface.call_args_list
+            if str(call.args[0]).startswith("explored_")
+        )
+        fragments = explored_call.args[1]
+        self.assertEqual(fragments[0][0], "Explored: ")
+        self.assertEqual(fragments[1][0], "98.77%")
+
 
 if __name__ == "__main__":
     unittest.main()

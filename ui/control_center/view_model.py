@@ -70,7 +70,7 @@ class ControlCenterViewModel:
     """Complete immutable display data for one control-center frame."""
 
     elapsed_time: str
-    explored_percent: int
+    explored_percent: float
     active_tab: str
     drone_statuses: tuple[DroneStatusView, ...]
     rover_statuses: tuple[RoverStatusView, ...]
@@ -87,7 +87,7 @@ class ControlCenterViewModel:
     def __init__(
         self,
         elapsed_time: str,
-        explored_percent: int,
+        explored_percent: float,
         active_tab: str,
         drone_statuses: Iterable[DroneStatusView],
         rover_statuses: Iterable[RoverStatusView],
@@ -106,7 +106,7 @@ class ControlCenterViewModel:
         object.__setattr__(
             self,
             "explored_percent",
-            int(explored_percent),
+            float(explored_percent),
         )
         object.__setattr__(self, "active_tab", str(active_tab))
         object.__setattr__(

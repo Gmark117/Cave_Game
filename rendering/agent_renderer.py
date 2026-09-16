@@ -125,6 +125,23 @@ class DroneRenderer:
         )
         drone.game.window.blit(drone.icon, icon_position)
 
+    def draw_sharing_cue(
+        self,
+        snapshot: DroneSnapshot,
+        target_position: tuple[int, int],
+        target_radius: int | None = None,
+    ) -> None:
+        """Draw a yellow physical link around actively sharing agents."""
+        window = self.drone.game.window
+        color = Colors.YELLOW.value
+        start = tuple(map(int, snapshot.position))
+        end = tuple(map(int, target_position))
+        start_radius = max(self.drone.icon.get_size()) // 2 + 4
+        end_radius = start_radius if target_radius is None else target_radius
+        pygame.draw.line(window, color, start, end, 2)
+        pygame.draw.circle(window, color, start, start_radius, 2)
+        pygame.draw.circle(window, color, end, end_radius, 2)
+
 
 class RoverRenderer:
     """Render a rover's path history and icon."""
@@ -140,6 +157,7 @@ class RoverRenderer:
         )
         self.path_surface.fill((*Colors.WHITE.value, 0))
         self._rendered_path_points = 0
+        self._rotated_icons: dict[int, pygame.Surface] = {}
 
     def draw_path(self) -> None:
         """Render the rover route history."""
@@ -169,14 +187,21 @@ class RoverRenderer:
         """Blit the rover icon centered at its current position."""
         rover = self.rover
         snapshot_method = getattr(rover, "snapshot", None)
-        position = (
-            snapshot_method().position
-            if callable(snapshot_method)
-            else rover.pos
+        snapshot = snapshot_method() if callable(snapshot_method) else None
+        position = snapshot.position if snapshot is not None else rover.pos
+        heading = float(
+            getattr(snapshot, "heading_deg", getattr(rover, "heading_deg", 0.0))
         )
-        icon_width, icon_height = rover.icon.get_size()
+        angle = int(round(heading)) % 360
+        icon = self._rotated_icons.get(angle)
+        if icon is None:
+            # Pygame uses counter-clockwise angles; mission headings are
+            # clockwise from north, matching the source sprite orientation.
+            icon = pygame.transform.rotate(rover.icon, -angle)
+            self._rotated_icons[angle] = icon
+        icon_width, icon_height = icon.get_size()
         icon_position = (
             int(position[0] - icon_width // 2),
             int(position[1] - icon_height // 2),
         )
-        rover.game.window.blit(rover.icon, icon_position)
+        rover.game.window.blit(icon, icon_position)

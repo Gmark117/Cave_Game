@@ -179,9 +179,9 @@ class ControlCenterRenderer(
         )
 
         explored_texts = [
-            ("Floor explored: ", Colors.GREY.value, 255),
+            ("Explored: ", Colors.GREY.value, 255),
             (
-                f"{view.explored_percent}%",
+                f"{view.explored_percent:.2f}%",
                 self.percent_color(view.explored_percent),
                 255,
             ),

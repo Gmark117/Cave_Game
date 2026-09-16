@@ -150,6 +150,8 @@ class DroneActivitySnapshot:
     component_id: int | None = None
     work_unit_id: int | None = None
     dfs_depth: int = 0
+    peer_id: int | None = None
+    rover_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -338,6 +340,9 @@ class _HeadingBias:
 class DroneMovementController:
     """Explore locally and use A* for frontier recovery and homing."""
 
+    _ACTIVITY_HOLD_SECONDS = 0.25
+    _SHARING_SECONDS = 0.75
+
     def __init__(
         self,
         drone: Any,
@@ -481,6 +486,12 @@ class DroneMovementController:
         self._coordination_report: CoordinationReport | None = None
         self._coordination_wait_started_at: float | None = None
         self._coordination_report_counter = 0
+        self._activity_lock = threading.Lock()
+        self._calculation_activity: DroneActivitySnapshot | None = None
+        self._held_activity: DroneActivitySnapshot | None = None
+        self._held_activity_until = 0.0
+        self._sharing_activity: DroneActivitySnapshot | None = None
+        self._sharing_until = 0.0
 
     def mark_shared_slam_changed(self) -> None:
         """Request a frontier refresh on the owning movement thread."""
@@ -491,11 +502,101 @@ class DroneMovementController:
         callback = self.dependencies.is_exploration_docked
         return bool(callable(callback) and callback(self.drone.id))
 
+    def begin_peer_sharing(
+        self,
+        peer_id: int,
+        peer_position: Position,
+    ) -> None:
+        """Pause translation and expose one real peer exchange to the UI."""
+        self._begin_sharing(DroneActivitySnapshot(
+            "Sharing",
+            f"with drone {int(peer_id) + 1}",
+            target=(int(peer_position[0]), int(peer_position[1])),
+            peer_id=int(peer_id),
+        ))
+
+    def begin_rover_sharing(
+        self,
+        rover_id: int,
+        rover_position: Position,
+    ) -> None:
+        """Pause translation and expose one real rover exchange to the UI."""
+        self._begin_sharing(DroneActivitySnapshot(
+            "Sharing",
+            f"with rover {int(rover_id) + 1}",
+            target=(int(rover_position[0]), int(rover_position[1])),
+            rover_id=int(rover_id),
+        ))
+
+    def _begin_sharing(self, activity: DroneActivitySnapshot) -> None:
+        """Publish one physical exchange for a short visible dwell."""
+        deadline = self._simulation_time() + self._SHARING_SECONDS
+        with self._activity_lock:
+            self._sharing_activity = activity
+            self._sharing_until = max(
+                self._sharing_until,
+                deadline,
+            )
+
+    def _active_transient_activity(self) -> DroneActivitySnapshot | None:
+        """Return a sharing/calculation state while its display window lasts."""
+        now = self._simulation_time()
+        with self._activity_lock:
+            if (
+                self._sharing_activity is not None
+                and now < self._sharing_until
+            ):
+                return self._sharing_activity
+            if self._calculation_activity is not None:
+                return self._calculation_activity
+            if (
+                self._held_activity is not None
+                and now < self._held_activity_until
+            ):
+                return self._held_activity
+        return None
+
+    def _sharing_remaining(self) -> float:
+        """Return simulation seconds left in the current sharing dwell."""
+        now = self._simulation_time()
+        with self._activity_lock:
+            if self._sharing_activity is None:
+                return 0.0
+            return max(0.0, self._sharing_until - now)
+
+    def _begin_calculation(
+        self,
+        state: str,
+        detail: str,
+        target: Position | None = None,
+    ) -> None:
+        """Publish a calculation state while work runs on this worker."""
+        with self._activity_lock:
+            self._calculation_activity = DroneActivitySnapshot(
+                state,
+                detail,
+                target=target,
+            )
+
+    def _end_calculation(self, state: str) -> None:
+        """Keep a completed calculation briefly legible in the UI."""
+        deadline = self._simulation_time() + self._ACTIVITY_HOLD_SECONDS
+        with self._activity_lock:
+            activity = self._calculation_activity
+            if activity is None or activity.state != state:
+                return
+            self._calculation_activity = None
+            self._held_activity = activity
+            self._held_activity_until = deadline
+
     def activity_snapshot(self) -> DroneActivitySnapshot:
         """Describe the current policy phase without exposing mutable cursors."""
         runtime = self.drone.snapshot()
         if runtime.done:
             return DroneActivitySnapshot("Done", "mission complete")
+        transient = self._active_transient_activity()
+        if transient is not None:
+            return transient
         if runtime.returning_home:
             return DroneActivitySnapshot(
                 "Homing",
@@ -679,6 +780,9 @@ class DroneMovementController:
     def move(self) -> None:
         """Advance one random step, escape route, or homing route."""
         drone = self.drone
+        sharing = self._active_transient_activity()
+        if sharing is not None and sharing.state == "Sharing":
+            return
         if self._component_policy_enabled():
             self._move_component_policy()
             return
@@ -5889,6 +5993,27 @@ class DroneMovementController:
         confidence_threshold: float = 0.6,
         global_heading: float | None = None,
     ) -> None:
+        """Recalculate local frontiers while publishing that UI state."""
+        self._begin_calculation(
+            "Recalculating",
+            "refreshing local frontiers",
+        )
+        try:
+            self._rebuild_frontiers(
+                stride=stride,
+                confidence_threshold=confidence_threshold,
+                global_heading=global_heading,
+            )
+        finally:
+            self._end_calculation("Recalculating")
+
+    def _rebuild_frontiers(
+        self,
+        *,
+        stride: int = 4,
+        confidence_threshold: float = 0.6,
+        global_heading: float | None = None,
+    ) -> None:
         """Extract known-free cells bordering unknown local SLAM cells."""
         slam = self.drone.slam_map.snapshot(point_limit=0)
         occupancy = np.asarray(slam.occupancy)
@@ -6093,24 +6218,32 @@ class DroneMovementController:
 
     def _compute_path(self, start: Position, goal: Position) -> PathResult:
         """Ask for a complete physical route or one capped route segment."""
-        segment_planner = self.dependencies.compute_path_segment
-        if callable(segment_planner):
-            result = segment_planner(start, goal)
-            if isinstance(result, PathResult):
-                return result
+        self._begin_calculation(
+            "Pathfinding",
+            f"target {goal[0]},{goal[1]}",
+            target=goal,
+        )
+        try:
+            segment_planner = self.dependencies.compute_path_segment
+            if callable(segment_planner):
+                result = segment_planner(start, goal)
+                if isinstance(result, PathResult):
+                    return result
 
-        path = tuple(self.dependencies.compute_path(start, goal))
-        status = (
-            PATH_COMPLETE
-            if path and path[-1] == goal
-            else PATH_UNREACHABLE
-        )
-        remaining = (
-            0.0
-            if status == PATH_COMPLETE
-            else math.dist(path[-1] if path else start, goal)
-        )
-        return PathResult(path, status, 0, remaining)
+            path = tuple(self.dependencies.compute_path(start, goal))
+            status = (
+                PATH_COMPLETE
+                if path and path[-1] == goal
+                else PATH_UNREACHABLE
+            )
+            remaining = (
+                0.0
+                if status == PATH_COMPLETE
+                else math.dist(path[-1] if path else start, goal)
+            )
+            return PathResult(path, status, 0, remaining)
+        finally:
+            self._end_calculation("Pathfinding")
 
     def _accept_partial_endpoint(
         self,
@@ -6268,6 +6401,12 @@ class DroneMovementController:
                             None if execution is None else execution.phase
                         ),
                     )
+                break
+            sharing_wait = self._sharing_remaining()
+            if sharing_wait > 0.0 and not self.dependencies.wait_simulation_delay(
+                sharing_wait
+            ):
+                completed = False
                 break
             if not self.dependencies.wait_simulation_delay(
                 self.drone.delay / self.drone.speed_factor

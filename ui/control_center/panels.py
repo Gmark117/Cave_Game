@@ -229,6 +229,8 @@ class ControlCenterPanelMixin:
             "Advancing",
             "Moving",
             "Sharing",
+            "Pathfinding",
+            "Recalculating",
             "Charging",
             "Task transit",
             "Frontier scan",
@@ -256,8 +258,8 @@ class ControlCenterPanelMixin:
 
     @staticmethod
     def percent_color(
-        value: int,
-        max_value: int = 100,
+        value: float,
+        max_value: float = 100.0,
     ) -> tuple[int, int, int]:
         """Return red/yellow/green for low/medium/high percentages."""
         if value < max_value * 20 / 100:

@@ -516,6 +516,15 @@ class TerrainSharingService:
         ):
             return False
 
+        # The exchange is normally faster than a rendered frame. Let both
+        # owners expose it briefly and skip translation during that interval.
+        self._begin_visible_peer_exchange(
+            drone,
+            other_drone,
+            drone_snapshot,
+            other_snapshot,
+        )
+
         changed = False
         if should_other_receive:
             changed |= bool(
@@ -550,6 +559,29 @@ class TerrainSharingService:
             raw_frontier_coordinates_shared=False,
         )
         return bool(changed or other_slam_changed or drone_slam_changed)
+
+    @staticmethod
+    def _begin_visible_peer_exchange(
+        drone: Any,
+        other_drone: Any,
+        drone_snapshot: Any,
+        other_snapshot: Any,
+    ) -> None:
+        """Notify both movement owners that a meaningful exchange began."""
+        first_callback = getattr(
+            getattr(drone, "movement_controller", None),
+            "begin_peer_sharing",
+            None,
+        )
+        second_callback = getattr(
+            getattr(other_drone, "movement_controller", None),
+            "begin_peer_sharing",
+            None,
+        )
+        if callable(first_callback):
+            first_callback(int(other_drone.id), other_snapshot.position)
+        if callable(second_callback):
+            second_callback(int(drone.id), drone_snapshot.position)
 
     @staticmethod
     def _notify_shared_slam_changed(drone: Any) -> None:
@@ -699,6 +731,12 @@ class TerrainSharingService:
                     self._agent_versions(rover),
                 )
                 reason = "exchanged" if changed else "no_delta"
+        if changed:
+            self._begin_visible_rover_exchange(
+                drone,
+                rover,
+                rover_id=rover_id,
+            )
         self._trace(
             trace_event,
             drone_id=int(drone.id),
@@ -721,6 +759,25 @@ class TerrainSharingService:
             ),
         )
         return True
+
+    @staticmethod
+    def _begin_visible_rover_exchange(
+        drone: Any,
+        rover: Any,
+        *,
+        rover_id: int,
+    ) -> None:
+        """Notify a drone that a meaningful physical rover exchange ran."""
+        callback = getattr(
+            getattr(drone, "movement_controller", None),
+            "begin_rover_sharing",
+            None,
+        )
+        if callable(callback):
+            callback(
+                int(getattr(rover, "id", rover_id)),
+                tuple(rover.pos),
+            )
 
     def visible_drone_positions(
         self,

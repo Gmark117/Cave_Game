@@ -341,6 +341,101 @@ class DroneMovementTests(unittest.TestCase):
             RandomDirectionPolicy,
         )
 
+    def test_peer_sharing_temporarily_pauses_translation_and_reports_state(
+        self,
+    ) -> None:
+        controller = self.drone.movement_controller
+        clock = [10.0]
+        controller.dependencies = replace(
+            controller.dependencies,
+            simulation_time=lambda: clock[0],
+        )
+        original = self.drone.snapshot().position
+
+        controller.begin_peer_sharing(2, (24, 16))
+        controller.move()
+
+        activity = controller.activity_snapshot()
+        self.assertEqual(activity.state, "Sharing")
+        self.assertEqual(activity.peer_id, 2)
+        self.assertEqual(activity.target, (24, 16))
+        self.assertEqual(self.drone.snapshot().position, original)
+
+        clock[0] += controller._SHARING_SECONDS + 0.01
+        self.assertNotEqual(controller.activity_snapshot().state, "Sharing")
+
+        controller.begin_rover_sharing(0, (16, 16))
+        activity = controller.activity_snapshot()
+        self.assertEqual(activity.state, "Sharing")
+        self.assertEqual(activity.rover_id, 0)
+        self.assertEqual(activity.target, (16, 16))
+
+    def test_path_pauses_for_peer_exchange_then_resumes_same_route(self) -> None:
+        controller = self.drone.movement_controller
+        clock = [10.0]
+        waits = []
+        contacted = [False]
+
+        def contact(_drone_id):
+            if contacted[0]:
+                return
+            contacted[0] = True
+            controller.begin_peer_sharing(1, (18, 16))
+
+        def wait(duration):
+            waits.append(duration)
+            clock[0] += duration
+            return True
+
+        controller.dependencies = replace(
+            controller.dependencies,
+            physical_contact_checkpoint=contact,
+            simulation_time=lambda: clock[0],
+            wait_simulation_delay=wait,
+        )
+
+        completed = controller._follow_path(((17, 16), (18, 16)))
+
+        self.assertTrue(completed)
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        self.assertAlmostEqual(waits[0], controller._SHARING_SECONDS)
+
+    def test_pathfinding_and_recalculation_are_exposed_as_activity_states(
+        self,
+    ) -> None:
+        controller = self.drone.movement_controller
+        clock = [20.0]
+        observed = []
+
+        def pathfinder(_start, goal):
+            observed.append(controller.activity_snapshot().state)
+            return PathResult((_start, goal), PATH_COMPLETE, 2, 0.0)
+
+        controller.dependencies = replace(
+            controller.dependencies,
+            compute_path_segment=pathfinder,
+            simulation_time=lambda: clock[0],
+        )
+        controller._compute_path((16, 16), (20, 16))
+        self.assertEqual(observed, ["Pathfinding"])
+        self.assertEqual(controller.activity_snapshot().state, "Pathfinding")
+
+        clock[0] += controller._ACTIVITY_HOLD_SECONDS + 0.01
+        with patch.object(
+            controller,
+            "_rebuild_frontiers",
+            side_effect=lambda **_kwargs: observed.append(
+                controller.activity_snapshot().state
+            ),
+        ):
+            controller.rebuild_frontiers()
+
+        self.assertEqual(observed[-1], "Recalculating")
+        self.assertEqual(
+            controller.activity_snapshot().state,
+            "Recalculating",
+        )
+
     def test_normal_exploration_moves_straight_without_astar(self) -> None:
         policy = FixedDirectionPolicy(0)
         self.drone.exploration_policy = policy

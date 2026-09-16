@@ -57,6 +57,7 @@ class RoverTests(unittest.TestCase):
 
         self.rover.move()
         self.assertEqual(self.rover.pos, (1, 0))
+        self.assertEqual(self.rover.snapshot().heading_deg, 90.0)
         self.rover.move()
 
         self.assertEqual(self.rover.pos, (2, 0))
