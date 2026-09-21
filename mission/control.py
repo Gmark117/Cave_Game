@@ -241,6 +241,23 @@ class MissionControl(MissionControlLifecycleMixin):
             component_follower_policy=(
                 "spare_drone_follows_leader_then_reserves_first_split_branch"
             ),
+            incidental_scan_mode=self.settings.incidental_scan.mode,
+            incidental_scan_maximum_attempts=(
+                self.settings.incidental_scan.maximum_attempts_per_directive
+            ),
+            incidental_scan_maximum_wait_seconds=(
+                self.settings.incidental_scan.maximum_wait_seconds_per_directive
+            ),
+            incidental_scan_attempt_timeout_seconds=(
+                self.settings.incidental_scan.attempt_timeout_seconds
+            ),
+            incidental_scan_maximum_rotation_degrees=(
+                self.settings.incidental_scan
+                .maximum_rotation_degrees_per_directive
+            ),
+            incidental_scan_distance_cooldown_ranges=(
+                self.settings.incidental_scan.distance_cooldown_sensor_ranges
+            ),
             component_zero_gain_memory="individual_anchor_or_subarc_plus_lineage_low_gain",
             component_focused_endgame_policy=(
                 "max_parallel_then_round_trip_distribution"

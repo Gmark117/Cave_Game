@@ -3432,6 +3432,13 @@ def summarize(
     stagnation_scan_confidence_gain: dict[int, float] = defaultdict(float)
     scan_exit_resume_deltas: dict[int, list[float]] = defaultdict(list)
     scan_exit_exact_resumes: Counter[int] = Counter()
+    incidental_outcomes: dict[int, Counter[str]] = defaultdict(Counter)
+    incidental_route_resumes: dict[int, Counter[str]] = defaultdict(Counter)
+    incidental_wait_seconds: dict[int, float] = defaultdict(float)
+    incidental_rotation_degrees: dict[int, float] = defaultdict(float)
+    incidental_newly_known: dict[int, int] = defaultdict(int)
+    incidental_pocket_cells_closed: dict[int, int] = defaultdict(int)
+    incidental_predicted_support: dict[int, int] = defaultdict(int)
     sensor_stage_timings: dict[int, dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -3539,6 +3546,30 @@ def summarize(
                 scan_exit_resume_deltas[drone_id].append(resume_delta)
                 if bool(event.get("exact_resume", False)):
                     scan_exit_exact_resumes[drone_id] += 1
+        if event_name == "drone_incidental_scan_finished":
+            incidental_outcomes[drone_id][
+                str(event.get("outcome", "unknown"))
+            ] += 1
+            incidental_wait_seconds[drone_id] += float(
+                event.get("wait_seconds", 0.0) or 0.0
+            )
+            incidental_rotation_degrees[drone_id] += float(
+                event.get("requested_rotation", 0.0) or 0.0
+            )
+            incidental_newly_known[drone_id] += int(
+                event.get("newly_known_cells", 0) or 0
+            )
+            incidental_pocket_cells_closed[drone_id] += int(
+                event.get("original_pocket_cells_closed", 0) or 0
+            )
+        if event_name == "drone_incidental_scan_candidate":
+            incidental_predicted_support[drone_id] += int(
+                event.get("pocket_cells", 0) or 0
+            )
+        if event_name == "drone_incidental_route_resumed":
+            incidental_route_resumes[drone_id][
+                str(event.get("disposition", "unknown"))
+            ] += 1
         if event_name == "drone_random_direction_selected":
             heading_selection_modes[drone_id][
                 str(event.get("selection_mode", "legacy_uniform"))
@@ -4001,10 +4032,36 @@ def summarize(
             "drone_start_homing_after_exhaustion",
             "sensor_scan",
             "sensor_pose_static_skip",
+            "drone_incidental_scan_sampled",
+            "drone_incidental_scan_candidate",
+            "drone_incidental_scan_started",
+            "drone_incidental_scan_finished",
+            "drone_incidental_route_resumed",
+            "drone_incidental_pocket_revisited",
         )
         for name in interesting:
             if counts[name]:
                 lines.append(f"  {name}: {counts[name]}")
+        if (
+            incidental_outcomes[drone_id]
+            or counts["drone_incidental_scan_candidate"]
+        ):
+            outcomes = incidental_outcomes[drone_id]
+            resumes = incidental_route_resumes[drone_id]
+            lines.append(
+                "  incidental_scan_summary: "
+                f"completed={outcomes['completed']} "
+                f"timed_out={outcomes['timed_out']} "
+                f"cancelled={outcomes['cancelled']} "
+                f"wait={incidental_wait_seconds[drone_id]:.3f}s "
+                f"rotation={incidental_rotation_degrees[drone_id]:.1f}deg "
+                f"newly_known={incidental_newly_known[drone_id]} "
+                f"predicted_support={incidental_predicted_support[drone_id]} "
+                "pocket_cells_closed="
+                f"{incidental_pocket_cells_closed[drone_id]} "
+                f"retained={resumes['retained']} "
+                f"replanned={resumes['replanned']}"
+            )
         sensor_timings = sensor_stage_timings[drone_id]
         total_timings = sensor_timings["sensor_elapsed_ms"]
         if total_timings:

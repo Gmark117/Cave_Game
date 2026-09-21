@@ -10,6 +10,7 @@ from typing import Callable, Optional, TypeVar
 from config.simulation_config import (
     ExplorationConfig,
     FrontierConfig,
+    IncidentalScanConfig,
     MissionConfig,
     RenderingConfig,
     SharingConfig,
@@ -201,6 +202,27 @@ class MenuSettingsRepository:
                 settings.exploration.coverage_edge_weight
             ),
         }
+        config["INCIDENTAL_SCAN"] = {
+            "mode": settings.incidental_scan.mode,
+            "maximum_attempts_per_directive": str(
+                settings.incidental_scan.maximum_attempts_per_directive
+            ),
+            "maximum_wait_seconds_per_directive": str(
+                settings.incidental_scan.maximum_wait_seconds_per_directive
+            ),
+            "attempt_timeout_seconds": str(
+                settings.incidental_scan.attempt_timeout_seconds
+            ),
+            "maximum_rotation_degrees_per_directive": str(
+                settings.incidental_scan.maximum_rotation_degrees_per_directive
+            ),
+            "distance_cooldown_sensor_ranges": str(
+                settings.incidental_scan.distance_cooldown_sensor_ranges
+            ),
+            "sample_spacing_sensor_ranges": str(
+                settings.incidental_scan.sample_spacing_sensor_ranges
+            ),
+        }
         config["RENDERING"] = {
             "slam_point_tail": str(settings.rendering.point_tail),
             "slam_refresh_interval": str(
@@ -263,6 +285,15 @@ class MenuSettingsRepository:
                     defaults.exploration,
                 ),
                 defaults.exploration,
+            ),
+            incidental_scan=self._section_or_default(
+                lambda: self._read_incidental_scan(
+                    config["INCIDENTAL_SCAN"]
+                    if config.has_section("INCIDENTAL_SCAN")
+                    else {},
+                    defaults.incidental_scan,
+                ),
+                defaults.incidental_scan,
             ),
             rendering=self._section_or_default(
                 lambda: self._read_rendering(
@@ -470,6 +501,40 @@ class MenuSettingsRepository:
             coverage_edge_weight=float(section.get(
                 "coverage_edge_weight",
                 defaults.coverage_edge_weight,
+            )),
+        )
+
+    @staticmethod
+    def _read_incidental_scan(
+        section: object,
+        defaults: IncidentalScanConfig,
+    ) -> IncidentalScanConfig:
+        """Parse bounded incidental wall-pocket scan controls."""
+        return IncidentalScanConfig(
+            mode=str(section.get("mode", defaults.mode)),
+            maximum_attempts_per_directive=int(section.get(
+                "maximum_attempts_per_directive",
+                defaults.maximum_attempts_per_directive,
+            )),
+            maximum_wait_seconds_per_directive=float(section.get(
+                "maximum_wait_seconds_per_directive",
+                defaults.maximum_wait_seconds_per_directive,
+            )),
+            attempt_timeout_seconds=float(section.get(
+                "attempt_timeout_seconds",
+                defaults.attempt_timeout_seconds,
+            )),
+            maximum_rotation_degrees_per_directive=float(section.get(
+                "maximum_rotation_degrees_per_directive",
+                defaults.maximum_rotation_degrees_per_directive,
+            )),
+            distance_cooldown_sensor_ranges=float(section.get(
+                "distance_cooldown_sensor_ranges",
+                defaults.distance_cooldown_sensor_ranges,
+            )),
+            sample_spacing_sensor_ranges=float(section.get(
+                "sample_spacing_sensor_ranges",
+                defaults.sample_spacing_sensor_ranges,
             )),
         )
 

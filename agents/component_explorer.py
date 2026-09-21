@@ -14,7 +14,7 @@ from mapping.frontiers import (
     significant_frontier_mask,
 )
 from mapping.ray_geometry import bresenham_line_points
-from mapping.slam_map import FREE, UNKNOWN, SlamSnapshot
+from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 
 
 Position = tuple[int, int]
@@ -54,6 +54,40 @@ class FrontierObservationPose:
     heading: int
     route_prefix: tuple[Position, ...]
     saved_route_distance: float
+
+
+@dataclass(frozen=True)
+class IncidentalPocketSignature:
+    """Stable, trace-safe geometry used to suppress repeated side scans."""
+
+    support_bins: tuple[Position, ...]
+    gateway_bin: Position
+    wall_bin: Position
+
+
+@dataclass(frozen=True)
+class IncidentalScanCandidate:
+    """One enclosed wall-adjacent unknown pocket visible from a route pose."""
+
+    signature: IncidentalPocketSignature
+    cells: frozenset[Position]
+    gateway: Position
+    wall_contact: Position
+    wall_cells: int
+    heading: int
+    heading_delta: float
+    current_visibility: int
+    proposed_visibility: int
+    side_only_support: int
+
+
+@dataclass(frozen=True)
+class IncidentalScanDetection:
+    """Bounded detector result and deterministic rejection accounting."""
+
+    candidate: IncidentalScanCandidate | None
+    component_count: int
+    rejection_counts: tuple[tuple[str, int], ...]
 
 
 @dataclass(frozen=True)
@@ -429,6 +463,237 @@ def observation_pose_on_path(
             saved_route_distance=suffix_distance[index],
         )
     return None
+
+
+def incidental_scan_candidate(
+    slam: SlamSnapshot,
+    *,
+    position: Position,
+    current_heading: float,
+    sensor_range: float,
+    sensor_fov_deg: float,
+    confidence_threshold: float,
+    frontier_stride: int,
+    active_cells: Iterable[Position] = (),
+) -> IncidentalScanDetection:
+    """Select one small side-looking pocket using only local SLAM.
+
+    Unknown components that reach either the bounded inspection window or the
+    local snapshot boundary are deliberately excluded.  They may be the mouth
+    of a larger unexplored basin and remain ordinary component work.
+    """
+    rejection_names = (
+        "unsafe_pose",
+        "window_boundary",
+        "local_boundary",
+        "no_wall",
+        "no_gateway",
+        "oversized_cone",
+        "occluded",
+        "active_target",
+        "already_visible",
+        "rear_facing",
+    )
+    rejected = {name: 0 for name in rejection_names}
+    if sensor_range <= 0.0 or sensor_fov_deg <= 0.0:
+        return IncidentalScanDetection(None, 0, tuple(rejected.items()))
+
+    occupancy = np.asarray(slam.occupancy)
+    confidence = np.asarray(slam.confidence)
+    if occupancy.shape != confidence.shape or occupancy.ndim != 2:
+        raise ValueError("SLAM occupancy and confidence must be matching 2D arrays")
+    height, width = occupancy.shape
+    offset_x, offset_y = (int(value) for value in slam.origin)
+    center_x = int(position[0]) - offset_x
+    center_y = int(position[1]) - offset_y
+    radius = max(1, int(math.ceil(float(sensor_range))))
+    left = max(0, center_x - radius)
+    right = min(width - 1, center_x + radius)
+    top = max(0, center_y - radius)
+    bottom = min(height - 1, center_y + radius)
+    if left > right or top > bottom:
+        return IncidentalScanDetection(None, 0, tuple(rejected.items()))
+
+    threshold = float(confidence_threshold)
+    if not (
+        0 <= center_x < width
+        and 0 <= center_y < height
+        and occupancy[center_y, center_x] == FREE
+        and confidence[center_y, center_x] >= threshold
+    ):
+        rejected["unsafe_pose"] += 1
+        return IncidentalScanDetection(None, 0, tuple(rejected.items()))
+    unknown = (
+        (occupancy == UNKNOWN)
+        | (confidence < threshold)
+    )
+    local_unknown = unknown[top:bottom + 1, left:right + 1]
+    components = eight_connected_components(local_unknown)
+    stride = max(1, int(frontier_stride))
+    active = tuple((int(x), int(y)) for x, y in active_cells)
+    active_radius = float(2 * stride)
+
+    def global_point(local_x: int, local_y: int) -> Position:
+        return local_x + offset_x, local_y + offset_y
+
+    def confident(label: int, local_x: int, local_y: int) -> bool:
+        return bool(
+            occupancy[local_y, local_x] == label
+            and confidence[local_y, local_x] >= threshold
+        )
+
+    def known_wall_blocks(point: Position) -> bool:
+        line = bresenham_line_points(*position, *point)
+        for line_x, line_y in line[1:-1]:
+            local_x = int(line_x) - offset_x
+            local_y = int(line_y) - offset_y
+            if (
+                0 <= local_x < width
+                and 0 <= local_y < height
+                and confident(OCCUPIED, local_x, local_y)
+            ):
+                return True
+        return False
+
+    candidates: list[IncidentalScanCandidate] = []
+    for component in components:
+        local_cells = tuple((x + left, y + top) for x, y in component)
+        if any(
+            x in {0, width - 1} or y in {0, height - 1}
+            for x, y in local_cells
+        ):
+            rejected["local_boundary"] += 1
+            continue
+        if any(
+            x in {0, local_unknown.shape[1] - 1}
+            or y in {0, local_unknown.shape[0] - 1}
+            for x, y in component
+        ):
+            rejected["window_boundary"] += 1
+            continue
+        cells = frozenset(global_point(x, y) for x, y in local_cells)
+
+        wall_contacts: set[Position] = set()
+        gateways: set[Position] = set()
+        for local_x, local_y in local_cells:
+            for neighbor_y in range(local_y - 1, local_y + 2):
+                for neighbor_x in range(local_x - 1, local_x + 2):
+                    if neighbor_x == local_x and neighbor_y == local_y:
+                        continue
+                    if not (0 <= neighbor_x < width and 0 <= neighbor_y < height):
+                        continue
+                    if confident(OCCUPIED, neighbor_x, neighbor_y):
+                        wall_contacts.add(global_point(neighbor_x, neighbor_y))
+                    elif confident(FREE, neighbor_x, neighbor_y):
+                        gateways.add(global_point(neighbor_x, neighbor_y))
+        if not wall_contacts:
+            rejected["no_wall"] += 1
+            continue
+        if not gateways:
+            rejected["no_gateway"] += 1
+            continue
+        if active and any(
+            math.dist(cell, target) <= active_radius + 1e-9
+            for cell in cells
+            for target in active
+        ):
+            rejected["active_target"] += 1
+            continue
+
+        aim_x = sum(point[0] for point in cells) / len(cells)
+        aim_y = sum(point[1] for point in cells) / len(cells)
+        heading = int(round(math.degrees(math.atan2(
+            aim_x - position[0],
+            -(aim_y - position[1]),
+        )))) % 360
+        if not all(
+            _inside_scan_footprint(
+                position,
+                heading,
+                point,
+                sensor_range=sensor_range,
+                sensor_fov_deg=sensor_fov_deg,
+            )
+            for point in cells
+        ):
+            rejected["oversized_cone"] += 1
+            continue
+        if any(known_wall_blocks(point) for point in cells):
+            rejected["occluded"] += 1
+            continue
+
+        heading_delta = abs(
+            (float(heading) - float(current_heading) + 180.0) % 360.0
+            - 180.0
+        )
+        if heading_delta > 120.0 + 1e-9:
+            rejected["rear_facing"] += 1
+            continue
+        current_visible = sum(
+            _inside_scan_footprint(
+                position,
+                current_heading,
+                point,
+                sensor_range=sensor_range,
+                sensor_fov_deg=sensor_fov_deg,
+            )
+            for point in cells
+        )
+        side_only = len(cells) - current_visible
+        minimum_side_only = max(1, int(math.ceil(len(cells) * 0.25)))
+        if (
+            heading_delta + 1e-9 < float(sensor_fov_deg) / 2.0
+            or side_only < minimum_side_only
+        ):
+            rejected["already_visible"] += 1
+            continue
+
+        gateway = min(
+            gateways,
+            key=lambda point: (math.dist(position, point), point[1], point[0]),
+        )
+        wall_contact = min(
+            wall_contacts,
+            key=lambda point: (math.dist(position, point), point[1], point[0]),
+        )
+        signature = IncidentalPocketSignature(
+            support_bins=tuple(sorted(
+                {(x // stride, y // stride) for x, y in cells},
+                key=lambda point: (point[1], point[0]),
+            )),
+            gateway_bin=(gateway[0] // stride, gateway[1] // stride),
+            wall_bin=(wall_contact[0] // stride, wall_contact[1] // stride),
+        )
+        candidates.append(IncidentalScanCandidate(
+            signature=signature,
+            cells=cells,
+            gateway=gateway,
+            wall_contact=wall_contact,
+            wall_cells=len(wall_contacts),
+            heading=heading,
+            heading_delta=heading_delta,
+            current_visibility=current_visible,
+            proposed_visibility=len(cells),
+            side_only_support=side_only,
+        ))
+
+    selected = min(
+        candidates,
+        key=lambda candidate: (
+            len(candidate.cells),
+            -candidate.side_only_support,
+            candidate.heading_delta,
+            candidate.signature.support_bins,
+            candidate.signature.gateway_bin,
+            candidate.signature.wall_bin,
+        ),
+        default=None,
+    )
+    return IncidentalScanDetection(
+        selected,
+        len(components),
+        tuple(rejected.items()),
+    )
 
 
 def local_node_pose(

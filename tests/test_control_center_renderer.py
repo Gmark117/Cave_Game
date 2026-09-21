@@ -8,7 +8,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from asset_config.gameplay import Display
-from asset_config.rendering import Fonts
+from asset_config.rendering import Colors, Fonts
 from ui.control_center.renderer import ControlCenterRenderer
 from ui.control_center.view_model import (
     ControlCenterViewModel,
@@ -22,6 +22,12 @@ class ControlCenterRendererTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         pygame.init()
         pygame.display.set_mode((1, 1), pygame.HIDDEN)
+
+    def test_incidental_scan_uses_active_status_color(self) -> None:
+        self.assertEqual(
+            ControlCenterRenderer._status_color("Incidental scan"),
+            Colors.YELLOW.value,
+        )
 
     def test_render_consumes_one_view_model_and_returns_hit_map(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)

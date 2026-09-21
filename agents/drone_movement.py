@@ -13,9 +13,12 @@ import numpy as np
 
 from agents.component_explorer import (
     FrontierObservationPose,
+    IncidentalPocketSignature,
+    IncidentalScanCandidate,
     LocalComponentNode,
     LocalDFSStack,
     ScanPlanProgress,
+    incidental_scan_candidate,
     local_node_pose,
     observation_pose_on_path,
     related_local_successors,
@@ -111,6 +114,47 @@ class _CoordinationExecution:
     follow_last_leader_seen_at: float | None = None
     follow_last_leader_progress_at: float | None = None
     follow_last_leader_position: Position | None = None
+    incidental_distance_since_sample: float = 0.0
+    incidental_distance_since_selection: float = math.inf
+    incidental_candidates: int = 0
+    incidental_attempts: int = 0
+    incidental_completions: int = 0
+    incidental_timeouts: int = 0
+    incidental_wait_seconds: float = 0.0
+    incidental_requested_rotation: float = 0.0
+    incidental_predicted_support: int = 0
+    incidental_pocket_cells_closed: int = 0
+
+
+@dataclass
+class _IncidentalPocketAttempt:
+    """Drone-local duplicate memory retained across rover directives."""
+
+    signature: IncidentalPocketSignature
+    cells: frozenset[Position]
+    gateway: Position
+    attempted_at: float
+    revisited: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingIncidentalTransitScan:
+    """A side scan layered over an eligible retained transit route."""
+
+    directive_id: int
+    original_phase: str
+    position: Position
+    heading: int
+    resume_heading: float
+    candidate: IncidentalScanCandidate
+    minimum_scan_sequence: int
+    requested_at: float
+    deadline: float
+    retained_route: tuple[Position, ...]
+    route_target: Position
+    route_source: str
+    path_status: str | None
+    baseline_slam_version: int
 
 
 @dataclass(frozen=True)
@@ -436,6 +480,27 @@ class DroneMovementController:
             0.0,
             float(exploration.coverage_edge_weight),
         )
+        incidental = drone.settings.incidental_scan
+        self.incidental_scan_mode = str(incidental.mode).casefold()
+        self.incidental_maximum_attempts = max(
+            0, int(incidental.maximum_attempts_per_directive),
+        )
+        self.incidental_maximum_wait = max(
+            0.0, float(incidental.maximum_wait_seconds_per_directive),
+        )
+        self.incidental_attempt_timeout = max(
+            0.0, float(incidental.attempt_timeout_seconds),
+        )
+        self.incidental_maximum_rotation = max(
+            0.0,
+            float(incidental.maximum_rotation_degrees_per_directive),
+        )
+        self.incidental_cooldown_ranges = max(
+            0.0, float(incidental.distance_cooldown_sensor_ranges),
+        )
+        self.incidental_sample_spacing_ranges = max(
+            0.0, float(incidental.sample_spacing_sensor_ranges),
+        )
         coverage_started_at = self._simulation_time()
         initial_coverage_cell = self._coverage_cell(
             drone.snapshot().position
@@ -460,6 +525,10 @@ class DroneMovementController:
         )
         self._stagnation_distance_travelled = 0.0
         self._pending_frontier_scan: _PendingFrontierScan | None = None
+        self._pending_incidental_scan: (
+            _PendingIncidentalTransitScan | None
+        ) = None
+        self._incidental_attempt_memory: list[_IncidentalPocketAttempt] = []
         self._pending_frontier_route: _PendingFrontierRoute | None = None
         self._partial_route_endpoints: dict[
             Position,
@@ -616,6 +685,19 @@ class DroneMovementController:
             return DroneActivitySnapshot(
                 "Docked",
                 "with rover; coordinator reply pending",
+            )
+
+        pending_incidental = self._pending_incidental_scan
+        if pending_incidental is not None:
+            return DroneActivitySnapshot(
+                "Incidental scan",
+                (
+                    f"heading {pending_incidental.heading} pocket "
+                    f"{pending_incidental.candidate.gateway[0]},"
+                    f"{pending_incidental.candidate.gateway[1]}"
+                ),
+                target=pending_incidental.candidate.gateway,
+                directive_id=pending_incidental.directive_id,
             )
 
         execution = self._coordination_execution
@@ -891,13 +973,19 @@ class DroneMovementController:
             return
         shared_change = self._refresh_frontiers_before_mission_state()
         if shared_change and self._coordination_execution is not None:
-            self._revalidate_component_target_after_share(
+            target_changed = self._revalidate_component_target_after_share(
                 self._coordination_execution
             )
+            if target_changed and self._pending_incidental_scan is not None:
+                self._cancel_pending_incidental_scan(
+                    "shared_slam_invalidated"
+                )
         state = self.drone.snapshot()
         if state.done:
+            self._cancel_pending_incidental_scan("mission_complete")
             return
         if state.returning_home:
+            self._cancel_pending_incidental_scan("homing")
             if self.reach_start_point():
                 self.drone.runtime_state.mark_done()
             return
@@ -1173,6 +1261,7 @@ class DroneMovementController:
         self,
         directive: ExplorationDirective,
     ) -> None:
+        self._cancel_pending_incidental_scan("directive_changed")
         waited = None
         if self._coordination_wait_started_at is not None:
             waited = max(
@@ -1294,6 +1383,18 @@ class DroneMovementController:
             and self._energy_requires_return(execution)
         ):
             return
+        if self._pending_incidental_scan is not None:
+            pending = self._pending_incidental_scan
+            if (
+                pending.directive_id != execution.directive.directive_id
+                or pending.original_phase != execution.phase
+            ):
+                self._cancel_pending_incidental_scan(
+                    "route_context_changed"
+                )
+            else:
+                self._advance_pending_incidental_scan(execution)
+                return
         if kind == DirectiveKind.ROVER_SCAN:
             if self._advance_coordination_scan(execution):
                 self._finish_coordination_execution(execution)
@@ -2114,6 +2215,11 @@ class DroneMovementController:
 
         result = self._compute_path(current, target)
         path = tuple(result.path)
+        self._record_incidental_pocket_revisit(
+            target,
+            path,
+            source="component_dfs_reposition_astar",
+        )
         effective_target = target
         if (
             result.status == PATH_COMPLETE
@@ -2155,11 +2261,26 @@ class DroneMovementController:
             source="component_dfs_reposition_astar",
             stop_when=stop_for_shared_target,
             stop_reason="shared_slam_invalidated",
+            incidental_transit=True,
+            path_target=effective_target,
+            path_status=result.status,
         )
         reached = (
             followed
             and self.drone.snapshot().position == effective_target
         )
+        if self._pending_incidental_scan is not None:
+            self._trace(
+                "drone_dfs_reposition_paused_for_incidental_scan",
+                directive_id=execution.directive.directive_id,
+                start=current,
+                target=target,
+                observation_target=effective_target,
+                path_status=result.status,
+                path_length=len(result.path),
+                pause_position=self.drone.snapshot().position,
+            )
+            return
         self._trace(
             "drone_dfs_reposition_path",
             directive_id=execution.directive.directive_id,
@@ -2331,6 +2452,11 @@ class DroneMovementController:
             result = self._compute_path(current, target)
             path = tuple(result.path)
             status = result.status
+        self._record_incidental_pocket_revisit(
+            target,
+            path,
+            source=source,
+        )
         execution.route_attempts += 1
         if not path:
             if execution.route_attempts >= 2:
@@ -2398,8 +2524,21 @@ class DroneMovementController:
             source=source,
             stop_when=stop_when,
             stop_reason=stop_reason,
+            incidental_transit=(
+                execution.directive.kind in {
+                    DirectiveKind.COMPONENT_TASK,
+                    DirectiveKind.COMPONENT_FOLLOW,
+                }
+                and execution.phase == "transit"
+            ),
+            path_target=effective_target,
+            path_status=status,
         )
         if not followed:
+            if self._pending_incidental_scan is not None:
+                execution.route_attempts = max(
+                    0, execution.route_attempts - 1,
+                )
             return False
         if self.drone.snapshot().position == effective_target:
             execution.route_attempts = 0
@@ -2429,6 +2568,520 @@ class DroneMovementController:
             sensor_range=self._sensor_range(),
             sensor_fov_deg=self._sensor_fov(),
             confidence_threshold=self.frontier_confidence_threshold,
+        )
+
+    def _maybe_sample_incidental_transit(
+        self,
+        *,
+        edge_distance: float,
+        retained_route: tuple[Position, ...],
+        route_target: Position,
+        route_source: str,
+        path_status: str | None,
+    ) -> bool:
+        """Detect and optionally start one bounded side scan at a route pose."""
+        execution = self._coordination_execution
+        if (
+            execution is None
+            or self.incidental_scan_mode == "off"
+            or self._pending_incidental_scan is not None
+            or execution.directive.kind not in {
+                DirectiveKind.COMPONENT_TASK,
+                DirectiveKind.COMPONENT_FOLLOW,
+            }
+            or route_source not in {
+                "component_task_transit",
+                "component_dfs_reposition_astar",
+            }
+            or execution.phase not in {"transit", "repositioning"}
+            or execution.incidental_attempts >= self.incidental_maximum_attempts
+            or execution.incidental_wait_seconds
+            >= self.incidental_maximum_wait - 1e-9
+        ):
+            return False
+
+        travelled = max(0.0, float(edge_distance))
+        execution.incidental_distance_since_sample += travelled
+        execution.incidental_distance_since_selection += travelled
+        sensor_range = self._sensor_range()
+        cooldown = sensor_range * self.incidental_cooldown_ranges
+        if execution.incidental_distance_since_selection + 1e-9 < cooldown:
+            return False
+        spacing = sensor_range * self.incidental_sample_spacing_ranges
+        if (
+            spacing > 1e-9
+            and execution.incidental_distance_since_sample + 1e-9 < spacing
+        ):
+            return False
+        execution.incidental_distance_since_sample = 0.0
+
+        runtime = self.drone.snapshot()
+        dfs = execution.dfs
+        frame = None if dfs is None else dfs.current
+        active_cells = () if frame is None else frame.node.cells
+        detector_started = time.perf_counter()
+        detection = incidental_scan_candidate(
+            self.drone.slam_map.snapshot(point_limit=0),
+            position=runtime.position,
+            current_heading=runtime.heading_deg,
+            sensor_range=sensor_range,
+            sensor_fov_deg=self._sensor_fov(),
+            confidence_threshold=self.frontier_confidence_threshold,
+            frontier_stride=self.frontier_stride,
+            active_cells=active_cells,
+        )
+        detector_ms = (time.perf_counter() - detector_started) * 1000.0
+        self._trace(
+            "drone_incidental_scan_sampled",
+            directive_id=execution.directive.directive_id,
+            source=route_source,
+            phase=execution.phase,
+            pose=runtime.position,
+            heading=runtime.heading_deg,
+            slam_version=self.drone.slam_map.version,
+            detector_elapsed_ms=detector_ms,
+            component_count=detection.component_count,
+            rejection_counts=dict(detection.rejection_counts),
+        )
+        candidate = detection.candidate
+        if candidate is None:
+            return False
+        execution.incidental_candidates += 1
+        if not self._incidental_candidate_is_reopenable(candidate):
+            return False
+        if (
+            execution.incidental_requested_rotation
+            + candidate.heading_delta
+            > self.incidental_maximum_rotation + 1e-9
+        ):
+            return False
+
+        execution.incidental_attempts += 1
+        execution.incidental_requested_rotation += candidate.heading_delta
+        execution.incidental_predicted_support += len(candidate.cells)
+        execution.incidental_distance_since_selection = 0.0
+        self._remember_incidental_attempt(candidate)
+        remaining_attempts = max(
+            0,
+            self.incidental_maximum_attempts
+            - execution.incidental_attempts,
+        )
+        remaining_wait = max(
+            0.0,
+            self.incidental_maximum_wait
+            - execution.incidental_wait_seconds,
+        )
+        remaining_rotation = max(
+            0.0,
+            self.incidental_maximum_rotation
+            - execution.incidental_requested_rotation,
+        )
+        self._trace(
+            "drone_incidental_scan_candidate",
+            directive_id=execution.directive.directive_id,
+            source=route_source,
+            phase=execution.phase,
+            mode=self.incidental_scan_mode,
+            signature=self._incidental_signature_fields(candidate.signature),
+            gateway=candidate.gateway,
+            pocket_cells=len(candidate.cells),
+            wall_cells=candidate.wall_cells,
+            side_only_support=candidate.side_only_support,
+            current_visibility=candidate.current_visibility,
+            proposed_visibility=candidate.proposed_visibility,
+            heading=candidate.heading,
+            heading_delta=candidate.heading_delta,
+            remaining_attempts=remaining_attempts,
+            remaining_wait_seconds=remaining_wait,
+            remaining_rotation_degrees=remaining_rotation,
+        )
+        if self.incidental_scan_mode != "active":
+            return False
+
+        timeout = min(self.incidental_attempt_timeout, remaining_wait)
+        if timeout <= 1e-9:
+            return False
+        sensor = getattr(self.drone, "sensor_controller", None)
+        completion = getattr(sensor, "last_completed_scan", None)
+        minimum_sequence = -1 if completion is None else int(completion.sequence)
+        requested_at = self._simulation_time()
+        pending = _PendingIncidentalTransitScan(
+            directive_id=execution.directive.directive_id,
+            original_phase=execution.phase,
+            position=runtime.position,
+            heading=candidate.heading,
+            resume_heading=float(runtime.heading_deg),
+            candidate=candidate,
+            minimum_scan_sequence=minimum_sequence,
+            requested_at=requested_at,
+            deadline=requested_at + timeout,
+            retained_route=tuple(retained_route),
+            route_target=(int(route_target[0]), int(route_target[1])),
+            route_source=route_source,
+            path_status=path_status,
+            baseline_slam_version=self.drone.slam_map.version,
+        )
+        self._pending_incidental_scan = pending
+        self.drone.runtime_state.reorient(candidate.heading)
+        self._trace(
+            "drone_incidental_scan_started",
+            directive_id=execution.directive.directive_id,
+            source=route_source,
+            phase=execution.phase,
+            position=runtime.position,
+            heading=candidate.heading,
+            minimum_scan_sequence=minimum_sequence,
+            retained_route_points=len(retained_route),
+            retained_route_distance=self._path_distance(
+                runtime.position,
+                tuple(retained_route),
+                len(retained_route),
+            ),
+            route_target=pending.route_target,
+            path_status=path_status,
+            deadline=pending.deadline,
+        )
+        return True
+
+    def _incidental_candidate_is_reopenable(
+        self,
+        candidate: IncidentalScanCandidate,
+    ) -> bool:
+        """Suppress a matching attempt until support or its gateway moves."""
+        matching = next((
+            attempt
+            for attempt in reversed(self._incidental_attempt_memory)
+            if (
+                attempt.signature == candidate.signature
+                or (
+                    attempt.signature.wall_bin == candidate.signature.wall_bin
+                    and bool(
+                        set(attempt.signature.support_bins)
+                        & set(candidate.signature.support_bins)
+                    )
+                )
+            )
+        ), None)
+        if matching is None:
+            return True
+        new_support = len(candidate.cells - matching.cells)
+        minimum_new_support = max(
+            8,
+            int(math.ceil(len(matching.cells) * 0.25)),
+        )
+        gateway_movement = math.dist(candidate.gateway, matching.gateway)
+        minimum_gateway_movement = max(
+            float(2 * self.frontier_stride),
+            0.1 * self._sensor_range(),
+        )
+        return bool(
+            new_support >= minimum_new_support
+            or gateway_movement + 1e-9 >= minimum_gateway_movement
+        )
+
+    def _remember_incidental_attempt(
+        self,
+        candidate: IncidentalScanCandidate,
+    ) -> None:
+        self._incidental_attempt_memory.append(_IncidentalPocketAttempt(
+            signature=candidate.signature,
+            cells=candidate.cells,
+            gateway=candidate.gateway,
+            attempted_at=self._simulation_time(),
+        ))
+        if len(self._incidental_attempt_memory) > 256:
+            del self._incidental_attempt_memory[:-256]
+
+    def _record_incidental_pocket_revisit(
+        self,
+        target: Position,
+        path: Iterable[Position],
+        *,
+        source: str,
+    ) -> None:
+        """Trace later ordinary DFS work that targets an attempted envelope."""
+        radius = float(2 * self.frontier_stride)
+        current = self.drone.snapshot().position
+        route = tuple(path)
+        for attempt in self._incidental_attempt_memory:
+            if attempt.revisited or not any(
+                math.dist(target, cell) <= radius + 1e-9
+                for cell in attempt.cells
+            ):
+                continue
+            attempt.revisited = True
+            self._trace(
+                "drone_incidental_pocket_revisited",
+                source=source,
+                target=target,
+                signature=self._incidental_signature_fields(
+                    attempt.signature
+                ),
+                gateway=attempt.gateway,
+                actual_revisit_route_distance=self._path_distance(
+                    current,
+                    route,
+                    len(route),
+                ),
+                attempted_at=attempt.attempted_at,
+            )
+
+    @staticmethod
+    def _incidental_signature_fields(
+        signature: IncidentalPocketSignature,
+    ) -> dict[str, Any]:
+        return {
+            "support_bins": signature.support_bins,
+            "gateway_bin": signature.gateway_bin,
+            "wall_bin": signature.wall_bin,
+        }
+
+    def _advance_pending_incidental_scan(
+        self,
+        execution: _CoordinationExecution,
+    ) -> None:
+        """Accept only a fresh completion at the requested exact scan pose."""
+        pending = self._pending_incidental_scan
+        if pending is None:
+            return
+        sensor = getattr(self.drone, "sensor_controller", None)
+        completion = getattr(sensor, "last_completed_scan", None)
+        expected_pose = (
+            int(pending.position[0]),
+            int(pending.position[1]),
+            round(float(pending.heading) % 360.0, 3),
+        )
+        runtime = self.drone.snapshot()
+        current_pose = (
+            int(runtime.position[0]),
+            int(runtime.position[1]),
+            round(float(runtime.heading_deg) % 360.0, 3),
+        )
+        if (
+            completion is not None
+            and completion.pose == expected_pose
+            and current_pose == expected_pose
+            and int(completion.sequence) > pending.minimum_scan_sequence
+        ):
+            self.rebuild_frontiers(
+                stride=self.frontier_stride,
+                confidence_threshold=self.frontier_confidence_threshold,
+            )
+            self._finish_pending_incidental_scan(
+                execution,
+                pending,
+                outcome="completed",
+                completion=completion,
+            )
+            return
+        if self._simulation_time() + 1e-9 >= pending.deadline:
+            self._finish_pending_incidental_scan(
+                execution,
+                pending,
+                outcome="timed_out",
+            )
+
+    def _finish_pending_incidental_scan(
+        self,
+        execution: _CoordinationExecution,
+        pending: _PendingIncidentalTransitScan,
+        *,
+        outcome: str,
+        completion: Any | None = None,
+        interruption_reason: str | None = None,
+    ) -> None:
+        now = self._simulation_time()
+        wait_seconds = max(
+            0.0,
+            min(now, pending.deadline) - pending.requested_at,
+        )
+        execution.incidental_wait_seconds += wait_seconds
+        closed_cells = 0
+        if outcome == "completed":
+            execution.incidental_completions += 1
+            closed_cells = self._closed_incidental_pocket_cells(
+                pending.candidate.cells
+            )
+            execution.incidental_pocket_cells_closed += closed_cells
+        elif outcome == "timed_out":
+            execution.incidental_timeouts += 1
+        runtime = self.drone.snapshot()
+        self._trace(
+            "drone_incidental_scan_finished",
+            directive_id=pending.directive_id,
+            source=pending.route_source,
+            phase=pending.original_phase,
+            outcome=outcome,
+            interruption_reason=interruption_reason,
+            position=runtime.position,
+            heading=runtime.heading_deg,
+            requested_position=pending.position,
+            requested_heading=pending.heading,
+            scan_sequence=(None if completion is None else completion.sequence),
+            wait_seconds=wait_seconds,
+            requested_rotation=pending.candidate.heading_delta,
+            newly_known_cells=(
+                0 if completion is None else completion.newly_known_cells
+            ),
+            confidence_gain=(
+                0.0 if completion is None else completion.confidence_gain
+            ),
+            original_pocket_cells_closed=closed_cells,
+            baseline_slam_version=pending.baseline_slam_version,
+            completed_slam_version=self.drone.slam_map.version,
+        )
+        self._pending_incidental_scan = None
+        if outcome in {"completed", "timed_out"}:
+            self._resume_incidental_route(execution, pending)
+
+    def _closed_incidental_pocket_cells(
+        self,
+        cells: Iterable[Position],
+    ) -> int:
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+        occupancy = np.asarray(slam.occupancy)
+        confidence = np.asarray(slam.confidence)
+        offset_x, offset_y = (int(value) for value in slam.origin)
+        height, width = occupancy.shape
+        closed = 0
+        for x, y in cells:
+            local_x = int(x) - offset_x
+            local_y = int(y) - offset_y
+            if not (0 <= local_x < width and 0 <= local_y < height):
+                continue
+            if (
+                occupancy[local_y, local_x] != UNKNOWN
+                and confidence[local_y, local_x]
+                >= self.frontier_confidence_threshold
+            ):
+                closed += 1
+        return closed
+
+    def _resume_incidental_route(
+        self,
+        execution: _CoordinationExecution,
+        pending: _PendingIncidentalTransitScan,
+    ) -> None:
+        route = pending.retained_route
+        remaining_distance = self._path_distance(
+            pending.position,
+            route,
+            len(route),
+        )
+        if not route:
+            self._trace(
+                "drone_incidental_route_resumed",
+                directive_id=pending.directive_id,
+                source=pending.route_source,
+                disposition="retained",
+                remaining_distance=0.0,
+                interruption_reason=None,
+            )
+            return
+
+        interrupted_by_share = False
+
+        def stop_for_shared_target() -> bool:
+            nonlocal interrupted_by_share
+            interrupted_by_share = (
+                self._component_route_invalidated_after_share(execution)
+            )
+            return interrupted_by_share
+
+        followed = self._follow_path(
+            route,
+            source=pending.route_source,
+            stop_when=stop_for_shared_target,
+            stop_reason="shared_slam_invalidated",
+            incidental_transit=True,
+            path_target=pending.route_target,
+            path_status=pending.path_status,
+        )
+        retained = bool(
+            followed or self._pending_incidental_scan is not None
+        )
+        if (
+            pending.route_source == "component_dfs_reposition_astar"
+            and self._pending_incidental_scan is None
+        ):
+            self._trace(
+                "drone_dfs_reposition_path",
+                directive_id=pending.directive_id,
+                start=pending.position,
+                target=pending.route_target,
+                observation_target=pending.route_target,
+                path_status=pending.path_status,
+                path_length=len(route),
+                reached=(
+                    followed
+                    and self.drone.snapshot().position
+                    == pending.route_target
+                ),
+                resumed_after_incidental_scan=True,
+            )
+        self._trace(
+            "drone_incidental_route_resumed",
+            directive_id=pending.directive_id,
+            source=pending.route_source,
+            disposition="retained" if retained else "replanned",
+            remaining_distance=remaining_distance,
+            interruption_reason=(
+                "shared_slam_invalidated"
+                if interrupted_by_share
+                else None if retained else "retained_edge_invalid"
+            ),
+        )
+
+    def _cancel_pending_incidental_scan(self, reason: str) -> None:
+        pending = self._pending_incidental_scan
+        if pending is None:
+            return
+        execution = self._coordination_execution
+        if (
+            execution is not None
+            and execution.directive.directive_id == pending.directive_id
+        ):
+            self._finish_pending_incidental_scan(
+                execution,
+                pending,
+                outcome="cancelled",
+                interruption_reason=str(reason),
+            )
+        else:
+            self._pending_incidental_scan = None
+            self._trace(
+                "drone_incidental_scan_finished",
+                directive_id=pending.directive_id,
+                source=pending.route_source,
+                phase=pending.original_phase,
+                outcome="cancelled",
+                interruption_reason=str(reason),
+                position=self.drone.snapshot().position,
+                heading=self.drone.snapshot().heading_deg,
+                requested_position=pending.position,
+                requested_heading=pending.heading,
+                scan_sequence=None,
+                wait_seconds=max(
+                    0.0,
+                    min(self._simulation_time(), pending.deadline)
+                    - pending.requested_at,
+                ),
+                requested_rotation=pending.candidate.heading_delta,
+                newly_known_cells=0,
+                confidence_gain=0.0,
+                original_pocket_cells_closed=0,
+            )
+        self._trace(
+            "drone_incidental_route_resumed",
+            directive_id=pending.directive_id,
+            source=pending.route_source,
+            disposition="replanned",
+            remaining_distance=self._path_distance(
+                pending.position,
+                pending.retained_route,
+                len(pending.retained_route),
+            ),
+            interruption_reason=str(reason),
         )
 
     def _advance_coordination_scan(
@@ -2530,6 +3183,7 @@ class DroneMovementController:
         self,
         execution: _CoordinationExecution,
     ) -> None:
+        self._cancel_pending_incidental_scan("directive_completed")
         directive = execution.directive
         claim_token = (
             None if directive.claim is None else directive.claim.token
@@ -2604,6 +3258,20 @@ class DroneMovementController:
             ),
             suspended=suspension is not None,
             suspension_reason=execution.suspension_reason,
+            incidental_candidates=execution.incidental_candidates,
+            incidental_attempts=execution.incidental_attempts,
+            incidental_completions=execution.incidental_completions,
+            incidental_timeouts=execution.incidental_timeouts,
+            incidental_wait_seconds=execution.incidental_wait_seconds,
+            incidental_requested_rotation=(
+                execution.incidental_requested_rotation
+            ),
+            incidental_predicted_support=(
+                execution.incidental_predicted_support
+            ),
+            incidental_pocket_cells_closed=(
+                execution.incidental_pocket_cells_closed
+            ),
         )
         self._coordination_execution = None
 
@@ -2693,6 +3361,7 @@ class DroneMovementController:
         energy_state: EnergyState | None = None,
     ) -> None:
         """Suspend bounded work and retain an exact breadcrumb to the rover."""
+        self._cancel_pending_incidental_scan(reason)
         execution.outbound_actual_path = self._path_history_since(
             execution.path_start_index
         )
@@ -6335,6 +7004,9 @@ class DroneMovementController:
         source: str = "path",
         stop_when: Callable[[], bool] | None = None,
         stop_reason: str | None = None,
+        incidental_transit: bool = False,
+        path_target: Position | None = None,
+        path_status: str | None = None,
     ) -> bool:
         """Walk a path while recording the breadcrumb history used by rendering."""
         points = tuple((int(point[0]), int(point[1])) for point in path)
@@ -6348,7 +7020,7 @@ class DroneMovementController:
         coverage_new_cell_entries = 0
         coverage_revisit_entries = 0
         coverage_repeated_edge_entries = 0
-        for node in points:
+        for point_index, node in enumerate(points):
             if node == self.drone.snapshot().position:
                 continue
             if not self.dependencies.pause_checkpoint():
@@ -6410,6 +7082,18 @@ class DroneMovementController:
                 break
             if not self.dependencies.wait_simulation_delay(
                 self.drone.delay / self.drone.speed_factor
+            ):
+                completed = False
+                break
+            if (
+                incidental_transit
+                and self._maybe_sample_incidental_transit(
+                    edge_distance=math.dist(previous, node),
+                    retained_route=points[point_index + 1:],
+                    route_target=(path_target or points[-1]),
+                    route_source=source,
+                    path_status=path_status,
+                )
             ):
                 completed = False
                 break

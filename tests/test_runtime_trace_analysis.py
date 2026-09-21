@@ -1755,6 +1755,37 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         self.assertIsNone(efficiency.confidence_gain_per_travelled_px)
         self.assertFalse(efficiency.gain_telemetry_complete)
 
+    def test_summary_aggregates_incidental_scan_outcomes(self) -> None:
+        lines = summarize([
+            {
+                "event": "drone_incidental_scan_candidate",
+                "drone_id": 0,
+                "pocket_cells": 9,
+            },
+            {
+                "event": "drone_incidental_scan_finished",
+                "drone_id": 0,
+                "outcome": "completed",
+                "wait_seconds": 1.25,
+                "requested_rotation": 45.0,
+                "newly_known_cells": 7,
+                "original_pocket_cells_closed": 5,
+            },
+            {
+                "event": "drone_incidental_route_resumed",
+                "drone_id": 0,
+                "disposition": "retained",
+            },
+        ])
+
+        summary = "\n".join(lines)
+        self.assertIn("incidental_scan_summary", summary)
+        self.assertIn("completed=1", summary)
+        self.assertIn("wait=1.250s", summary)
+        self.assertIn("predicted_support=9", summary)
+        self.assertIn("pocket_cells_closed=5", summary)
+        self.assertIn("retained=1", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

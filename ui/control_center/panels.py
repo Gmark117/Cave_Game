@@ -234,6 +234,7 @@ class ControlCenterPanelMixin:
             "Charging",
             "Task transit",
             "Frontier scan",
+            "Incidental scan",
             "DFS backtrack",
             "Probe transit",
             "Probe scan",

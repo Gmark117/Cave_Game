@@ -360,6 +360,17 @@ the complete outbound history as fallback. The depth and node count are
 bounded. The rover converts returned causal geometry into authoritative
 lineage; it does not expose global occupancy to local decisions.
 
+When `[INCIDENTAL_SCAN] mode` is `observe` or `active`, eligible component
+transit and normal DFS-reposition A* steps periodically inspect only the
+drone's local SLAM for small enclosed, wall-adjacent unknown pockets. Open,
+occluded, already-visible, rear-facing, oversized, and active-target geometry
+is rejected. `observe` records the bounded detector and shadow attempt memory
+without rotating. `active` retains the unwalked route suffix, rotates in place,
+accepts only a strictly newer exact-pose sensor completion, rebuilds local
+frontiers, and resumes the validated suffix; timeout resumes without route or
+DFS retry accounting. The overlay never creates work outcomes, claims,
+suppression, assistance, or communication state. The committed mode is `off`.
+
 The energy boundary is defined before drain and charging: `EnergyState`,
 route-to-task, next-action, route-home, safety reserve, `can_accept`,
 `must_return`, and `TaskSuspension`. The current `UnlimitedEnergyPolicy` passes

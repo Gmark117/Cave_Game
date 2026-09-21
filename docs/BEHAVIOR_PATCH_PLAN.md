@@ -1,8 +1,9 @@
 # Proposed behavior patches: contact, SLAM highway, and wall-pocket scans
 
 Status: Patch A is implemented and live-tested. Patch A2 is implemented and
-unit-tested, with live trace validation pending. Patch B and Patch C remain
-separate design drafts for review.
+unit-tested, with live trace validation pending. Patch C is implemented behind
+the default-off `off`/`observe`/`active` mode and unit-tested, with paired live
+trace validation pending. Patch B remains a separate design draft for review.
 
 ## Current evidence and boundaries
 
@@ -151,6 +152,20 @@ The current drone A* adapter uses the simulator cave map. This patch keeps that 
 **Acceptance evidence.** Unit tests cover disconnected regions within one tile, narrow portals, safe diagonals, new obstacles, map-version changes, unreachable connectors, and physical publication. A route benchmark compares graph cost and build cost with rover-map A* over macro-area pairs; the graph should provide near-optimal routes or expose a fallback, not merely cover tiles. In paired traces, report highway-eligible share, A* calls/expansions/CPU time, graph build time, route distance and reversals, completion time, and report delivery. Require no communication or completion regression before enabling it by default.
 
 ## Patch C — Incidental rotation for small wall-adjacent pockets
+
+**Implementation status.** The local-SLAM detector, persistent attempt memory,
+resumable transit overlay, budgets, trace events, UI state, settings round-trip,
+and analyzer aggregation are implemented. The committed default is `off`; use
+`observe` for the first current-commit control trace before comparing matched
+`observe` and `active` runs.
+
+The `[INCIDENTAL_SCAN]` defaults are two attempts, six cumulative simulated
+seconds of waiting, a three-second attempt timeout, 180 cumulative requested
+degrees, a one-sensor-range post-selection cooldown, and half-range sampling.
+Only component-task transit, component-follow transit after branch DFS starts,
+and `component_dfs_reposition_astar` are eligible. Initial branch following,
+breadcrumb recovery, probes, rover return/check-in, reporting, homing, docking,
+and waiting remain excluded.
 
 **Purpose.** Clear small unknown pockets beside known walls while a drone already passes within sensor range, so DFS need not schedule a later return trip. Revealing a larger frontier is a possible side effect, not a reason to trigger the scan.
 

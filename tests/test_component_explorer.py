@@ -12,8 +12,12 @@ import pygame
 
 from agents.drone_movement import _CoordinationExecution
 from agents.component_explorer import (
+    IncidentalScanCandidate,
+    IncidentalScanDetection,
+    IncidentalPocketSignature,
     LocalComponentNode,
     LocalDFSStack,
+    incidental_scan_candidate,
     local_node_pose,
     observation_pose_on_path,
     related_local_successors,
@@ -129,6 +133,93 @@ class ComponentControl:
 
 
 class LocalDFSStackTests(unittest.TestCase):
+    @staticmethod
+    def _side_pocket_slam(*, wall=True, open_window=False, occluded=False):
+        occupancy = np.full((48, 48), FREE, dtype=np.int8)
+        confidence = np.ones((48, 48), dtype=np.float32)
+        occupancy[19:22, 27:30] = UNKNOWN
+        confidence[19:22, 27:30] = 0.0
+        if wall:
+            occupancy[18:23, 30] = OCCUPIED
+        if open_window:
+            occupancy[20, 30:33] = UNKNOWN
+            confidence[20, 30:33] = 0.0
+        if occluded:
+            occupancy[18:23, 24] = OCCUPIED
+        return SlamSnapshot(occupancy, confidence, version=7)
+
+    def test_incidental_detector_accepts_enclosed_wall_adjacent_side_pocket(self):
+        first = incidental_scan_candidate(
+            self._side_pocket_slam(),
+            position=(20, 20),
+            current_heading=0.0,
+            sensor_range=12.0,
+            sensor_fov_deg=60.0,
+            confidence_threshold=0.6,
+            frontier_stride=4,
+        )
+        second = incidental_scan_candidate(
+            self._side_pocket_slam(),
+            position=(20, 20),
+            current_heading=0.0,
+            sensor_range=12.0,
+            sensor_fov_deg=60.0,
+            confidence_threshold=0.6,
+            frontier_stride=4,
+        )
+
+        self.assertIsNotNone(first.candidate)
+        assert first.candidate is not None and second.candidate is not None
+        self.assertEqual(first.candidate.heading, 90)
+        self.assertEqual(len(first.candidate.cells), 9)
+        self.assertEqual(first.candidate.signature, second.candidate.signature)
+        self.assertGreater(first.candidate.side_only_support, 0)
+
+    def test_incidental_detector_rejects_open_no_wall_occluded_visible_rear_and_active(self):
+        cases = (
+            (self._side_pocket_slam(open_window=True), 0.0, (), "window_boundary"),
+            (self._side_pocket_slam(wall=False), 0.0, (), "no_wall"),
+            (self._side_pocket_slam(occluded=True), 0.0, (), "occluded"),
+            (self._side_pocket_slam(), 90.0, (), "already_visible"),
+            (self._side_pocket_slam(), 270.0, (), "rear_facing"),
+            (self._side_pocket_slam(), 0.0, ((27, 20),), "active_target"),
+        )
+        for slam, heading, active, rejection in cases:
+            with self.subTest(rejection=rejection):
+                result = incidental_scan_candidate(
+                    slam,
+                    position=(20, 20),
+                    current_heading=heading,
+                    sensor_range=12.0,
+                    sensor_fov_deg=60.0,
+                    confidence_threshold=0.6,
+                    frontier_stride=4,
+                    active_cells=active,
+                )
+                self.assertIsNone(result.candidate)
+                self.assertGreater(dict(result.rejection_counts)[rejection], 0)
+
+    def test_incidental_detector_rejects_pocket_that_cannot_fit_one_cone(self):
+        occupancy = np.full((48, 48), FREE, dtype=np.int8)
+        confidence = np.ones((48, 48), dtype=np.float32)
+        occupancy[14:27, 27] = UNKNOWN
+        confidence[14:27, 27] = 0.0
+        occupancy[14:27, 28] = OCCUPIED
+        result = incidental_scan_candidate(
+            SlamSnapshot(occupancy, confidence, version=1),
+            position=(20, 20),
+            current_heading=0.0,
+            sensor_range=12.0,
+            sensor_fov_deg=60.0,
+            confidence_threshold=0.6,
+            frontier_stride=4,
+        )
+
+        self.assertIsNone(result.candidate)
+        self.assertGreater(
+            dict(result.rejection_counts)["oversized_cone"], 0
+        )
+
     def test_observation_pose_trims_known_clear_route_suffix(self):
         occupancy = np.full((24, 24), UNKNOWN, dtype=np.int8)
         confidence = np.zeros((24, 24), dtype=np.float32)
@@ -298,6 +389,359 @@ class ComponentMovementTests(unittest.TestCase):
         self.drone.move()
         self.control.ready.set()
         self.drone.move()
+
+    @staticmethod
+    def _incidental_candidate(
+        *,
+        cells=frozenset({(24, 20), (25, 20)}),
+        gateway=(23, 20),
+        heading=180,
+    ):
+        return IncidentalScanCandidate(
+            signature=IncidentalPocketSignature(
+                support_bins=tuple(sorted({
+                    (x // 4, y // 4) for x, y in cells
+                })),
+                gateway_bin=(gateway[0] // 4, gateway[1] // 4),
+                wall_bin=(6, 5),
+            ),
+            cells=frozenset(cells),
+            gateway=gateway,
+            wall_contact=(26, 20),
+            wall_cells=2,
+            heading=heading,
+            heading_delta=90.0,
+            current_visibility=0,
+            proposed_visibility=len(cells),
+            side_only_support=len(cells),
+        )
+
+    def _install_incidental_execution(self, *, mode="active"):
+        controller = self.drone.movement_controller
+        controller.incidental_scan_mode = mode
+        controller.incidental_maximum_attempts = 1
+        controller.incidental_maximum_wait = 6.0
+        controller.incidental_attempt_timeout = 3.0
+        controller.incidental_maximum_rotation = 180.0
+        controller.incidental_cooldown_ranges = 0.0
+        controller.incidental_sample_spacing_ranges = 0.0
+        execution = _CoordinationExecution(
+            directive=ExplorationDirective(
+                directive_id=91,
+                kind=DirectiveKind.COMPONENT_TASK,
+            ),
+            phase="transit",
+            path_start_index=0,
+        )
+        controller._coordination_execution = execution
+        return controller, execution
+
+    def test_incidental_scan_requires_exact_pose_and_newer_sequence_then_resumes_suffix(self):
+        controller, execution = self._install_incidental_execution()
+        trace = Mock()
+        controller.dependencies = controller.dependencies.__class__(
+            **{
+                **controller.dependencies.__dict__,
+                "runtime_trace": trace,
+            }
+        )
+        candidate = self._incidental_candidate()
+        detection = IncidentalScanDetection(candidate, 1, ())
+        sensor = self.drone.sensor_controller
+        sensor._last_completed_scan = SensorScanCompletion(
+            pose=(16, 16, 0.0),
+            sequence=4,
+            newly_known_cells=0,
+            confidence_gain=0.0,
+        )
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate",
+            return_value=detection,
+        ):
+            followed = controller._follow_path(
+                ((16, 16), (17, 16), (18, 16)),
+                source="component_task_transit",
+                incidental_transit=True,
+                path_target=(18, 16),
+                path_status=PATH_COMPLETE,
+            )
+            self.assertFalse(followed)
+            pending = controller._pending_incidental_scan
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            self.assertEqual(pending.retained_route, ((18, 16),))
+            self.assertEqual(self.drone.snapshot().position, (17, 16))
+            self.assertEqual(
+                controller.activity_snapshot().state,
+                "Incidental scan",
+            )
+
+            sensor._last_completed_scan = SensorScanCompletion(
+                pose=(17, 16, float(candidate.heading)),
+                sequence=4,
+                newly_known_cells=1,
+                confidence_gain=0.2,
+            )
+            controller._advance_pending_incidental_scan(execution)
+            self.assertIsNotNone(controller._pending_incidental_scan)
+            sensor._last_completed_scan = SensorScanCompletion(
+                pose=(18, 16, float(candidate.heading)),
+                sequence=5,
+                newly_known_cells=1,
+                confidence_gain=0.2,
+            )
+            controller._advance_pending_incidental_scan(execution)
+            self.assertIsNotNone(controller._pending_incidental_scan)
+            sensor._last_completed_scan = SensorScanCompletion(
+                pose=(17, 16, float(candidate.heading)),
+                sequence=5,
+                newly_known_cells=3,
+                confidence_gain=0.4,
+            )
+            with patch.object(controller, "rebuild_frontiers"):
+                controller._advance_pending_incidental_scan(execution)
+
+        self.assertIsNone(controller._pending_incidental_scan)
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        self.assertEqual(execution.incidental_completions, 1)
+        with patch.object(controller, "_compute_path") as compute_path:
+            self.assertTrue(controller._advance_directive_transit(
+                execution,
+                (18, 16),
+                source="component_task_transit",
+            ))
+            compute_path.assert_not_called()
+        event_names = [call.args[0] for call in trace.record.call_args_list]
+        self.assertIn("drone_incidental_scan_started", event_names)
+        self.assertIn("drone_incidental_scan_finished", event_names)
+        self.assertIn("drone_incidental_route_resumed", event_names)
+
+    def test_incidental_timeout_resumes_without_route_or_reposition_strike(self):
+        controller, execution = self._install_incidental_execution()
+        execution.route_attempts = 3
+        execution.reposition_attempts = 2
+        candidate = self._incidental_candidate()
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate",
+            return_value=IncidentalScanDetection(candidate, 1, ()),
+        ):
+            controller._follow_path(
+                ((16, 16), (17, 16), (18, 16)),
+                source="component_task_transit",
+                incidental_transit=True,
+                path_target=(18, 16),
+                path_status=PATH_COMPLETE,
+            )
+        pending = controller._pending_incidental_scan
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        self.control.now = pending.deadline + 0.01
+        controller._advance_pending_incidental_scan(execution)
+
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        self.assertEqual(execution.route_attempts, 3)
+        self.assertEqual(execution.reposition_attempts, 2)
+        self.assertEqual(execution.incidental_timeouts, 1)
+
+    def test_incidental_cancellation_discards_retained_suffix(self):
+        controller, execution = self._install_incidental_execution()
+        trace = Mock()
+        controller.dependencies = controller.dependencies.__class__(
+            **{
+                **controller.dependencies.__dict__,
+                "runtime_trace": trace,
+            }
+        )
+        candidate = self._incidental_candidate()
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate",
+            return_value=IncidentalScanDetection(candidate, 1, ()),
+        ):
+            controller._follow_path(
+                ((16, 16), (17, 16), (18, 16)),
+                source="component_task_transit",
+                incidental_transit=True,
+                path_target=(18, 16),
+                path_status=PATH_COMPLETE,
+            )
+        self.control.now += 1.0
+        controller._cancel_pending_incidental_scan("energy_reserve")
+
+        self.assertIsNone(controller._pending_incidental_scan)
+        self.assertEqual(self.drone.snapshot().position, (17, 16))
+        self.assertEqual(execution.incidental_timeouts, 0)
+        finished = [
+            call.kwargs
+            for call in trace.record.call_args_list
+            if call.args[0] == "drone_incidental_scan_finished"
+        ]
+        self.assertEqual(finished[-1]["outcome"], "cancelled")
+        self.assertEqual(
+            finished[-1]["interruption_reason"],
+            "energy_reserve",
+        )
+
+    def test_invalid_retained_edge_is_discarded_and_normal_transit_replans(self):
+        controller, execution = self._install_incidental_execution()
+        candidate = self._incidental_candidate()
+        sensor = self.drone.sensor_controller
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate",
+            return_value=IncidentalScanDetection(candidate, 1, ()),
+        ), patch.object(
+            self.drone.runtime_state,
+            "graph_is_valid",
+            side_effect=(True, False),
+        ):
+            controller._follow_path(
+                ((16, 16), (17, 16), (18, 16)),
+                source="component_task_transit",
+                incidental_transit=True,
+                path_target=(18, 16),
+                path_status=PATH_COMPLETE,
+            )
+            pending = controller._pending_incidental_scan
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            sensor._last_completed_scan = SensorScanCompletion(
+                pose=(17, 16, float(candidate.heading)),
+                sequence=pending.minimum_scan_sequence + 1,
+                newly_known_cells=1,
+                confidence_gain=0.1,
+            )
+            with patch.object(controller, "rebuild_frontiers"):
+                controller._advance_pending_incidental_scan(execution)
+
+        self.assertEqual(self.drone.snapshot().position, (17, 16))
+        self.assertIsNone(controller._pending_incidental_scan)
+        replanned = PathResult(
+            ((17, 16), (18, 16)),
+            PATH_COMPLETE,
+            1,
+            0.0,
+        )
+        with patch.object(
+            controller,
+            "_compute_path",
+            return_value=replanned,
+        ) as compute_path:
+            self.assertTrue(controller._advance_directive_transit(
+                execution,
+                (18, 16),
+                source="component_task_transit",
+            ))
+        compute_path.assert_called_once_with((17, 16), (18, 16))
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+
+    def test_incidental_observe_mode_has_no_rotation_or_pause(self):
+        controller, execution = self._install_incidental_execution(
+            mode="observe"
+        )
+        trace = Mock()
+        controller.dependencies = controller.dependencies.__class__(
+            **{
+                **controller.dependencies.__dict__,
+                "runtime_trace": trace,
+            }
+        )
+        candidate = self._incidental_candidate()
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate",
+            return_value=IncidentalScanDetection(candidate, 1, ()),
+        ):
+            followed = controller._follow_path(
+                ((16, 16), (17, 16), (18, 16)),
+                source="component_task_transit",
+                incidental_transit=True,
+                path_target=(18, 16),
+                path_status=PATH_COMPLETE,
+            )
+
+        self.assertTrue(followed)
+        self.assertIsNone(controller._pending_incidental_scan)
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        self.assertEqual(self.drone.snapshot().heading_deg, 90.0)
+        self.assertEqual(execution.incidental_attempts, 1)
+        candidate_events = [
+            call.kwargs
+            for call in trace.record.call_args_list
+            if call.args[0] == "drone_incidental_scan_candidate"
+        ]
+        self.assertEqual(candidate_events[0]["mode"], "observe")
+
+    def test_incidental_duplicate_suppression_and_material_reopening(self):
+        controller, _execution = self._install_incidental_execution()
+        original = self._incidental_candidate()
+        controller._remember_incidental_attempt(original)
+        self.assertFalse(controller._incidental_candidate_is_reopenable(original))
+
+        expanded = self._incidental_candidate(cells=frozenset(
+            set(original.cells) | {(30 + index, 20) for index in range(8)}
+        ))
+        moved = self._incidental_candidate(gateway=(33, 20))
+        self.assertTrue(controller._incidental_candidate_is_reopenable(expanded))
+        self.assertTrue(controller._incidental_candidate_is_reopenable(moved))
+
+    def test_contact_and_shared_invalidation_precede_incidental_selection(self):
+        controller, _execution = self._install_incidental_execution()
+        order = []
+        controller.dependencies = controller.dependencies.__class__(
+            **{
+                **controller.dependencies.__dict__,
+                "physical_contact_checkpoint": (
+                    lambda _drone_id: order.append("contact")
+                ),
+            }
+        )
+
+        def stop_after_share():
+            order.append("shared_invalidation")
+            return True
+
+        with patch(
+            "agents.drone_movement.incidental_scan_candidate"
+        ) as detector:
+            followed = controller._follow_path(
+                ((16, 16), (17, 16)),
+                source="component_task_transit",
+                stop_when=stop_after_share,
+                stop_reason="shared_slam_invalidated",
+                incidental_transit=True,
+                path_target=(17, 16),
+                path_status=PATH_COMPLETE,
+            )
+
+        self.assertFalse(followed)
+        self.assertEqual(order, ["contact", "shared_invalidation"])
+        detector.assert_not_called()
+
+    def test_incidental_sampling_excludes_noneligible_route_contexts(self):
+        controller, execution = self._install_incidental_execution()
+        cases = (
+            (DirectiveKind.COMPONENT_FOLLOW, "following", "component_branch_follow"),
+            (DirectiveKind.COMPONENT_TASK, "repositioning", "component_dfs_breadcrumb_fallback"),
+            (DirectiveKind.COMPONENT_TASK, "returning", "component_task_transit"),
+            (DirectiveKind.RADIAL_PROBE, "transit", "radial_probe_outbound"),
+        )
+        for kind, phase, source in cases:
+            with self.subTest(kind=kind, phase=phase, source=source):
+                execution.directive = ExplorationDirective(
+                    directive_id=91,
+                    kind=kind,
+                )
+                execution.phase = phase
+                with patch(
+                    "agents.drone_movement.incidental_scan_candidate"
+                ) as detector:
+                    selected = controller._maybe_sample_incidental_transit(
+                        edge_distance=100.0,
+                        retained_route=(),
+                        route_target=(18, 16),
+                        route_source=source,
+                        path_status=PATH_COMPLETE,
+                    )
+                self.assertFalse(selected)
+                detector.assert_not_called()
 
     def test_final_home_directive_completes_at_rover_without_launch_leg(self) -> None:
         self._deliver(ExplorationDirective(

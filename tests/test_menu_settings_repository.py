@@ -100,6 +100,16 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 coverage_visit_weight=1.75,
                 coverage_edge_weight=2.25,
             ),
+            incidental_scan=replace(
+                defaults.incidental_scan,
+                mode="observe",
+                maximum_attempts_per_directive=3,
+                maximum_wait_seconds_per_directive=7.0,
+                attempt_timeout_seconds=2.5,
+                maximum_rotation_degrees_per_directive=150.0,
+                distance_cooldown_sensor_ranges=1.5,
+                sample_spacing_sensor_ranges=0.75,
+            ),
             rendering=replace(defaults.rendering, refresh_interval=0.2),
             trace=replace(defaults.trace, enabled=True),
         )
@@ -118,6 +128,7 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "SHARING",
                 "FRONTIER",
                 "EXPLORATION",
+                "INCIDENTAL_SCAN",
                 "RENDERING",
                 "TRACE",
             },
@@ -217,6 +228,18 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "coverage_edge_weight",
             },
         )
+        self.assertEqual(
+            {field.name for field in fields(defaults.incidental_scan)},
+            {
+                "mode",
+                "maximum_attempts_per_directive",
+                "maximum_wait_seconds_per_directive",
+                "attempt_timeout_seconds",
+                "maximum_rotation_degrees_per_directive",
+                "distance_cooldown_sensor_ranges",
+                "sample_spacing_sensor_ranges",
+            },
+        )
 
     def test_random_navigation_defaults(self) -> None:
         defaults = SimulationConfig()
@@ -252,6 +275,18 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(defaults.exploration.coverage_visit_weight, 1.5)
         self.assertEqual(defaults.exploration.coverage_edge_weight, 2.0)
+        self.assertEqual(defaults.incidental_scan.mode, "off")
+        self.assertEqual(
+            defaults.incidental_scan.maximum_attempts_per_directive, 2
+        )
+        self.assertEqual(
+            defaults.incidental_scan.maximum_wait_seconds_per_directive, 6.0
+        )
+        self.assertEqual(defaults.incidental_scan.attempt_timeout_seconds, 3.0)
+        self.assertEqual(
+            defaults.incidental_scan.maximum_rotation_degrees_per_directive,
+            180.0,
+        )
 
     def test_legacy_navigation_keys_are_readable_but_ignored(self) -> None:
         temporary_directory, repository = self.make_repository()

@@ -176,6 +176,37 @@ class ExplorationConfig:
 
 
 @dataclass(frozen=True)
+class IncidentalScanConfig:
+    """Bounded wall-pocket observation during eligible component transit."""
+
+    mode: str = "off"
+    maximum_attempts_per_directive: int = 2
+    maximum_wait_seconds_per_directive: float = 6.0
+    attempt_timeout_seconds: float = 3.0
+    maximum_rotation_degrees_per_directive: float = 180.0
+    distance_cooldown_sensor_ranges: float = 1.0
+    sample_spacing_sensor_ranges: float = 0.5
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode).casefold()
+        if mode not in {"off", "observe", "active"}:
+            raise ValueError(
+                "incidental scan mode must be 'off', 'observe', or 'active'"
+            )
+        if self.maximum_attempts_per_directive < 0:
+            raise ValueError("maximum incidental attempts must be non-negative")
+        if min(
+            self.maximum_wait_seconds_per_directive,
+            self.attempt_timeout_seconds,
+            self.maximum_rotation_degrees_per_directive,
+            self.distance_cooldown_sensor_ranges,
+            self.sample_spacing_sensor_ranges,
+        ) < 0.0:
+            raise ValueError("incidental scan limits must be non-negative")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
 class RenderingConfig:
     """SLAM rendering cache limits and refresh timing."""
 
@@ -215,5 +246,8 @@ class SimulationConfig:
     sharing: SharingConfig = field(default_factory=SharingConfig)
     frontier: FrontierConfig = field(default_factory=FrontierConfig)
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
+    incidental_scan: IncidentalScanConfig = field(
+        default_factory=IncidentalScanConfig
+    )
     rendering: RenderingConfig = field(default_factory=RenderingConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
