@@ -100,6 +100,7 @@ class MissionLifecycleTests(unittest.TestCase):
 
     def test_assignment_requires_current_physical_rover_dock(self) -> None:
         mission = MissionControl(FakeGame())
+        highway_snapshot = object()
         coordinator = Mock()
         coordinator.claim_directive.return_value = CoordinationResult(
             arrived=True, waiting=True,
@@ -122,6 +123,7 @@ class MissionLifecycleTests(unittest.TestCase):
                 report_accepted=True,
                 waiting=True,
                 directive_ready=directive_ready,
+                highway_snapshot=highway_snapshot,
             ),
         )
 
@@ -132,7 +134,9 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.exploration_assignment(0).arrived)
         coordinator.claim_directive.assert_not_called()
         mission._exploration_docked[0] = object()
-        self.assertTrue(mission.exploration_assignment(0).arrived)
+        assigned = mission.exploration_assignment(0)
+        self.assertTrue(assigned.arrived)
+        self.assertIs(assigned.highway_snapshot, highway_snapshot)
         coordinator.claim_directive.assert_called_once_with(0)
         self.assertNotIn(0, mission._exploration_check_ins)
 

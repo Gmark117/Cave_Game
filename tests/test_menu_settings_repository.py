@@ -110,6 +110,33 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 distance_cooldown_sensor_ranges=1.5,
                 sample_spacing_sensor_ranges=0.75,
             ),
+            highway=replace(
+                defaults.highway,
+                mode="observe",
+                macro_cell_size=24,
+                minimum_version_delta=3,
+                maximum_build_ms=750.0,
+                maximum_query_ms=30.0,
+                maximum_connector_expansions=2048,
+                minimum_route_sensor_ranges=1.5,
+                maximum_route_circuity=2.5,
+            ),
+            focused_frontier_batch=replace(
+                defaults.focused_frontier_batch,
+                mode="observe",
+                maximum_claimed_components=2,
+                maximum_total_components=3,
+                lease_margin_sensor_ranges=0.75,
+                maximum_detour_sensor_ranges=1.5,
+                minimum_avoided_round_trip_sensor_ranges=0.5,
+                maximum_service_seconds=30.0,
+                maximum_total_dfs_nodes=24,
+                maximum_consecutive_low_gain_scans=3,
+                low_gain_maximum_new_cells=2,
+                low_gain_maximum_confidence_gain=1.5,
+                maximum_planning_ms=150.0,
+                maximum_route_queries=64,
+            ),
             rendering=replace(defaults.rendering, refresh_interval=0.2),
             trace=replace(defaults.trace, enabled=True),
         )
@@ -129,6 +156,8 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "FRONTIER",
                 "EXPLORATION",
                 "INCIDENTAL_SCAN",
+                "HIGHWAY",
+                "FOCUSED_FRONTIER_BATCH",
                 "RENDERING",
                 "TRACE",
             },
@@ -161,6 +190,25 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
         loaded_local = repository.load_simulation(defaults)
         self.assertEqual(loaded_local.mission_config.seed, 99)
         self.assertTrue(repository.simulation_path.exists())
+
+    def test_legacy_endgame_batch_section_remains_readable(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.simulation_path.write_text(
+            "[ENDGAME_BATCH]\n"
+            "mode = active\n"
+            "maximum_route_queries = 17\n",
+            encoding="utf-8",
+        )
+
+        loaded = repository.load_simulation(SimulationConfig())
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.focused_frontier_batch.mode, "active")
+        self.assertEqual(
+            loaded.focused_frontier_batch.maximum_route_queries,
+            17,
+        )
 
     def test_missing_simulation_files_return_no_loaded_settings(self) -> None:
         temporary_directory, repository = self.make_repository()
@@ -240,6 +288,37 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 "sample_spacing_sensor_ranges",
             },
         )
+        self.assertEqual(
+            {field.name for field in fields(defaults.highway)},
+            {
+                "mode",
+                "macro_cell_size",
+                "minimum_version_delta",
+                "maximum_build_ms",
+                "maximum_query_ms",
+                "maximum_connector_expansions",
+                "minimum_route_sensor_ranges",
+                "maximum_route_circuity",
+            },
+        )
+        self.assertEqual(
+            {field.name for field in fields(defaults.focused_frontier_batch)},
+            {
+                "mode",
+                "maximum_claimed_components",
+                "maximum_total_components",
+                "lease_margin_sensor_ranges",
+                "maximum_detour_sensor_ranges",
+                "minimum_avoided_round_trip_sensor_ranges",
+                "maximum_service_seconds",
+                "maximum_total_dfs_nodes",
+                "maximum_consecutive_low_gain_scans",
+                "low_gain_maximum_new_cells",
+                "low_gain_maximum_confidence_gain",
+                "maximum_planning_ms",
+                "maximum_route_queries",
+            },
+        )
 
     def test_random_navigation_defaults(self) -> None:
         defaults = SimulationConfig()
@@ -287,6 +366,11 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             defaults.incidental_scan.maximum_rotation_degrees_per_directive,
             180.0,
         )
+        self.assertEqual(defaults.highway.mode, "off")
+        self.assertEqual(defaults.highway.macro_cell_size, 32)
+        self.assertEqual(defaults.focused_frontier_batch.mode, "off")
+        self.assertEqual(defaults.focused_frontier_batch.maximum_claimed_components, 3)
+        self.assertEqual(defaults.focused_frontier_batch.maximum_total_components, 4)
 
     def test_legacy_navigation_keys_are_readable_but_ignored(self) -> None:
         temporary_directory, repository = self.make_repository()

@@ -326,6 +326,73 @@ class FrontierComponentRegistryTests(unittest.TestCase):
             ComponentState.RESOLVED,
         )
 
+    def test_group_claim_revision_failure_has_no_partial_mutation(self) -> None:
+        registry = self.registry()
+        cells = tuple((x, 8) for x in (*range(4, 8), *range(20, 24)))
+        result = registry.reconcile(
+            line_slam((32, 32), cells, version=1)
+        )
+        self.assertEqual(len(result.active_component_ids), 2)
+        components = tuple(
+            registry.components[component_id]
+            for component_id in result.active_component_ids
+        )
+        groups = tuple(
+            component.work_unit_ids for component in components
+        )
+
+        claimed = registry.claim_work_unit_groups(
+            groups,
+            expected_components=(
+                (
+                    components[0].component_id,
+                    registry.work_units[groups[0][0]].component_revision,
+                ),
+                (components[1].component_id, 999),
+            ),
+        )
+
+        self.assertFalse(claimed)
+        self.assertTrue(all(
+            registry.work_units[unit_id].state == WorkUnitState.READY
+            for group in groups
+            for unit_id in group
+        ))
+
+    def test_provisional_retirement_excludes_preexisting_work(self) -> None:
+        registry = self.registry()
+        old_cells = tuple((x, 8) for x in range(4, 8))
+        initial = registry.reconcile(
+            line_slam((32, 32), old_cells, version=1)
+        )
+        preexisting = frozenset(registry.work_units)
+        new_cells = tuple((x, 22) for x in range(20, 24))
+        registry.reconcile(line_slam(
+            (32, 32),
+            (*old_cells, *new_cells),
+            version=2,
+        ))
+        created = tuple(
+            unit_id for unit_id in registry.work_units
+            if unit_id not in preexisting
+        )
+        self.assertTrue(created)
+
+        retired = registry.retire_provisional_work_units(
+            (
+                registry.components[initial.active_component_ids[0]].geometry.cells,
+                frozenset(new_cells),
+            ),
+            preexisting_work_unit_ids=preexisting,
+        )
+
+        self.assertTrue(retired)
+        self.assertTrue(set(retired) <= set(created))
+        self.assertTrue(all(
+            registry.work_units[unit_id].state == WorkUnitState.READY
+            for unit_id in preexisting
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

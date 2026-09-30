@@ -2256,13 +2256,27 @@ def analyze_trace(
 
 
 def load_events(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield parsed events from one JSONL trace."""
+    """Yield parsed events, normalizing legacy batch telemetry names."""
     with path.open("r", encoding="utf-8") as trace_file:
         for line in trace_file:
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            event = json.loads(line)
+            event_name = event.get("event")
+            if isinstance(event_name, str) and "_endgame_batch_" in event_name:
+                event["event"] = event_name.replace(
+                    "_endgame_batch_",
+                    "_focused_frontier_batch_",
+                )
+            if (
+                "focused_frontier_batch_mode" not in event
+                and "endgame_batch_mode" in event
+            ):
+                event["focused_frontier_batch_mode"] = event[
+                    "endgame_batch_mode"
+                ]
+            yield event
 
 
 def latest_trace(log_dir: Path) -> Path:
@@ -2779,6 +2793,15 @@ def _component_exploration_summary_lines(
         "rover_route_negative_cached",
         "rover_route_negative_cache_hit",
         "rover_frontier_route_retry_suppressed",
+        "rover_focused_frontier_batch_evaluated",
+        "rover_focused_frontier_batch_issued",
+        "drone_focused_frontier_batch_member_selected",
+        "drone_focused_frontier_batch_member_finished",
+        "drone_focused_frontier_batch_frontier_evaluated",
+        "drone_focused_frontier_batch_frontier_revisited",
+        "drone_focused_frontier_batch_bound_reached",
+        "rover_focused_frontier_batch_report_accepted",
+        "rover_focused_frontier_batch_report_rejected",
         "rover_rendezvous_endpoint_proposed",
         "drone_rover_rendezvous_ack_exchanged",
         "drone_rendezvous_message_relayed",
@@ -3035,6 +3058,86 @@ def _component_exploration_summary_lines(
             "return_distance",
         )
     }
+    batch_evaluations = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_frontier_batch_evaluated"
+    ]
+    batch_issues = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_frontier_batch_issued"
+    ]
+    batch_member_finishes = [
+        event for event in relevant
+        if event.get("event") == "drone_focused_frontier_batch_member_finished"
+    ]
+    batch_frontier_evaluations = [
+        event for event in relevant
+        if event.get("event") == "drone_focused_frontier_batch_frontier_evaluated"
+    ]
+    batch_frontier_revisits = [
+        event for event in relevant
+        if event.get("event") == "drone_focused_frontier_batch_frontier_revisited"
+    ]
+    batch_bounds = Counter(
+        str(event.get("bound", "unknown"))
+        for event in relevant
+        if event.get("event") == "drone_focused_frontier_batch_bound_reached"
+    )
+    batch_reports_accepted = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_frontier_batch_report_accepted"
+    ]
+    batch_reports_rejected = [
+        event for event in relevant
+        if event.get("event") == "rover_focused_frontier_batch_report_rejected"
+    ]
+    batch_report_replays = sum(
+        _boolean(event.get("replayed")) is True
+        for event in batch_reports_accepted
+    )
+    batch_statuses: Counter[str] = Counter()
+    batch_dispositions: Counter[str] = Counter()
+    for event in batch_reports_accepted:
+        if _boolean(event.get("replayed")) is True:
+            continue
+        for item in event.get("member_statuses", ()) or ():
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                batch_statuses[str(item[1])] += 1
+        batch_dispositions.update(
+            str(value)
+            for value in event.get("member_dispositions", ()) or ()
+        )
+    batch_evaluation_reasons = Counter(
+        str(event.get("reason", "unknown")) for event in batch_evaluations
+    )
+    batch_observe_opportunities = sum(
+        str(event.get("mode", "")).casefold() == "observe"
+        and _boolean(event.get("accepted")) is True
+        for event in batch_evaluations
+    )
+    batch_frontier_decisions = Counter(
+        "accepted" if _boolean(event.get("accepted")) is True
+        else str(event.get("reason", "rejected"))
+        for event in batch_frontier_evaluations
+    )
+    issued_lease_ids = {
+        lease_id for event in batch_issues
+        if (lease_id := _integer(event.get("lease_id"))) is not None
+    }
+    released_lease_ids = {
+        lease_id for event in batch_reports_accepted
+        if _boolean(event.get("replayed")) is not True
+        and (lease_id := _integer(event.get("lease_id"))) is not None
+    }
+    batch_directive_ids = {
+        directive_id for event in batch_issues
+        if (directive_id := _integer(event.get("directive_id"))) is not None
+    }
+    batch_patch_c_overlap = sum(
+        event.get("event") == "drone_incidental_scan_started"
+        and _integer(event.get("directive_id")) in batch_directive_ids
+        for event in events
+    )
     rendezvous = Counter(
         str(event.get("event"))
         for event in relevant
@@ -3173,6 +3276,61 @@ def _component_exploration_summary_lines(
             "retry_suppressed="
             f"{focused_endgame['rover_frontier_route_retry_suppressed']}"
         )
+    if batch_evaluations or batch_issues or batch_reports_accepted:
+        batch_sizes = tuple(
+            len(event.get("member_task_ids", ()) or ())
+            for event in batch_issues
+        )
+
+        def batch_sum(field: str, source: Iterable[Mapping[str, Any]]) -> float:
+            return sum(
+                _finite_float(event.get(field)) or 0.0
+                for event in source
+            )
+
+        nonreplayed_reports = tuple(
+            event for event in batch_reports_accepted
+            if _boolean(event.get("replayed")) is not True
+        )
+        provisional_count = sum(
+            max(0, _integer(event.get("provisional_observation_count")) or 0)
+            for event in nonreplayed_reports
+        )
+        provisional_gain = sum(
+            max(0, _integer(event.get("provisional_newly_known_cells")) or 0)
+            for event in nonreplayed_reports
+        )
+        lines.append(
+            "  focused frontier batching: "
+            f"evaluated={len(batch_evaluations)} "
+            f"observe_opportunities={batch_observe_opportunities} "
+            f"issued={len(batch_issues)} sizes={batch_sizes} "
+            f"separate={batch_sum('estimated_separate_cost', batch_issues):.1f}px "
+            f"combined={batch_sum('estimated_combined_cost', batch_issues):.1f}px "
+            f"avoided={batch_sum('estimated_avoided_round_trip', batch_issues):.1f}px "
+            f"detour={batch_sum('estimated_detour_cost', batch_issues):.1f}px "
+            f"member_outbound={batch_sum('outbound_distance', batch_member_finishes):.1f}px "
+            f"member_service={batch_sum('service_distance', batch_member_finishes):.1f}px "
+            f"return={batch_sum('return_distance', nonreplayed_reports):.1f}px "
+            f"service={batch_sum('service_seconds', batch_member_finishes):.2f}s "
+            f"provisional={provisional_count}/{provisional_gain}cells "
+            f"revisits={len(batch_frontier_revisits)}/"
+            f"{batch_sum('actual_revisit_route_distance', batch_frontier_revisits):.1f}px "
+            f"reports={len(nonreplayed_reports)} "
+            f"rejected={len(batch_reports_rejected)} "
+            f"replays={batch_report_replays} "
+            f"member_statuses={dict(sorted(batch_statuses.items()))} "
+            f"member_dispositions={dict(sorted(batch_dispositions.items()))} "
+            f"bounds={dict(sorted(batch_bounds.items()))} "
+            "frontiers="
+            f"{dict(sorted(batch_frontier_decisions.items()))} "
+            "evaluation_reasons="
+            f"{dict(sorted(batch_evaluation_reasons.items()))} "
+            "claims_open="
+            f"{max(0, sum(batch_sizes) - sum(batch_statuses.values()))} "
+            f"leases_open={len(issued_lease_ids - released_lease_ids)} "
+            f"patch_c_overlap={batch_patch_c_overlap}"
+        )
     if reports and any(report_distances.values()):
         lines.append(
             "  reported sortie distance: "
@@ -3232,6 +3390,117 @@ def _component_exploration_summary_lines(
             f"events={len(quiescence)} reasons={dict(sorted(homing_reasons.items()))} "
             f"max_ready_tasks={max(int(event.get('ready_task_count', 0) or 0) for event in quiescence)} "
             f"max_live_claims={max(int(event.get('live_claim_count', 0) or 0) for event in quiescence)}"
+        )
+    return lines
+
+
+def _highway_summary_lines(
+    events: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Summarize graph work, drone use, and frontier-batch planning cost."""
+    builds = tuple(
+        event for event in events
+        if event.get("event") == "rover_highway_build_completed"
+    )
+    snapshots = tuple(
+        event for event in events
+        if event.get("event") == "drone_highway_snapshot_received"
+    )
+    routes = tuple(
+        event for event in events
+        if event.get("event") == "drone_highway_route_evaluated"
+    )
+    path_requests = tuple(
+        event for event in events
+        if event.get("event") == "drone_path_request_completed"
+    )
+    planning = tuple(
+        event for event in events
+        if event.get("event") == "rover_focused_frontier_batch_planning_completed"
+    )
+    if not (builds or snapshots or routes or path_requests or planning):
+        return []
+
+    def timings(source: Iterable[Mapping[str, Any]]) -> list[float]:
+        return [
+            value for event in source
+            if (value := _finite_float(event.get("elapsed_ms"))) is not None
+            and value >= 0.0
+        ]
+
+    lines = ["", "Highway routing:"]
+    if builds:
+        elapsed = timings(builds)
+        latest = builds[-1]
+        lines.append(
+            "  graph builds: "
+            f"attempts={len(builds)} "
+            f"statuses={dict(sorted(Counter(str(event.get('status', 'unknown')) for event in builds).items()))} "
+            f"total={sum(elapsed):.2f}ms "
+            f"mean={_format_optional(statistics.mean(elapsed) if elapsed else None, 'ms')} "
+            f"p95={_format_optional(_nearest_rank_percentile(elapsed, 0.95), 'ms')} "
+            f"max={_format_optional(max(elapsed, default=None), 'ms')} "
+            f"published_version={latest.get('published_version')} "
+            f"areas={latest.get('area_count', 0)} "
+            f"edges={latest.get('edge_count', 0)} "
+            "retained_previous="
+            f"{sum(_boolean(event.get('retained_previous')) is True for event in builds)}"
+        )
+    if snapshots:
+        lines.append(
+            "  physical publications: "
+            f"received={len(snapshots)} "
+            f"changed={sum(_boolean(event.get('changed')) is True for event in snapshots)} "
+            f"drones={len({_integer(event.get('drone_id')) for event in snapshots})}"
+        )
+    if routes:
+        elapsed = timings(routes)
+        finite_costs = [
+            value for event in routes
+            if (value := _finite_float(event.get("route_distance"))) is not None
+            and value >= 0.0
+        ]
+        finite_circuity = [
+            value for event in routes
+            if (value := _finite_float(event.get("route_circuity"))) is not None
+            and value >= 0.0
+        ]
+        lines.append(
+            "  drone return routes: "
+            f"evaluated={len(routes)} "
+            f"eligible={sum(_boolean(event.get('eligible')) is True for event in routes)} "
+            f"selected={sum(_boolean(event.get('selected')) is True for event in routes)} "
+            f"statuses={dict(sorted(Counter(str(event.get('status', 'unknown')) for event in routes).items()))} "
+            f"fallbacks={dict(sorted(Counter(str(event.get('fallback_reason')) for event in routes if event.get('fallback_reason') is not None).items()))} "
+            f"query_total={sum(elapsed):.2f}ms "
+            f"query_max={_format_optional(max(elapsed, default=None), 'ms')} "
+            f"route_mean={_format_optional(statistics.mean(finite_costs) if finite_costs else None, 'px')} "
+            f"circuity_mean={_format_optional(statistics.mean(finite_circuity) if finite_circuity else None)}"
+        )
+    if path_requests:
+        elapsed = timings(path_requests)
+        lines.append(
+            "  A* requests: "
+            f"count={len(path_requests)} "
+            f"statuses={dict(sorted(Counter(str(event.get('status', 'unknown')) for event in path_requests).items()))} "
+            f"total={sum(elapsed):.2f}ms "
+            f"mean={_format_optional(statistics.mean(elapsed) if elapsed else None, 'ms')} "
+            f"p95={_format_optional(_nearest_rank_percentile(elapsed, 0.95), 'ms')} "
+            f"max={_format_optional(max(elapsed, default=None), 'ms')}"
+        )
+    if planning:
+        elapsed = timings(planning)
+        lines.append(
+            "  focused frontier batch planning: "
+            f"passes={len(planning)} "
+            f"statuses={dict(sorted(Counter(str(event.get('status', 'unknown')) for event in planning).items()))} "
+            f"total={sum(elapsed):.2f}ms "
+            f"mean={_format_optional(statistics.mean(elapsed) if elapsed else None, 'ms')} "
+            f"max={_format_optional(max(elapsed, default=None), 'ms')} "
+            f"route_queries={sum(max(0, _integer(event.get('route_queries')) or 0) for event in planning)} "
+            f"cache_hits={sum(max(0, _integer(event.get('route_cache_hits')) or 0) for event in planning)} "
+            f"candidates={sum(max(0, _integer(event.get('candidate_count')) or 0) for event in planning)} "
+            f"batches={sum(max(0, _integer(event.get('planned_batch_count')) or 0) for event in planning)}"
         )
     return lines
 
@@ -3755,6 +4024,7 @@ def summarize(
         lines.append(f"  {name}: {count}")
     lines.extend(format_characterization(metrics))
     lines.extend(_component_exploration_summary_lines(materialized))
+    lines.extend(_highway_summary_lines(materialized))
     lines.extend(_sector_epoch_summary_lines(materialized))
     lines.extend(_endgame_cost_lines(materialized, completion_trigger))
 

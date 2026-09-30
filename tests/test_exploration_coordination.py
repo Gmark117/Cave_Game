@@ -1,13 +1,19 @@
 import math
 import threading
+import time
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 
 from mapping.frontier_registry import (
+    ComponentWorkUnit,
     ComponentState,
     ExplorationMode,
+    FrontierComponentRecord,
+    FrontierGeometry,
+    WorkUnitKind,
     WorkUnitState,
 )
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
@@ -18,8 +24,10 @@ from mission.energy import (
     UnlimitedEnergyPolicy,
 )
 from mission.exploration_coordination import (
+    BatchMemberReport,
     CoordinationReport,
     DirectiveKind,
+    ExplorationDirective,
     ExplorationPhase,
     ExplorationTask,
     FrontierTaskCoordinator,
@@ -27,6 +35,9 @@ from mission.exploration_coordination import (
     TaskSuspension,
     WorkUnitOutcome,
 )
+from navigation.highway import build_highway_graph
+
+
 def slam_with_line(*, version: int = 1) -> SlamSnapshot:
     occupancy = np.full((32, 32), UNKNOWN, dtype=np.int8)
     confidence = np.zeros((32, 32), dtype=np.float32)
@@ -90,7 +101,12 @@ class EnergyPolicyTests(unittest.TestCase):
 
 
 class FrontierTaskCoordinatorTests(unittest.TestCase):
-    def coordinator(self, *, drones: int = 3) -> FrontierTaskCoordinator:
+    def coordinator(
+        self,
+        *,
+        drones: int = 3,
+        **kwargs,
+    ) -> FrontierTaskCoordinator:
         return FrontierTaskCoordinator(
             (32, 32),
             drones,
@@ -101,6 +117,92 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
             minimum_unknown_support_cells=1,
             frontier_stride=1,
             global_cell_size=8,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _install_focused_tasks(
+        coordinator: FrontierTaskCoordinator,
+        entries: tuple[tuple[int, int], ...],
+    ) -> None:
+        coordinator.registry.revision = 1
+        for task_id, entry in enumerate(entries):
+            geometry = FrontierGeometry(
+                cells=frozenset({entry}),
+                bounding_box=(*entry, *entry),
+                centroid=(float(entry[0]), float(entry[1])),
+                wall_contact_cells=0,
+                wall_contact_ratio=0.0,
+                longest_wall_run_ratio=0.0,
+                unknown_support_cells=1,
+                slam_version=1,
+            )
+            coordinator.registry.components[task_id] = FrontierComponentRecord(
+                component_id=task_id,
+                state=ComponentState.ACTIVE,
+                geometry=geometry,
+                geometry_revision=0,
+                parent_ids=(),
+                child_ids=(),
+                first_seen_revision=1,
+                last_seen_revision=1,
+                missing_reconciliations=0,
+                dormant_reason=None,
+                exploration_mode=ExplorationMode.FOCUSED,
+                work_unit_ids=(task_id,),
+            )
+            coordinator.registry.work_units[task_id] = ComponentWorkUnit(
+                work_unit_id=task_id,
+                component_id=task_id,
+                component_revision=0,
+                kind=WorkUnitKind.FOCUSED_ANCHOR,
+                cells=frozenset({entry}),
+                anchor_position=entry,
+                scan_headings=(90,),
+                estimated_effort=1.0,
+                state=WorkUnitState.READY,
+            )
+            coordinator._tasks[task_id] = ExplorationTask(
+                task_id=task_id,
+                component_id=task_id,
+                component_revision=0,
+                work_unit_ids=(task_id,),
+                parent_task_id=None,
+                depth=0,
+                preferred_entry=entry,
+                estimated_effort=1.0,
+            )
+            coordinator._task_by_unit[task_id] = task_id
+            coordinator._component_task_ids[task_id] = [task_id]
+        coordinator.registry._next_component_id = len(entries)
+        coordinator.registry._next_work_unit_id = len(entries)
+        coordinator._next_task_id = len(entries)
+        coordinator._initial_scan_complete = True
+        coordinator._phase = ExplorationPhase.COMPONENT_EXPLORATION
+        coordinator._bootstrap_followers_issued = True
+        coordinator._waiting.update(range(coordinator.drone_count))
+
+    @staticmethod
+    def _complete_batch_report(directive, *, report_id: int):
+        return CoordinationReport(
+            report_id=report_id,
+            directive_id=directive.directive_id,
+            kind=DirectiveKind.COMPONENT_BATCH,
+            lease_id=directive.spatial_lease.lease_id,
+            batch_member_reports=tuple(
+                BatchMemberReport(
+                    task_id=member.task.task_id,
+                    component_id=member.task.component_id,
+                    component_revision=member.task.component_revision,
+                    claim_token=member.claim.token,
+                    disposition="complete",
+                    work_unit_outcomes=tuple(
+                        WorkUnitOutcome(unit_id, "sensor_gain")
+                        for unit_id in member.claim.work_unit_ids
+                    ),
+                )
+                for member in directive.batch_members
+            ),
         )
 
     def _start_initial_round(self, coordinator, slam):
@@ -687,6 +789,308 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
         task.component_revision = 4
         refreshed, _selected = coordinator._assign_tasks((0,), (task,))
         self.assertEqual(len(refreshed), 1)
+
+    def test_active_focused_frontier_batch_seeds_every_idle_drone_before_attachment(
+        self,
+    ) -> None:
+        coordinator = self.coordinator(
+            drones=2,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        self._install_focused_tasks(
+            coordinator,
+            ((20, 16), (24, 16), (28, 16)),
+        )
+
+        coordinator._schedule(known_free_slam())
+        directives = tuple(
+            coordinator.claim_directive(drone_id).directive
+            for drone_id in range(2)
+        )
+
+        self.assertTrue(all(item is not None for item in directives))
+        batch = next(
+            item for item in directives
+            if item.kind == DirectiveKind.COMPONENT_BATCH
+        )
+        single = next(
+            item for item in directives
+            if item.kind == DirectiveKind.COMPONENT_TASK
+        )
+        self.assertEqual(len(batch.batch_members), 2)
+        self.assertIsNone(batch.task)
+        self.assertIsNone(batch.claim)
+        self.assertEqual(len(coordinator.snapshot().claims), 3)
+        self.assertEqual(
+            len({
+                member.claim.token for member in batch.batch_members
+            } | {single.claim.token}),
+            3,
+        )
+        self.assertEqual(
+            set(batch.spatial_lease.member_task_ids),
+            {member.task.task_id for member in batch.batch_members},
+        )
+
+    def test_observe_focused_frontier_batch_is_assignment_and_claim_pure(self) -> None:
+        off = self.coordinator(drones=2, focused_frontier_batch_mode="off")
+        observe = self.coordinator(
+            drones=2,
+            focused_frontier_batch_mode="observe",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        entries = ((20, 16), (24, 16), (28, 16))
+        self._install_focused_tasks(off, entries)
+        self._install_focused_tasks(observe, entries)
+
+        off._schedule(known_free_slam())
+        observe._schedule(known_free_slam())
+
+        self.assertEqual(
+            tuple(
+                (drone_id, directive.kind, directive.task.task_id)
+                for drone_id, directive in sorted(off._pending_directives.items())
+            ),
+            tuple(
+                (drone_id, directive.kind, directive.task.task_id)
+                for drone_id, directive
+                in sorted(observe._pending_directives.items())
+            ),
+        )
+        self.assertEqual(off.snapshot().claims, observe.snapshot().claims)
+        self.assertFalse(observe.snapshot().spatial_leases)
+        self.assertTrue(observe._take_batch_evaluations())
+
+    def test_focused_frontier_batch_planning_budget_falls_back_to_singular_claim(
+        self,
+    ) -> None:
+        coordinator = self.coordinator(
+            drones=1,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+            focused_frontier_batch_maximum_planning_ms=1e-9,
+        )
+        self._install_focused_tasks(coordinator, ((20, 16), (24, 16)))
+
+        coordinator._schedule(known_free_slam())
+        directive = coordinator.claim_directive(0).directive
+        summary = coordinator._last_batch_planning_summary
+
+        self.assertEqual(directive.kind, DirectiveKind.COMPONENT_TASK)
+        self.assertEqual(len(coordinator.snapshot().claims), 1)
+        self.assertFalse(coordinator.snapshot().spatial_leases)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.status, "planning_budget")
+        self.assertEqual(summary.planned_batch_count, 0)
+
+    def test_focused_frontier_batch_uses_highway_for_obstacle_connector(self) -> None:
+        coordinator = self.coordinator(
+            drones=1,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        self._install_focused_tasks(coordinator, ((18, 16), (24, 16)))
+        occupancy = np.full((32, 32), FREE, dtype=np.int8)
+        confidence = np.ones((32, 32), dtype=np.float32)
+        occupancy[10:23, 20] = OCCUPIED
+        slam = SlamSnapshot(occupancy, confidence, version=7)
+        build = build_highway_graph(
+            slam,
+            confidence_threshold=0.5,
+            macro_cell_size=8,
+            maximum_build_ms=250.0,
+            maximum_connector_expansions=4096,
+        )
+        self.assertIsNotNone(build.snapshot)
+        coordinator.update_highway_snapshot(build.snapshot)
+
+        coordinator._schedule(slam)
+        directive = coordinator.claim_directive(0).directive
+        summary = coordinator._last_batch_planning_summary
+
+        self.assertEqual(directive.kind, DirectiveKind.COMPONENT_BATCH)
+        self.assertEqual(len(directive.batch_members), 2)
+        self.assertIsNotNone(directive.spatial_lease)
+        self.assertEqual(summary.highway_version, 7)
+        self.assertLessEqual(summary.route_queries, 128)
+
+    def test_focused_frontier_batch_large_map_planning_meets_wall_budget(self) -> None:
+        budget_ms = 250.0
+        coordinator = FrontierTaskCoordinator(
+            (1010, 1615),
+            3,
+            (807, 505),
+            sensor_range=160.0,
+            sensor_fov_deg=60.0,
+            minimum_component_cells=1,
+            minimum_unknown_support_cells=1,
+            frontier_stride=4,
+            global_cell_size=32,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+            focused_frontier_batch_maximum_planning_ms=budget_ms,
+        )
+        self._install_focused_tasks(
+            coordinator,
+            tuple(
+                (560 + (index % 4) * 90, 340 + (index // 4) * 90)
+                for index in range(12)
+            ),
+        )
+        slam = SlamSnapshot(
+            np.full((1010, 1615), FREE, dtype=np.int8),
+            np.ones((1010, 1615), dtype=np.float32),
+            version=1,
+        )
+
+        started = time.perf_counter()
+        coordinator._schedule(slam)
+        scheduling_ms = (time.perf_counter() - started) * 1000.0
+        directives = tuple(
+            coordinator.claim_directive(drone_id).directive
+            for drone_id in range(3)
+        )
+        summary = coordinator._last_batch_planning_summary
+
+        batches = tuple(
+            directive for directive in directives
+            if directive.kind == DirectiveKind.COMPONENT_BATCH
+        )
+        self.assertTrue(batches)
+        self.assertTrue(all(
+            directive.spatial_lease is not None for directive in batches
+        ))
+        self.assertEqual(summary.status, "complete")
+        self.assertEqual(summary.planned_batch_count, len(batches))
+        self.assertLessEqual(summary.elapsed_ms, budget_ms)
+        self.assertLessEqual(summary.route_queries, 128)
+        # Scheduling includes the full-map reachability pass in addition to
+        # the planning interval, so leave only a small non-planner allowance.
+        self.assertLessEqual(scheduling_ms, budget_ms + 50.0)
+
+    def test_spatial_leases_clip_to_disjoint_raster_cells(self) -> None:
+        coordinator = self.coordinator(
+            drones=2,
+            focused_frontier_batch_mode="active",
+        )
+        self._install_focused_tasks(
+            coordinator,
+            ((18, 16), (20, 16), (26, 16), (28, 16)),
+        )
+        slam = known_free_slam()
+        first = coordinator._build_spatial_lease(
+            0, 40, (0, 1), slam,
+        )
+        self.assertIsNotNone(first)
+        coordinator._leases_by_id[first.lease_id] = first
+        second = coordinator._build_spatial_lease(
+            1, 41, (2, 3), slam,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertFalse(
+            coordinator._lease_cells(first)
+            & coordinator._lease_cells(second)
+        )
+
+    def test_malformed_batch_report_has_zero_partial_mutation(self) -> None:
+        coordinator = self.coordinator(
+            drones=1,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        self._install_focused_tasks(
+            coordinator,
+            ((20, 16), (24, 16)),
+        )
+        coordinator._schedule(known_free_slam())
+        directive = coordinator.claim_directive(0).directive
+        valid = self._complete_batch_report(directive, report_id=100)
+        malformed_members = list(valid.batch_member_reports)
+        malformed_members[1] = replace(
+            malformed_members[1],
+            claim_token=malformed_members[1].claim_token + 100,
+        )
+
+        rejected = coordinator.check_in(
+            0,
+            known_free_slam(version=2),
+            report=replace(
+                valid,
+                batch_member_reports=tuple(malformed_members),
+            ),
+        )
+
+        self.assertFalse(rejected.report_accepted)
+        self.assertEqual(len(coordinator.snapshot().claims), 2)
+        self.assertEqual(len(coordinator.snapshot().spatial_leases), 1)
+        self.assertTrue(all(
+            coordinator.registry.work_units[unit_id].state
+            == WorkUnitState.ACTIVE
+            for member in directive.batch_members
+            for unit_id in member.claim.work_unit_ids
+        ))
+        self.assertNotIn(100, coordinator._accepted_report_ids)
+
+    def test_batch_report_accepts_stale_peer_and_replay_once(self) -> None:
+        coordinator = self.coordinator(
+            drones=1,
+            focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        self._install_focused_tasks(
+            coordinator,
+            ((20, 16), (24, 16)),
+        )
+        coordinator._schedule(known_free_slam())
+        directive = coordinator.claim_directive(0).directive
+        stale = directive.batch_members[0]
+        stale_unit = coordinator.registry.work_units[
+            stale.claim.work_unit_ids[0]
+        ]
+        stale_unit.state = WorkUnitState.VISITED
+        stale_unit.terminal_reason = "lineage_closed_elsewhere"
+        report = self._complete_batch_report(directive, report_id=101)
+
+        accepted = coordinator.check_in(
+            0,
+            known_free_slam(version=2),
+            report=report,
+        )
+        revision = coordinator.registry.revision
+        newer_active = ExplorationDirective(
+            directive_id=999,
+            kind=DirectiveKind.HOME,
+            reason="newer_directive",
+        )
+        coordinator._active_directives[0] = newer_active
+        replayed = coordinator.check_in(
+            0,
+            known_free_slam(version=2),
+            report=report,
+        )
+
+        self.assertTrue(accepted.report_accepted)
+        self.assertIn(
+            (stale.task.task_id, "stale"),
+            accepted.batch_member_statuses,
+        )
+        self.assertIn("applicable", dict(accepted.batch_member_statuses).values())
+        self.assertFalse(coordinator.snapshot().claims)
+        self.assertFalse(coordinator.snapshot().spatial_leases)
+        self.assertEqual(stale_unit.terminal_reason, "lineage_closed_elsewhere")
+        self.assertTrue(replayed.report_accepted)
+        self.assertTrue(replayed.report_replayed)
+        self.assertIs(coordinator._active_directives[0], newer_active)
+        self.assertEqual(coordinator.registry.revision, revision)
 
 
 if __name__ == "__main__":

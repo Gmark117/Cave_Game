@@ -1,6 +1,8 @@
 import os
+import math
 import threading
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -18,6 +20,7 @@ from agents.component_explorer import (
     LocalComponentNode,
     LocalDFSStack,
     incidental_scan_candidate,
+    leased_local_frontiers,
     local_node_pose,
     observation_pose_on_path,
     related_local_successors,
@@ -33,13 +36,16 @@ from mapping.frontier_registry import (
 from mapping.terrain_knowledge import TerrainKnowledge
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
 from mission.exploration_coordination import (
+    BatchMember,
     ClaimLease,
     CoordinationReport,
     CoordinationResult,
     DirectiveKind,
     ExplorationDirective,
     ExplorationTask,
+    SpatialLease,
     TaskState,
+    WorkUnitOutcome,
 )
 from mission.energy import EnergyReturnDecision, EnergyState
 from navigation.astar_pathfinder import (
@@ -47,6 +53,7 @@ from navigation.astar_pathfinder import (
     PATH_UNREACHABLE,
     PathResult,
 )
+from navigation.highway import build_highway_graph
 
 
 class ComponentControl:
@@ -355,6 +362,42 @@ class LocalDFSStackTests(unittest.TestCase):
         self.assertNotIn(frozenset({(30, 32)}), lineage_only)
         self.assertIn(frozenset({(30, 32)}), scan_visible)
 
+    def test_leased_frontier_requires_full_interior_and_no_reservation(self):
+        occupancy = np.full((24, 24), FREE, dtype=np.int8)
+        confidence = np.ones((24, 24), dtype=np.float32)
+        occupancy[10:13, 10:13] = UNKNOWN
+        confidence[10:13, 10:13] = 0.0
+        slam = SlamSnapshot(occupancy, confidence, version=1)
+        all_cells = tuple(
+            (x, y) for y in range(24) for x in range(24)
+        )
+
+        admitted = leased_local_frontiers(
+            slam,
+            allowed_cells=all_cells,
+            confidence_threshold=0.6,
+            minimum_component_cells=1,
+            minimum_unknown_support_cells=1,
+        )
+
+        self.assertEqual(len(admitted), 1)
+        component = admitted[0]
+        self.assertFalse(leased_local_frontiers(
+            slam,
+            allowed_cells=component,
+            confidence_threshold=0.6,
+            minimum_component_cells=1,
+            minimum_unknown_support_cells=1,
+        ))
+        self.assertFalse(leased_local_frontiers(
+            slam,
+            allowed_cells=all_cells,
+            excluded_geometry=(component,),
+            confidence_threshold=0.6,
+            minimum_component_cells=1,
+            minimum_unknown_support_cells=1,
+        ))
+
 
 class ComponentMovementTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -389,6 +432,133 @@ class ComponentMovementTests(unittest.TestCase):
         self.drone.move()
         self.control.ready.set()
         self.drone.move()
+
+    @staticmethod
+    def _highway_snapshot(version: int = 11):
+        occupancy = np.full((64, 64), FREE, dtype=np.int8)
+        confidence = np.ones((64, 64), dtype=np.float32)
+        result = build_highway_graph(
+            SlamSnapshot(occupancy, confidence, version=version),
+            confidence_threshold=0.6,
+            macro_cell_size=16,
+            maximum_build_ms=250.0,
+            maximum_connector_expansions=4096,
+        )
+        return result.snapshot
+
+    def test_highway_snapshot_is_accepted_only_through_coordination_result(
+        self,
+    ) -> None:
+        controller = self.drone.movement_controller
+        snapshot = self._highway_snapshot()
+        trace = Mock()
+        controller.dependencies = replace(
+            controller.dependencies,
+            runtime_trace=trace,
+        )
+
+        controller._apply_coordination_result(CoordinationResult(
+            arrived=True,
+            waiting=True,
+            highway_snapshot=snapshot,
+        ))
+
+        self.assertIs(controller._highway_snapshot, snapshot)
+        event = next(
+            call for call in trace.record.call_args_list
+            if call.args[0] == "drone_highway_snapshot_received"
+        )
+        self.assertEqual(event.kwargs["highway_version"], 11)
+
+    def test_active_highway_routes_long_component_check_in_without_astar(
+        self,
+    ) -> None:
+        controller = self.drone.movement_controller
+        controller.highway_mode = "active"
+        controller.highway_minimum_route_sensor_ranges = 0.0
+        controller._highway_snapshot = self._highway_snapshot()
+
+        with patch.object(controller, "_compute_path") as compute:
+            reached, encountered = controller._return_to_coordination_point(
+                (40, 16),
+            )
+
+        self.assertTrue(reached)
+        self.assertFalse(encountered)
+        self.assertEqual(self.drone.snapshot().position, (40, 16))
+        compute.assert_not_called()
+
+    def test_observe_or_local_obstacle_falls_back_from_highway(self) -> None:
+        controller = self.drone.movement_controller
+        controller.highway_minimum_route_sensor_ranges = 0.0
+        controller._highway_snapshot = self._highway_snapshot()
+        trace = Mock()
+        controller.dependencies = replace(
+            controller.dependencies,
+            runtime_trace=trace,
+        )
+
+        controller.highway_mode = "observe"
+        self.assertFalse(controller._component_check_in_highway_route(
+            (16, 16), (40, 16),
+        ))
+        observe_event = trace.record.call_args_list[-1]
+        self.assertFalse(observe_event.kwargs["selected"])
+        self.assertEqual(observe_event.kwargs["fallback_reason"], "observe_only")
+
+        advised = controller._highway_snapshot.route(
+            (16, 16),
+            (40, 16),
+            maximum_query_ms=50.0,
+            maximum_connector_expansions=4096,
+        )
+        blocked = advised.path[len(advised.path) // 2]
+        occupancy = np.full((64, 64), UNKNOWN, dtype=np.int8)
+        confidence = np.zeros((64, 64), dtype=np.float32)
+        occupancy[blocked[1], blocked[0]] = OCCUPIED
+        confidence[blocked[1], blocked[0]] = 1.0
+        self.drone.slam_map.merge_from(SlamSnapshot(occupancy, confidence))
+        controller.highway_mode = "active"
+        self.assertFalse(controller._component_check_in_highway_route(
+            (16, 16), (40, 16),
+        ))
+        occupied_event = trace.record.call_args_list[-1]
+        self.assertFalse(occupied_event.kwargs["selected"])
+        self.assertEqual(
+            occupied_event.kwargs["fallback_reason"],
+            "locally_known_occupied",
+        )
+
+    @staticmethod
+    def _batch_member(task_id: int, entry: tuple[int, int]) -> BatchMember:
+        unit = ComponentWorkUnit(
+            work_unit_id=task_id,
+            component_id=task_id,
+            component_revision=0,
+            kind=WorkUnitKind.FOCUSED_ANCHOR,
+            cells=frozenset({entry}),
+            anchor_position=entry,
+            scan_headings=(90,),
+            estimated_effort=1.0,
+            state=WorkUnitState.CLAIMED,
+        )
+        task = ExplorationTask(
+            task_id=task_id,
+            component_id=task_id,
+            component_revision=0,
+            work_unit_ids=(task_id,),
+            parent_task_id=None,
+            depth=0,
+            preferred_entry=entry,
+            estimated_effort=1.0,
+            state=TaskState.CLAIMED,
+        )
+        return BatchMember(
+            task=task,
+            work_units=(unit,),
+            claim=ClaimLease(task_id, (task_id,), 0, task_id + 10, 1),
+            estimated_service_cost=1.0,
+        )
 
     @staticmethod
     def _incidental_candidate(
@@ -435,6 +605,79 @@ class ComponentMovementTests(unittest.TestCase):
         )
         controller._coordination_execution = execution
         return controller, execution
+
+    def test_batch_reorders_by_full_local_tour_and_continues_after_failure(
+        self,
+    ) -> None:
+        controller = self.drone.movement_controller
+        self.drone.runtime_state.move_to((24, 16))
+        members = (
+            self._batch_member(0, (20, 16)),
+            self._batch_member(1, (30, 16)),
+        )
+        directive = ExplorationDirective(
+            directive_id=70,
+            kind=DirectiveKind.COMPONENT_BATCH,
+            batch_members=members,
+            spatial_lease=SpatialLease(
+                lease_id=3,
+                owner_drone_id=0,
+                directive_id=70,
+                issued_revision=1,
+                cell_spans=((16, 18, 32),),
+                member_task_ids=(0, 1),
+            ),
+            maximum_total_components=3,
+            maximum_detour_distance=100.0,
+            minimum_avoided_round_trip=0.0,
+            maximum_service_seconds=45.0,
+            maximum_total_dfs_nodes=48,
+            maximum_consecutive_low_gain_scans=2,
+        )
+
+        with patch.object(
+            controller,
+            "_local_slam_distance",
+            side_effect=lambda first, second: math.dist(first, second),
+        ):
+            controller._install_exploration_directive(directive)
+            execution = controller._coordination_execution
+            self.assertEqual(execution.batch_current_member.task.task_id, 1)
+            controller._prepare_execution_return(
+                execution,
+                reason="route_unreachable",
+            )
+
+        self.assertEqual(execution.batch_current_member.task.task_id, 0)
+        self.assertEqual(len(execution.batch_completed_members), 1)
+        failed = execution.batch_completed_members[0]
+        self.assertEqual(failed.member.task.task_id, 1)
+        self.assertEqual(failed.disposition, "unreachable")
+        self.assertIsNotNone(failed.suspension)
+        self.assertEqual(execution.phase, "transit")
+
+        execution.work_unit_outcomes = (
+            WorkUnitOutcome(0, "sensor_gain"),
+        )
+        controller._capture_batch_member(
+            execution,
+            disposition="complete",
+        )
+        execution.return_actual_path = ((24, 16), (16, 16))
+        controller._finish_batch_execution(execution)
+        report = controller._coordination_report
+
+        self.assertEqual(report.kind, DirectiveKind.COMPONENT_BATCH)
+        self.assertIsNone(report.claim_token)
+        self.assertFalse(report.work_unit_outcomes)
+        self.assertEqual(
+            {item.task_id for item in report.batch_member_reports},
+            {0, 1},
+        )
+        self.assertEqual(
+            {item.claim_token for item in report.batch_member_reports},
+            {10, 11},
+        )
 
     def test_incidental_scan_requires_exact_pose_and_newer_sequence_then_resumes_suffix(self):
         controller, execution = self._install_incidental_execution()

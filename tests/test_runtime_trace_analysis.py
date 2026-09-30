@@ -3,17 +3,37 @@
 from __future__ import annotations
 
 import math
+import tempfile
 import unittest
+from pathlib import Path
 
 from tools.analyze_runtime_trace import (
     LEGACY_MCTS_BUDGET_MS,
     analyze_trace,
     format_characterization,
+    load_events,
     summarize,
 )
 
 
 class RuntimeTraceAnalysisTests(unittest.TestCase):
+    def test_load_events_normalizes_legacy_batch_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            trace.write_text(
+                '{"event":"rover_endgame_batch_planning_completed",'
+                '"endgame_batch_mode":"active"}\n',
+                encoding="utf-8",
+            )
+
+            events = tuple(load_events(trace))
+
+        self.assertEqual(
+            events[0]["event"],
+            "rover_focused_frontier_batch_planning_completed",
+        )
+        self.assertEqual(events[0]["focused_frontier_batch_mode"], "active")
+
     def test_summary_reports_focused_endgame_economics(self) -> None:
         report = "\n".join(summarize([
             {
@@ -1785,6 +1805,135 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
         self.assertIn("predicted_support=9", summary)
         self.assertIn("pocket_cells_closed=5", summary)
         self.assertIn("retained=1", summary)
+
+    def test_summary_aggregates_focused_frontier_batch_economics_and_outcomes(self) -> None:
+        lines = summarize([
+            {
+                "event": "rover_focused_frontier_batch_evaluated",
+                "mode": "observe",
+                "accepted": True,
+                "reason": "accepted",
+            },
+            {
+                "event": "rover_focused_frontier_batch_issued",
+                "directive_id": 7,
+                "lease_id": 4,
+                "member_task_ids": [10, 11],
+                "estimated_separate_cost": 80.0,
+                "estimated_combined_cost": 55.0,
+                "estimated_avoided_round_trip": 25.0,
+                "estimated_detour_cost": 8.0,
+            },
+            {
+                "event": "drone_focused_frontier_batch_member_finished",
+                "drone_id": 0,
+                "outbound_distance": 12.0,
+                "service_distance": 3.0,
+                "service_seconds": 2.5,
+            },
+            {
+                "event": "drone_focused_frontier_batch_frontier_evaluated",
+                "drone_id": 0,
+                "accepted": True,
+                "reason": "positive_avoided_round_trip",
+            },
+            {
+                "event": "drone_focused_frontier_batch_frontier_revisited",
+                "drone_id": 0,
+                "actual_revisit_route_distance": 9.0,
+            },
+            {
+                "event": "drone_focused_frontier_batch_bound_reached",
+                "drone_id": 0,
+                "bound": "dfs_node_limit",
+            },
+            {
+                "event": "drone_incidental_scan_started",
+                "drone_id": 0,
+                "directive_id": 7,
+            },
+            {
+                "event": "rover_focused_frontier_batch_report_accepted",
+                "lease_id": 4,
+                "member_statuses": [[10, "applicable"], [11, "stale"]],
+                "provisional_observation_count": 1,
+                "provisional_newly_known_cells": 6,
+                "return_distance": 14.0,
+                "replayed": False,
+            },
+            {
+                "event": "rover_focused_frontier_batch_report_accepted",
+                "lease_id": 4,
+                "member_statuses": [],
+                "replayed": True,
+            },
+            {
+                "event": "rover_focused_frontier_batch_report_rejected",
+                "lease_id": 9,
+                "reason": "structural_validation",
+            },
+        ])
+
+        summary = "\n".join(lines)
+        self.assertIn("focused frontier batching:", summary)
+        self.assertIn("observe_opportunities=1", summary)
+        self.assertIn("issued=1 sizes=(2,)", summary)
+        self.assertIn("avoided=25.0px", summary)
+        self.assertIn("revisits=1/9.0px", summary)
+        self.assertIn("member_statuses={'applicable': 1, 'stale': 1}", summary)
+        self.assertIn("bounds={'dfs_node_limit': 1}", summary)
+        self.assertIn("rejected=1 replays=1", summary)
+        self.assertIn("leases_open=0 patch_c_overlap=1", summary)
+
+    def test_summary_aggregates_highway_and_bounded_batch_planning(self) -> None:
+        summary = "\n".join(summarize([
+            {
+                "event": "rover_highway_build_completed",
+                "status": "complete",
+                "elapsed_ms": 120.0,
+                "published_version": 8,
+                "area_count": 20,
+                "edge_count": 31,
+                "retained_previous": False,
+            },
+            {
+                "event": "drone_highway_snapshot_received",
+                "drone_id": 0,
+                "changed": True,
+            },
+            {
+                "event": "drone_highway_route_evaluated",
+                "drone_id": 0,
+                "status": "complete",
+                "eligible": True,
+                "selected": True,
+                "elapsed_ms": 3.0,
+                "route_distance": 40.0,
+                "route_circuity": 1.25,
+            },
+            {
+                "event": "drone_path_request_completed",
+                "drone_id": 1,
+                "status": "complete",
+                "elapsed_ms": 9.0,
+            },
+            {
+                "event": "rover_focused_frontier_batch_planning_completed",
+                "status": "complete",
+                "elapsed_ms": 7.5,
+                "route_queries": 6,
+                "route_cache_hits": 12,
+                "candidate_count": 3,
+                "planned_batch_count": 1,
+            },
+        ]))
+
+        self.assertIn("Highway routing:", summary)
+        self.assertIn("graph builds: attempts=1", summary)
+        self.assertIn("drone return routes: evaluated=1 eligible=1 selected=1", summary)
+        self.assertIn("A* requests: count=1", summary)
+        self.assertIn("focused frontier batch planning: passes=1", summary)
+        self.assertIn("route_queries=6 cache_hits=12 candidates=3 batches=1", summary)
 
 
 if __name__ == "__main__":

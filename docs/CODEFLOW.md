@@ -15,8 +15,11 @@ flowchart TD
     Factory --> Rover["Rover: frontier staging worker"]
     Drone --> Movement["DroneMovementController"]
     Mission --> Coordinator["FrontierTaskCoordinator"]
+    Mission --> Highway["HighwayService: immutable rover-SLAM graph"]
     Coordinator --> Registry["FrontierComponentRegistry"]
     Coordinator --> Energy["EnergyPolicy"]
+    Highway --> Coordinator
+    Highway -->|physical check-in snapshot| Movement
     Coordinator --> Movement
     Movement --> DFS["LocalDFSStack"]
     Drone --> Sensor["DroneSensorController"]
@@ -36,12 +39,32 @@ flowchart TD
     UIState --> Render
 ```
 
+With `[HIGHWAY] mode = observe|active`, long component check-in legs query the
+last snapshot physically received by that drone. The route must have exact
+current/target endpoints, stay below the circuity cap, and avoid every cell or
+diagonal corner that the drone's newer local SLAM confidently marks occupied.
+`observe` records the decision and continues through segmented A*. `active`
+follows the stored exact polyline, still applying physical collision and rover-
+encounter checks at every step, then falls back to segmented A* or the existing
+breadcrumb if the advice cannot complete. Other route classes do not use the
+highway in this rollout.
+
 The main thread handles events, sensing, mission status, and rendering. Each
 drone has a worker for directive execution and nearby field exchange. Each
 rover has a separate movement worker; the primary rover worker drains queued
 component check-ins and performs periodic rover exchange so reconciliation and
 map merges cannot block the display loop.
 Cave generation and drone A* use process-based workers.
+
+`HighwayService` is separate navigation advice. At a verified rover check-in,
+the rover may rebuild a complete macro-area graph from its detached local SLAM
+snapshot. Builds are version-debounced and bounded; an incomplete build is
+discarded while the last complete immutable snapshot remains available. Patch D
+uses bounded graph queries for batch economics. Its wall-clock planning budget
+also covers cache hits and a radius-padded lease-preview raster, with reserved
+finalization time and singular fallback before authority is mutated. A drone
+receives a snapshot only in the physical coordination result and never reads
+rover graph state remotely.
 
 ## Startup and Shutdown
 
@@ -371,6 +394,51 @@ frontiers, and resumes the validated suffix; timeout resumes without route or
 DFS retry accounting. The overlay never creates work outcomes, claims,
 suppression, assistance, or communication state. The committed mode is `off`.
 
+When `[FOCUSED_FRONTIER_BATCH] mode` is `observe` or `active`, the coordinator
+runs a second scheduling pass only while every actionable component is in the
+registry's focused phase. Maximum-cardinality seed assignment happens first,
+so an idle eligible drone receives one seed before any leftover task can be
+attached.
+Candidate attachments use bounded cached routes from the latest complete
+rover-SLAM highway graph, positive avoided round-trip value, and the configured
+detour, energy, service, and member caps. The whole pass also has wall-time and
+route-query limits. Missing/stale/unreachable advice or budget exhaustion falls
+back to ordinary singular scheduling before any batch claim. `observe`
+publishes the same quotes and rejection reasons without changing directives,
+claims, leases, paths, or RNG state. The committed mode is `off`.
+
+The settings reader still accepts the legacy `[ENDGAME_BATCH]` section, while
+new saves use `[FOCUSED_FRONTIER_BATCH]`. The trace analyzer likewise
+normalizes historical `*_endgame_batch_*` events to the current focused
+frontier batching names.
+
+An active batch keeps every task, component revision, work unit, lineage edge,
+and `ClaimLease` token independent. The registry preflights every group and
+claims all units together or none. Its run-length-encoded `SpatialLease`
+contains non-overlapping member geometry and rover-known connectors, clipped
+around other work and active leases. The lease authorizes bounded local
+observation only; it is not territorial ownership and cannot retire an
+unclaimed rover work unit.
+
+The drone dynamically orders unfinished members from exact routes in its own
+SLAM and keeps a separate DFS/outcome/suspension context for each. Significant
+new frontiers may be explored provisionally only when their geometry and pose
+are inside the lease, locally reachable, unreserved, economically positive,
+and within cumulative component, detour, elapsed-service, DFS, low-gain, and
+energy bounds. A failed member does not discard completed peers. The drone
+returns once through the ordinary physical encounter/docking path and submits
+one `COMPONENT_BATCH` report containing a fenced report for every member.
+
+The rover validates the complete outer report before mutation. Malformed
+membership, tokens, outcomes, suspensions, causal edges, or lease geometry
+reject the whole report and leave every claim and lease active. After that
+preflight, applicable, stale, and suspended members are committed
+independently, the delivered SLAM is reconciled once, and provisional evidence
+may retire only matching work created by that reconciliation. The outer
+`report_id` is the replay key, so retrying an accepted report performs no
+second mutation. Patch C remains an independent rollout and its waits count
+toward an active batch's service budget.
+
 The energy boundary is defined before drain and charging: `EnergyState`,
 route-to-task, next-action, route-home, safety reserve, `can_accept`,
 `must_return`, and `TaskSuspension`. The current `UnlimitedEnergyPolicy` passes
@@ -489,6 +557,10 @@ The live navigation settings are intentionally small:
 - `exploration.coverage_memory_decay_seconds`;
 - `exploration.coverage_visit_weight`;
 - `exploration.coverage_edge_weight`.
+- `incidental_scan.mode` and its per-directive attempt, time, rotation,
+  cooldown, and sampling bounds;
+- `focused_frontier_batch.mode`, claimed/total component caps, lease margin, avoided
+  round-trip and detour thresholds, service/DFS bounds, and low-gain limits.
 
 Older policy and navigation keys in a local INI are ignored so existing user
 configuration files remain loadable. A subsequent save writes only the live

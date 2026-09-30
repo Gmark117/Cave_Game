@@ -207,6 +207,92 @@ class IncidentalScanConfig:
 
 
 @dataclass(frozen=True)
+class HighwayConfig:
+    """Rover-built navigation graph and physically published route advice."""
+
+    mode: str = "off"
+    macro_cell_size: int = 32
+    minimum_version_delta: int = 4
+    maximum_build_ms: float = 250.0
+    maximum_query_ms: float = 50.0
+    maximum_connector_expansions: int = 4096
+    minimum_route_sensor_ranges: float = 2.0
+    maximum_route_circuity: float = 3.0
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode).casefold()
+        if mode not in {"off", "observe", "active"}:
+            raise ValueError("highway mode must be 'off', 'observe', or 'active'")
+        if self.macro_cell_size < 2:
+            raise ValueError("highway macro cell size must be at least two")
+        if self.minimum_version_delta < 1:
+            raise ValueError("highway minimum version delta must be positive")
+        if self.maximum_connector_expansions < 1:
+            raise ValueError("highway connector expansion limit must be positive")
+        if min(
+            self.maximum_build_ms,
+            self.maximum_query_ms,
+            self.minimum_route_sensor_ranges,
+        ) < 0.0:
+            raise ValueError("highway budgets must be non-negative")
+        if self.maximum_route_circuity < 1.0:
+            raise ValueError("highway maximum route circuity must be at least one")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class FocusedFrontierBatchConfig:
+    """Bounded frontier-task batching during the registry-focused phase."""
+
+    mode: str = "off"
+    maximum_claimed_components: int = 3
+    maximum_total_components: int = 4
+    lease_margin_sensor_ranges: float = 1.0
+    maximum_detour_sensor_ranges: float = 2.0
+    minimum_avoided_round_trip_sensor_ranges: float = 0.25
+    maximum_service_seconds: float = 45.0
+    maximum_total_dfs_nodes: int = 48
+    maximum_consecutive_low_gain_scans: int = 2
+    low_gain_maximum_new_cells: int = 1
+    low_gain_maximum_confidence_gain: float = 1.0
+    maximum_planning_ms: float = 250.0
+    maximum_route_queries: int = 128
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode).casefold()
+        if mode not in {"off", "observe", "active"}:
+            raise ValueError(
+                "focused frontier batch mode must be 'off', 'observe', or 'active'"
+            )
+        if self.maximum_claimed_components < 1:
+            raise ValueError("maximum claimed components must be positive")
+        if self.maximum_total_components < self.maximum_claimed_components:
+            raise ValueError(
+                "maximum total components must cover claimed components"
+            )
+        if self.maximum_total_dfs_nodes < 1:
+            raise ValueError("maximum total DFS nodes must be positive")
+        if self.maximum_consecutive_low_gain_scans < 1:
+            raise ValueError("maximum consecutive low-gain scans must be positive")
+        if self.low_gain_maximum_new_cells < 0:
+            raise ValueError("low-gain cell threshold must be non-negative")
+        if self.maximum_route_queries < 1:
+            raise ValueError(
+                "focused frontier route query limit must be positive"
+            )
+        if min(
+            self.lease_margin_sensor_ranges,
+            self.maximum_detour_sensor_ranges,
+            self.minimum_avoided_round_trip_sensor_ranges,
+            self.maximum_service_seconds,
+            self.low_gain_maximum_confidence_gain,
+            self.maximum_planning_ms,
+        ) < 0.0:
+            raise ValueError("focused frontier batch limits must be non-negative")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
 class RenderingConfig:
     """SLAM rendering cache limits and refresh timing."""
 
@@ -248,6 +334,10 @@ class SimulationConfig:
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     incidental_scan: IncidentalScanConfig = field(
         default_factory=IncidentalScanConfig
+    )
+    highway: HighwayConfig = field(default_factory=HighwayConfig)
+    focused_frontier_batch: FocusedFrontierBatchConfig = field(
+        default_factory=FocusedFrontierBatchConfig
     )
     rendering: RenderingConfig = field(default_factory=RenderingConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)

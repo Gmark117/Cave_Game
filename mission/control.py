@@ -54,6 +54,7 @@ from contracts import (
 )
 from navigation.pathfinding import PathfindingService
 from navigation.astar_pathfinder import PathResult
+from navigation.highway import HighwayBuildResult, HighwayService
 from mission.presentation_adapter import PresentationAdapter
 from rendering.slam_renderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
@@ -171,6 +172,18 @@ class MissionControl(MissionControlLifecycleMixin):
             self.map_matrix,
             self.settings.mission_config.num_drones,
         )
+        self.highway = HighwayService(
+            confidence_threshold=(
+                self.settings.frontier.confidence_threshold
+            ),
+            macro_cell_size=self.settings.highway.macro_cell_size,
+            maximum_build_ms=self.settings.highway.maximum_build_ms,
+            maximum_query_ms=self.settings.highway.maximum_query_ms,
+            maximum_connector_expansions=(
+                self.settings.highway.maximum_connector_expansions
+            ),
+        )
+        self._last_highway_build_version: int | None = None
         self.mission_event = threading.Event()
         self.exploration_completion_event = threading.Event()
         self.simulation_clock = SimulationClock()
@@ -257,6 +270,39 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
             incidental_scan_distance_cooldown_ranges=(
                 self.settings.incidental_scan.distance_cooldown_sensor_ranges
+            ),
+            focused_frontier_batch_mode=self.settings.focused_frontier_batch.mode,
+            focused_frontier_batch_maximum_claimed_components=(
+                self.settings.focused_frontier_batch.maximum_claimed_components
+            ),
+            focused_frontier_batch_maximum_total_components=(
+                self.settings.focused_frontier_batch.maximum_total_components
+            ),
+            focused_frontier_batch_maximum_detour_sensor_ranges=(
+                self.settings.focused_frontier_batch.maximum_detour_sensor_ranges
+            ),
+            focused_frontier_batch_maximum_service_seconds=(
+                self.settings.focused_frontier_batch.maximum_service_seconds
+            ),
+            focused_frontier_batch_maximum_planning_ms=(
+                self.settings.focused_frontier_batch.maximum_planning_ms
+            ),
+            focused_frontier_batch_maximum_route_queries=(
+                self.settings.focused_frontier_batch.maximum_route_queries
+            ),
+            highway_mode=self.settings.highway.mode,
+            highway_macro_cell_size=self.settings.highway.macro_cell_size,
+            highway_minimum_version_delta=(
+                self.settings.highway.minimum_version_delta
+            ),
+            highway_maximum_build_ms=(
+                self.settings.highway.maximum_build_ms
+            ),
+            highway_maximum_query_ms=(
+                self.settings.highway.maximum_query_ms
+            ),
+            highway_maximum_connector_expansions=(
+                self.settings.highway.maximum_connector_expansions
             ),
             component_zero_gain_memory="individual_anchor_or_subarc_plus_lineage_low_gain",
             component_focused_endgame_policy=(
@@ -487,6 +533,7 @@ class MissionControl(MissionControlLifecycleMixin):
         self._rover_failed_route_cache.clear()
         self._last_focused_endgame_trace_state = False
         self._last_focused_staging_hold_revision = None
+        self._last_highway_build_version = None
 
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
@@ -511,6 +558,45 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
             frontier_stride=self.settings.frontier.stride,
             global_cell_size=self.settings.frontier.global_cell_size,
+            focused_frontier_batch_mode=self.settings.focused_frontier_batch.mode,
+            focused_frontier_batch_maximum_claimed_components=(
+                self.settings.focused_frontier_batch.maximum_claimed_components
+            ),
+            focused_frontier_batch_maximum_total_components=(
+                self.settings.focused_frontier_batch.maximum_total_components
+            ),
+            focused_frontier_batch_lease_margin_sensor_ranges=(
+                self.settings.focused_frontier_batch.lease_margin_sensor_ranges
+            ),
+            focused_frontier_batch_maximum_detour_sensor_ranges=(
+                self.settings.focused_frontier_batch.maximum_detour_sensor_ranges
+            ),
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=(
+                self.settings.focused_frontier_batch
+                .minimum_avoided_round_trip_sensor_ranges
+            ),
+            focused_frontier_batch_maximum_service_seconds=(
+                self.settings.focused_frontier_batch.maximum_service_seconds
+            ),
+            focused_frontier_batch_maximum_total_dfs_nodes=(
+                self.settings.focused_frontier_batch.maximum_total_dfs_nodes
+            ),
+            focused_frontier_batch_maximum_consecutive_low_gain_scans=(
+                self.settings.focused_frontier_batch
+                .maximum_consecutive_low_gain_scans
+            ),
+            focused_frontier_batch_low_gain_maximum_new_cells=(
+                self.settings.focused_frontier_batch.low_gain_maximum_new_cells
+            ),
+            focused_frontier_batch_low_gain_maximum_confidence_gain=(
+                self.settings.focused_frontier_batch.low_gain_maximum_confidence_gain
+            ),
+            focused_frontier_batch_maximum_planning_ms=(
+                self.settings.focused_frontier_batch.maximum_planning_ms
+            ),
+            focused_frontier_batch_maximum_route_queries=(
+                self.settings.focused_frontier_batch.maximum_route_queries
+            ),
         )
 
         # Reset presentation after agents exist so their path/vision toggles
@@ -1218,6 +1304,47 @@ class MissionControl(MissionControlLifecycleMixin):
                     drone_id=drone_id,
                 )
 
+    def _refresh_highway_if_due(
+        self,
+        rover_slam,
+    ) -> HighwayBuildResult | None:
+        """Refresh bounded rover navigation advice at physical check-in only."""
+        if (
+            self.settings.highway.mode == "off"
+            and self.settings.focused_frontier_batch.mode == "off"
+        ):
+            return None
+        version = int(rover_slam.version)
+        last_version = self._last_highway_build_version
+        if (
+            last_version is not None
+            and version - last_version
+            < self.settings.highway.minimum_version_delta
+        ):
+            return None
+        self._last_highway_build_version = version
+        result = self.highway.refresh(rover_slam)
+        retained = self.highway.snapshot
+        self.runtime_trace.record(
+            "rover_highway_build_completed",
+            sim_time=self.simulation_time(),
+            mode=self.settings.highway.mode,
+            status=result.status,
+            requested_version=version,
+            published_version=(
+                None if retained is None else retained.version
+            ),
+            retained_previous=(
+                result.snapshot is None and retained is not None
+            ),
+            elapsed_ms=result.elapsed_ms,
+            area_count=result.area_count,
+            edge_count=result.edge_count,
+            known_free_cells=result.known_free_cells,
+            connector_expansions=result.connector_expansions,
+        )
+        return result
+
     def _perform_exploration_check_in(
         self,
         drone_id: int,
@@ -1233,6 +1360,8 @@ class MissionControl(MissionControlLifecycleMixin):
             return CoordinationResult(arrived=False)
         self._prune_exploration_waiting_contacts()
         rover_slam = self.rovers[0].slam_map.snapshot(point_limit=0)
+        self._refresh_highway_if_due(rover_slam)
+        coordinator.update_highway_snapshot(self.highway.snapshot)
         # These are rover-local cumulative knowledge counters sampled after a
         # verified physical exchange. Their differences include any rover
         # observations or physical proximity shares since the last sample;
@@ -1254,7 +1383,49 @@ class MissionControl(MissionControlLifecycleMixin):
                 unlimited=True,
             ),
         )
+        if (
+            self.settings.highway.mode in {"observe", "active"}
+            and self.highway.snapshot is not None
+        ):
+            result = replace(
+                result,
+                highway_snapshot=self.highway.snapshot,
+            )
         coordination_snapshot = coordinator.snapshot()
+        planning = result.batch_planning_summary
+        if planning is not None:
+            self.runtime_trace.record(
+                "rover_focused_frontier_batch_planning_completed",
+                sim_time=self.simulation_time(),
+                planning_id=planning.planning_id,
+                mode=planning.mode,
+                elapsed_ms=planning.elapsed_ms,
+                route_queries=planning.route_queries,
+                route_cache_hits=planning.route_cache_hits,
+                candidate_count=planning.candidate_count,
+                planned_batch_count=planning.planned_batch_count,
+                status=planning.status,
+                highway_version=planning.highway_version,
+                registry_revision=coordination_snapshot.revision,
+            )
+        for evaluation in result.batch_evaluations:
+            self.runtime_trace.record(
+                "rover_focused_frontier_batch_evaluated",
+                sim_time=self.simulation_time(),
+                evaluation_id=evaluation.evaluation_id,
+                mode=evaluation.mode,
+                focused_revision=coordination_snapshot.revision,
+                drone_id=evaluation.drone_id,
+                seed_task_id=evaluation.seed_task_id,
+                candidate_task_id=evaluation.candidate_task_id,
+                member_task_ids=evaluation.member_task_ids,
+                separate_cost=evaluation.separate_cost,
+                combined_cost=evaluation.combined_cost,
+                avoided_round_trip=evaluation.avoided_round_trip,
+                detour_cost=evaluation.detour_cost,
+                accepted=evaluation.accepted,
+                reason=evaluation.reason,
+            )
         if (
             coordination_snapshot.focused_endgame
             != self._last_focused_endgame_trace_state
@@ -1289,6 +1460,13 @@ class MissionControl(MissionControlLifecycleMixin):
             directive_id=None if report is None else report.directive_id,
             directive_kind=None if report is None else report.kind.value,
             claim_token=None if report is None else report.claim_token,
+            claim_tokens=(
+                () if report is None
+                else tuple(
+                    member.claim_token
+                    for member in report.batch_member_reports
+                )
+            ),
             report_accepted=result.report_accepted,
             waiting=result.waiting,
             mission_exhausted=result.mission_exhausted,
@@ -1298,7 +1476,47 @@ class MissionControl(MissionControlLifecycleMixin):
             rover_terrain_known_floor_cells=rover_terrain_known_floor_cells,
         )
         if report is not None and result.report_accepted:
-            if report.kind in {
+            if report.kind == DirectiveKind.COMPONENT_BATCH:
+                self.runtime_trace.record(
+                    "rover_focused_frontier_batch_report_accepted",
+                    sim_time=self.simulation_time(),
+                    drone_id=int(drone_id),
+                    report_id=report.report_id,
+                    directive_id=report.directive_id,
+                    lease_id=report.lease_id,
+                    member_statuses=result.batch_member_statuses,
+                    member_task_ids=tuple(
+                        member.task_id
+                        for member in report.batch_member_reports
+                    ),
+                    claim_tokens=tuple(
+                        member.claim_token
+                        for member in report.batch_member_reports
+                    ),
+                    member_dispositions=tuple(
+                        member.disposition
+                        for member in report.batch_member_reports
+                    ),
+                    provisional_observation_count=len(
+                        report.provisional_observations
+                    ),
+                    provisional_newly_known_cells=sum(
+                        item.sensor_newly_known_cells
+                        for item in report.provisional_observations
+                    ),
+                    provisional_confidence_gain=sum(
+                        item.sensor_confidence_gain
+                        for item in report.provisional_observations
+                    ),
+                    provisional_retired_work_unit_ids=(
+                        result.provisional_retired_work_unit_ids
+                    ),
+                    replayed=result.report_replayed,
+                    outbound_distance=report.outbound_distance,
+                    service_distance=report.service_distance,
+                    return_distance=report.return_distance,
+                )
+            elif report.kind in {
                 DirectiveKind.COMPONENT_TASK,
                 DirectiveKind.COMPONENT_FOLLOW,
             }:
@@ -1371,6 +1589,27 @@ class MissionControl(MissionControlLifecycleMixin):
                     ),
                     coordination_phase=coordination_snapshot.phase.value,
                 )
+        elif (
+            report is not None
+            and report.kind == DirectiveKind.COMPONENT_BATCH
+        ):
+            self.runtime_trace.record(
+                "rover_focused_frontier_batch_report_rejected",
+                sim_time=self.simulation_time(),
+                drone_id=int(drone_id),
+                report_id=report.report_id,
+                directive_id=report.directive_id,
+                lease_id=report.lease_id,
+                member_task_ids=tuple(
+                    member.task_id for member in report.batch_member_reports
+                ),
+                claim_tokens=tuple(
+                    member.claim_token
+                    for member in report.batch_member_reports
+                ),
+                reason="structural_validation",
+                replayed=False,
+            )
         if result.reconcile_result is not None:
             reconcile = result.reconcile_result
             snapshot = coordination_snapshot
@@ -1514,11 +1753,22 @@ class MissionControl(MissionControlLifecycleMixin):
                     report_accepted=processed.report_accepted,
                     reconcile_result=processed.reconcile_result,
                     published_directives=processed.published_directives,
+                    batch_evaluations=processed.batch_evaluations,
+                    batch_member_statuses=processed.batch_member_statuses,
+                    provisional_retired_work_unit_ids=(
+                        processed.provisional_retired_work_unit_ids
+                    ),
+                    report_replayed=processed.report_replayed,
+                    batch_planning_summary=(
+                        processed.batch_planning_summary
+                    ),
+                    highway_snapshot=processed.highway_snapshot,
                 )
             else:
                 result = coordinator.claim_directive(drone_id)
             departure_kinds = {
                 DirectiveKind.COMPONENT_TASK,
+                DirectiveKind.COMPONENT_BATCH,
                 DirectiveKind.COMPONENT_FOLLOW,
                 DirectiveKind.RADIAL_PROBE,
             }
@@ -1605,6 +1855,43 @@ class MissionControl(MissionControlLifecycleMixin):
                         directive.estimated_round_trip_cost
                     ),
                 )
+        elif directive.kind == DirectiveKind.COMPONENT_BATCH:
+            lease = directive.spatial_lease
+            self.runtime_trace.record(
+                "rover_focused_frontier_batch_issued",
+                sim_time=self.simulation_time(),
+                drone_id=int(drone_id),
+                directive_id=directive.directive_id,
+                lease_id=None if lease is None else lease.lease_id,
+                member_task_ids=tuple(
+                    member.task.task_id for member in directive.batch_members
+                ),
+                component_ids=tuple(
+                    member.task.component_id for member in directive.batch_members
+                ),
+                work_unit_ids=tuple(
+                    unit_id
+                    for member in directive.batch_members
+                    for unit_id in member.claim.work_unit_ids
+                ),
+                claim_tokens=tuple(
+                    member.claim.token for member in directive.batch_members
+                ),
+                lease_span_count=(
+                    0 if lease is None else len(lease.cell_spans)
+                ),
+                lease_cell_count=0 if lease is None else lease.cell_count,
+                estimated_separate_cost=directive.estimated_separate_cost,
+                estimated_combined_cost=directive.estimated_combined_cost,
+                estimated_avoided_round_trip=(
+                    directive.estimated_avoided_round_trip
+                ),
+                estimated_detour_cost=directive.estimated_detour_cost,
+                maximum_total_components=directive.maximum_total_components,
+                maximum_detour_distance=directive.maximum_detour_distance,
+                maximum_service_seconds=directive.maximum_service_seconds,
+                maximum_total_dfs_nodes=directive.maximum_total_dfs_nodes,
+            )
         elif directive.kind == DirectiveKind.COMPONENT_FOLLOW:
             self.runtime_trace.record(
                 "rover_branch_follow_assigned",

@@ -28,6 +28,38 @@ python -m unittest tests.test_terrain_fusion tests.test_terrain_sharing tests.te
 python -m unittest tests.test_menu tests.test_menu_controller tests.test_menu_settings_repository tests.test_menu_audio_service tests.test_menu_renderer -v
 ```
 
+### Highway and Focused Frontier Batching rollout validation
+
+Keep the committed `[HIGHWAY] mode = off` and `[FOCUSED_FRONTIER_BATCH] mode = off`.
+For live validation, first compare matched `HIGHWAY=observe` and `active`
+missions with both Focused Frontier Batching and `[INCIDENTAL_SCAN]` off. Then
+keep `HIGHWAY=active` and compare `FOCUSED_FRONTIER_BATCH=observe` with
+`active`, still with Patch C off. Start with seeds 0 and 5, preserve each JSONL
+trace, and analyze it with:
+
+```powershell
+python .\tools\analyze_runtime_trace.py <trace.jsonl>
+```
+
+For the highway stage compare build status/time, retained snapshots, physical
+publications, eligible/selected routes, fallback reasons, query time,
+circuity/distance, A* request count/time, check-in processing maxima, and report
+delivery. For Focused Frontier Batching also compare planning pass time/status,
+route queries and cache hits, opportunities and rejection reasons, seed count
+before attachments, batch size, estimated separate/combined/avoided distance,
+member and return distance, service time, provisional gain, bounds, stale or
+failed members, rejected reports, replays, open leases, accepted reports,
+quiescence, coverage, and universal rendezvous acknowledgements. A
+`planning_budget` result must produce only ordinary singular assignments and
+no new batch claim or lease.
+`maximum_planning_ms` is measured as wall-clock time across graph queries,
+cache hits, candidate ordering, and lease-preview rasterization.
+Only after the isolated stage passes should
+`FOCUSED_FRONTIER_BATCH=active` be paired with `INCIDENTAL_SCAN=active`, keeping
+the highway setting identical. Full missions remain manual evidence runs
+because they generate map assets and have asynchronous timing; automated tests
+must not overwrite `Assets/Map/`.
+
 ## Where Tests Belong
 
 The component-policy regressions cover stable continuation, split and merge
@@ -38,7 +70,12 @@ direct sibling A* and breadcrumb recovery, energy suspension, service-cost rover
 contact-carried rendezvous acknowledgement and confirmed-stop relay, pending
 check-in retention, endgame gain/travel telemetry, per-agent state projection,
 rover-local map selection, atomic rover docking and carriage, inactive docked
-sensing, release ordering, and component quiescence. Legacy sector tests remain to protect the compatibility surface
+sensing, release ordering, component quiescence, and default-off Focused
+Frontier Batching. Its coverage includes seed-first parallelism,
+rover-known route economics, disjoint spatial leases, all-or-none member
+claims, whole-report preflight, per-member stale/suspension isolation, replay,
+local member reordering, lease-local frontier admission, hard bounds, and
+provisional-work fencing. Legacy sector tests remain to protect the compatibility surface
 while production composition bypasses it. A live trace remains necessary to
 assess completion time and wall yield; passing unit tests does not establish a
 runtime speedup.
@@ -59,12 +96,12 @@ they protect.
 | Distributed knowledge semantics | `test_drone_movement.py`, `test_terrain_fusion.py`, `test_terrain_sharing.py` | Characterization | Drone decisions stay local, telemetry stays isolated, and sharing is the explicit transfer boundary. |
 | Terrain and SLAM sharing | `test_terrain_sharing.py` | Characterization/concurrency | Proximity, line of sight, service-owned cooldowns, duplicate pair suppression, and transfer direction span multiple agents. |
 | Rover target reservation | `test_rover_targets.py` | Unit/service | Service-cost and asperity scoring, reservation, exact staging identity, and material retargeting remain independent of rendering or threads. |
-| A* algorithms | `test_astar_pathfinder.py` | Unit/integration | Tests use real NumPy maps and shared memory, but no worker pool. |
+| A* and highway algorithms | `test_astar_pathfinder.py`, `test_highway.py` | Unit/integration | Tests use real NumPy maps and shared memory, but no worker pool; highway tests cover disconnected same-tile regions, strict safe connectors, version fences, hard build budgets, and last-complete snapshot retention. |
 | Pathfinding resources | `test_pathfinding_service.py` | Service | Pool creation, bounded submission, fallback, and cleanup belong to the resource owner. |
 | Weighted-random movement and A* escape | `test_drone_movement.py`, `test_exploration_policy.py`, `test_astar_pathfinder.py` | Unit/concurrency/interaction | Seeded weighted choice, wall-continuation priority, generic unknown fallback, teammate separation, direct raster steps, sensor-local stagnation windows, scan-only wall-facing turns, exact-pose scan waits, zero-gain suppression, local-SLAM borders, cul-de-sac A*, homing, pause barriers, and path history are protected without a live mission. |
-| Frontier registry and lineage | `test_frontier_registry.py` | Unit | Significant eight-connected components, stable continuation, explicit split/merge identity, wide-work classification, normalized effort, and anchor-local retirement are deterministic registry rules. |
-| Component coordination and energy | `test_exploration_coordination.py` | Unit/state-machine | Full-circle and bootstrap-only radial rounds, component-phase monotonicity, follower assignment, known-free connected eligibility, claim fencing, suspension/reassignment, quiescence, and unlimited/finite policy boundaries are coordinator rules. |
-| Local component DFS execution | `test_component_explorer.py` | Unit/interaction | Exact sensor completion, deterministic follower branch claims, logical LIFO unwinding, direct sibling A*, breadcrumb fallback, physical rover return, anchor-local zero gain, energy/route return reports, and default-off incidental wall-pocket detection/resumable transit scans cross the movement/coordinator boundary. |
+| Frontier registry and lineage | `test_frontier_registry.py` | Unit | Significant eight-connected components, stable continuation, explicit split/merge identity, wide-work classification, normalized effort, anchor-local retirement, atomic multi-group claims, and provisional high-water fencing are deterministic registry rules. |
+| Component coordination and energy | `test_exploration_coordination.py` | Unit/state-machine | Full-circle and bootstrap-only radial rounds, component-phase monotonicity, follower assignment, known-free connected eligibility, claim fencing, suspension/reassignment, quiescence, unlimited/finite policy boundaries, Patch D seed-first batching, bounded highway economics, planning-budget singular fallback, observe purity, atomic report rejection, stale-member isolation, lease release, and replay are coordinator rules. |
+| Local component DFS execution | `test_component_explorer.py` | Unit/interaction | Exact sensor completion, deterministic follower branch claims, logical LIFO unwinding, direct sibling A*, breadcrumb fallback, physical rover return, physically received highway advice, observe/active route selection, local occupied-edge rejection, anchor-local zero gain, energy/route return reports, default-off incidental wall-pocket scans, Patch D lease containment, exact local tour ordering, and member-failure continuation cross the movement/coordinator boundary. |
 | Drone runtime state | `test_drone_runtime_state.py` | Unit/concurrency | Immutable snapshots, atomic self-propelled and carried movement/path updates, frontier timing, and concurrent read consistency belong to the synchronized state owner. |
 | Drone behavior | `test_drone_movement.py`, `test_drone_sensor.py` | Characterization/unit | Mission-facing actions use the small `Drone` API; detailed movement, docked idling, inactive docked sensing, terrain, and SLAM behavior is tested through owned collaborators with injected pathfinding, pause, clock, and terrain callbacks. |
 | Rover behavior | `test_rover.py` | Characterization | Local-SLAM reachability, acknowledgement-gated departure, advancing, rendezvous hold, and target release form one rover workflow through explicit navigation dependencies. |

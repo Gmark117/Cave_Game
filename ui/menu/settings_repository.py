@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
 from config.simulation_config import (
+    FocusedFrontierBatchConfig,
     ExplorationConfig,
     FrontierConfig,
+    HighwayConfig,
     IncidentalScanConfig,
     MissionConfig,
     RenderingConfig,
@@ -223,6 +225,64 @@ class MenuSettingsRepository:
                 settings.incidental_scan.sample_spacing_sensor_ranges
             ),
         }
+        config["HIGHWAY"] = {
+            "mode": settings.highway.mode,
+            "macro_cell_size": str(settings.highway.macro_cell_size),
+            "minimum_version_delta": str(
+                settings.highway.minimum_version_delta
+            ),
+            "maximum_build_ms": str(settings.highway.maximum_build_ms),
+            "maximum_query_ms": str(settings.highway.maximum_query_ms),
+            "maximum_connector_expansions": str(
+                settings.highway.maximum_connector_expansions
+            ),
+            "minimum_route_sensor_ranges": str(
+                settings.highway.minimum_route_sensor_ranges
+            ),
+            "maximum_route_circuity": str(
+                settings.highway.maximum_route_circuity
+            ),
+        }
+        config["FOCUSED_FRONTIER_BATCH"] = {
+            "mode": settings.focused_frontier_batch.mode,
+            "maximum_claimed_components": str(
+                settings.focused_frontier_batch.maximum_claimed_components
+            ),
+            "maximum_total_components": str(
+                settings.focused_frontier_batch.maximum_total_components
+            ),
+            "lease_margin_sensor_ranges": str(
+                settings.focused_frontier_batch.lease_margin_sensor_ranges
+            ),
+            "maximum_detour_sensor_ranges": str(
+                settings.focused_frontier_batch.maximum_detour_sensor_ranges
+            ),
+            "minimum_avoided_round_trip_sensor_ranges": str(
+                settings.focused_frontier_batch
+                .minimum_avoided_round_trip_sensor_ranges
+            ),
+            "maximum_service_seconds": str(
+                settings.focused_frontier_batch.maximum_service_seconds
+            ),
+            "maximum_total_dfs_nodes": str(
+                settings.focused_frontier_batch.maximum_total_dfs_nodes
+            ),
+            "maximum_consecutive_low_gain_scans": str(
+                settings.focused_frontier_batch.maximum_consecutive_low_gain_scans
+            ),
+            "low_gain_maximum_new_cells": str(
+                settings.focused_frontier_batch.low_gain_maximum_new_cells
+            ),
+            "low_gain_maximum_confidence_gain": str(
+                settings.focused_frontier_batch.low_gain_maximum_confidence_gain
+            ),
+            "maximum_planning_ms": str(
+                settings.focused_frontier_batch.maximum_planning_ms
+            ),
+            "maximum_route_queries": str(
+                settings.focused_frontier_batch.maximum_route_queries
+            ),
+        }
         config["RENDERING"] = {
             "slam_point_tail": str(settings.rendering.point_tail),
             "slam_refresh_interval": str(
@@ -294,6 +354,28 @@ class MenuSettingsRepository:
                     defaults.incidental_scan,
                 ),
                 defaults.incidental_scan,
+            ),
+            highway=self._section_or_default(
+                lambda: self._read_highway(
+                    config["HIGHWAY"]
+                    if config.has_section("HIGHWAY")
+                    else {},
+                    defaults.highway,
+                ),
+                defaults.highway,
+            ),
+            focused_frontier_batch=self._section_or_default(
+                lambda: self._read_focused_frontier_batch(
+                    config["FOCUSED_FRONTIER_BATCH"]
+                    if config.has_section("FOCUSED_FRONTIER_BATCH")
+                    else (
+                        config["ENDGAME_BATCH"]
+                        if config.has_section("ENDGAME_BATCH")
+                        else {}
+                    ),
+                    defaults.focused_frontier_batch,
+                ),
+                defaults.focused_frontier_batch,
             ),
             rendering=self._section_or_default(
                 lambda: self._read_rendering(
@@ -535,6 +617,102 @@ class MenuSettingsRepository:
             sample_spacing_sensor_ranges=float(section.get(
                 "sample_spacing_sensor_ranges",
                 defaults.sample_spacing_sensor_ranges,
+            )),
+        )
+
+    @staticmethod
+    def _read_focused_frontier_batch(
+        section: object,
+        defaults: FocusedFrontierBatchConfig,
+    ) -> FocusedFrontierBatchConfig:
+        """Parse focused frontier batching and bounded local-work controls."""
+        return FocusedFrontierBatchConfig(
+            mode=str(section.get("mode", defaults.mode)),
+            maximum_claimed_components=int(section.get(
+                "maximum_claimed_components",
+                defaults.maximum_claimed_components,
+            )),
+            maximum_total_components=int(section.get(
+                "maximum_total_components",
+                defaults.maximum_total_components,
+            )),
+            lease_margin_sensor_ranges=float(section.get(
+                "lease_margin_sensor_ranges",
+                defaults.lease_margin_sensor_ranges,
+            )),
+            maximum_detour_sensor_ranges=float(section.get(
+                "maximum_detour_sensor_ranges",
+                defaults.maximum_detour_sensor_ranges,
+            )),
+            minimum_avoided_round_trip_sensor_ranges=float(section.get(
+                "minimum_avoided_round_trip_sensor_ranges",
+                defaults.minimum_avoided_round_trip_sensor_ranges,
+            )),
+            maximum_service_seconds=float(section.get(
+                "maximum_service_seconds",
+                defaults.maximum_service_seconds,
+            )),
+            maximum_total_dfs_nodes=int(section.get(
+                "maximum_total_dfs_nodes",
+                defaults.maximum_total_dfs_nodes,
+            )),
+            maximum_consecutive_low_gain_scans=int(section.get(
+                "maximum_consecutive_low_gain_scans",
+                defaults.maximum_consecutive_low_gain_scans,
+            )),
+            low_gain_maximum_new_cells=int(section.get(
+                "low_gain_maximum_new_cells",
+                defaults.low_gain_maximum_new_cells,
+            )),
+            low_gain_maximum_confidence_gain=float(section.get(
+                "low_gain_maximum_confidence_gain",
+                defaults.low_gain_maximum_confidence_gain,
+            )),
+            maximum_planning_ms=float(section.get(
+                "maximum_planning_ms",
+                defaults.maximum_planning_ms,
+            )),
+            maximum_route_queries=int(section.get(
+                "maximum_route_queries",
+                defaults.maximum_route_queries,
+            )),
+        )
+
+    @staticmethod
+    def _read_highway(
+        section: object,
+        defaults: HighwayConfig,
+    ) -> HighwayConfig:
+        """Parse bounded rover-highway construction and rollout controls."""
+        return HighwayConfig(
+            mode=str(section.get("mode", defaults.mode)),
+            macro_cell_size=int(section.get(
+                "macro_cell_size",
+                defaults.macro_cell_size,
+            )),
+            minimum_version_delta=int(section.get(
+                "minimum_version_delta",
+                defaults.minimum_version_delta,
+            )),
+            maximum_build_ms=float(section.get(
+                "maximum_build_ms",
+                defaults.maximum_build_ms,
+            )),
+            maximum_query_ms=float(section.get(
+                "maximum_query_ms",
+                defaults.maximum_query_ms,
+            )),
+            maximum_connector_expansions=int(section.get(
+                "maximum_connector_expansions",
+                defaults.maximum_connector_expansions,
+            )),
+            minimum_route_sensor_ranges=float(section.get(
+                "minimum_route_sensor_ranges",
+                defaults.minimum_route_sensor_ranges,
+            )),
+            maximum_route_circuity=float(section.get(
+                "maximum_route_circuity",
+                defaults.maximum_route_circuity,
             )),
         )
 

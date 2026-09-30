@@ -315,6 +315,46 @@ class FrontierComponentRegistry:
             self.work_units[unit_id].state = WorkUnitState.CLAIMED
         return True
 
+    def claim_work_unit_groups(
+        self,
+        groups: Iterable[Iterable[WorkUnitId]],
+        *,
+        expected_components: Iterable[tuple[ComponentId, int]] = (),
+    ) -> bool:
+        """Claim several independent task groups without partial mutation."""
+        normalized = tuple(
+            tuple(dict.fromkeys(int(value) for value in group))
+            for group in groups
+        )
+        expected = tuple(
+            (int(component_id), int(component_revision))
+            for component_id, component_revision in expected_components
+        )
+        flat = tuple(unit_id for group in normalized for unit_id in group)
+        if (
+            not normalized
+            or any(not group for group in normalized)
+            or (expected and len(expected) != len(normalized))
+            or len(flat) != len(set(flat))
+            or any(
+                unit_id not in self.work_units
+                or self.work_units[unit_id].state != WorkUnitState.READY
+                for unit_id in flat
+            )
+            or any(
+                self.work_units[unit_id].component_id != component_id
+                or self.work_units[unit_id].component_revision
+                != component_revision
+                for group, (component_id, component_revision)
+                in zip(normalized, expected)
+                for unit_id in group
+            )
+        ):
+            return False
+        for unit_id in flat:
+            self.work_units[unit_id].state = WorkUnitState.CLAIMED
+        return True
+
     def activate_work_units(self, work_unit_ids: Iterable[WorkUnitId]) -> None:
         for unit_id in work_unit_ids:
             unit = self.work_units.get(int(unit_id))
@@ -387,6 +427,64 @@ class FrontierComponentRegistry:
                 component.state = ComponentState.DORMANT
                 component.dormant_reason = "current_geometry_visited"
         return True
+
+    def retire_provisional_work_units(
+        self,
+        observed_components: Iterable[frozenset[Position]],
+        *,
+        preexisting_work_unit_ids: Iterable[WorkUnitId],
+    ) -> tuple[WorkUnitId, ...]:
+        """Retire only report-created work matched by leased local service.
+
+        Existing unclaimed work is deliberately excluded.  This method runs
+        after reconciliation, when newly exposed geometry has authoritative
+        rover-side component and work-unit identity.
+        """
+        preexisting = {int(value) for value in preexisting_work_unit_ids}
+        retired: list[WorkUnitId] = []
+        radius = max(1, int(self.footprint.frontier_stride))
+        for cells in observed_components:
+            if not cells:
+                continue
+            candidates: list[tuple[int, float, int]] = []
+            for unit_id, unit in self.work_units.items():
+                if (
+                    unit_id in preexisting
+                    or unit_id in retired
+                    or unit.state not in {WorkUnitState.READY, WorkUnitState.BLOCKED}
+                ):
+                    continue
+                overlap = len(cells & unit.cells)
+                distance = min(
+                    (math.dist(unit.anchor_position, point) for point in cells),
+                    default=math.inf,
+                )
+                if overlap <= 0 and distance > radius:
+                    continue
+                candidates.append((-overlap, distance, unit_id))
+            if not candidates:
+                continue
+            unit_id = min(candidates)[2]
+            unit = self.work_units[unit_id]
+            unit.state = WorkUnitState.VISITED
+            unit.terminal_reason = "visited_in_focused_frontier_batch_lease"
+            retired.append(unit_id)
+
+        for component in self.components.values():
+            if component.state != ComponentState.ACTIVE:
+                continue
+            if not any(
+                self.work_units[unit_id].state in {
+                    WorkUnitState.READY,
+                    WorkUnitState.CLAIMED,
+                    WorkUnitState.ACTIVE,
+                    WorkUnitState.BLOCKED,
+                }
+                for unit_id in component.work_unit_ids
+            ):
+                component.state = ComponentState.RESOLVED
+                component.dormant_reason = None
+        return tuple(retired)
 
     def reconcile(
         self,

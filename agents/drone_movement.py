@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import logging
 import math
 import threading
@@ -19,6 +21,7 @@ from agents.component_explorer import (
     LocalDFSStack,
     ScanPlanProgress,
     incidental_scan_candidate,
+    leased_local_frontiers,
     local_node_pose,
     observation_pose_on_path,
     related_local_successors,
@@ -41,11 +44,15 @@ from mapping.ray_geometry import bresenham_line_points
 from mapping.slam_map import FREE, OCCUPIED, UNKNOWN
 from mission.energy import EnergyReturnDecision, EnergyState
 from mission.exploration_coordination import (
+    BatchMember,
+    BatchMemberReport,
     CoordinationReport,
     CoordinationResult,
     DFSFrame,
     DirectiveKind,
     ExplorationDirective,
+    ProvisionalFrontierObservation,
+    SpatialLease,
     TaskSuspension,
     WorkUnitOutcome,
 )
@@ -55,6 +62,7 @@ from navigation.astar_pathfinder import (
     PATH_UNREACHABLE,
     PathResult,
 )
+from navigation.highway import HighwayGraphSnapshot
 
 
 Position = Tuple[int, int]
@@ -64,6 +72,20 @@ logger = logging.getLogger(__name__)
 _GLOBAL_LAUNCH_SECTOR_TIE_RATIO = 0.25
 _GLOBAL_TARGET_SWITCH_SCORE_MARGIN = 0.5
 _PENDING_FRONTIER_SCAN_TIMEOUT_SECONDS = 3.0
+
+
+@dataclass(frozen=True)
+class _BatchMemberSnapshot:
+    member: BatchMember
+    disposition: str
+    work_unit_outcomes: tuple[WorkUnitOutcome, ...]
+    causal_successors: tuple[frozenset[Position], ...]
+    visited_successor_anchors: tuple[Position, ...]
+    suspension: TaskSuspension | None
+    outbound_actual_path: tuple[Position, ...]
+    outbound_distance: float
+    service_distance: float
+    service_seconds: float
 
 
 @dataclass
@@ -124,6 +146,21 @@ class _CoordinationExecution:
     incidental_requested_rotation: float = 0.0
     incidental_predicted_support: int = 0
     incidental_pocket_cells_closed: int = 0
+    batch_pending_members: list[BatchMember] | None = None
+    batch_current_member: BatchMember | None = None
+    batch_completed_members: list[_BatchMemberSnapshot] | None = None
+    batch_provisional_observations: list[
+        ProvisionalFrontierObservation
+    ] | None = None
+    batch_started_at: float | None = None
+    batch_completed_dfs_nodes: int = 0
+    batch_current_dfs_nodes: int = 0
+    batch_provisional_component_count: int = 0
+    batch_detour_distance: float = 0.0
+    batch_consecutive_low_gain_scans: int = 0
+    batch_member_path_start_index: int | None = None
+    batch_member_started_at: float | None = None
+    batch_return_reason: str | None = None
 
 
 @dataclass
@@ -134,6 +171,17 @@ class _IncidentalPocketAttempt:
     cells: frozenset[Position]
     gateway: Position
     attempted_at: float
+    revisited: bool = False
+
+
+@dataclass
+class _FocusedFrontierBatchProvisionalAttempt:
+    """Local service memory used only to measure a later revisit."""
+
+    directive_id: int
+    observation_id: int
+    cells: frozenset[Position]
+    serviced_at: float
     revisited: bool = False
 
 
@@ -501,6 +549,21 @@ class DroneMovementController:
         self.incidental_sample_spacing_ranges = max(
             0.0, float(incidental.sample_spacing_sensor_ranges),
         )
+        highway = drone.settings.highway
+        self.highway_mode = str(highway.mode).casefold()
+        self.highway_maximum_query_ms = max(
+            0.0, float(highway.maximum_query_ms),
+        )
+        self.highway_maximum_connector_expansions = max(
+            1, int(highway.maximum_connector_expansions),
+        )
+        self.highway_minimum_route_sensor_ranges = max(
+            0.0, float(highway.minimum_route_sensor_ranges),
+        )
+        self.highway_maximum_route_circuity = max(
+            1.0, float(highway.maximum_route_circuity),
+        )
+        self._highway_snapshot: HighwayGraphSnapshot | None = None
         coverage_started_at = self._simulation_time()
         initial_coverage_cell = self._coverage_cell(
             drone.snapshot().position
@@ -529,6 +592,9 @@ class DroneMovementController:
             _PendingIncidentalTransitScan | None
         ) = None
         self._incidental_attempt_memory: list[_IncidentalPocketAttempt] = []
+        self._focused_frontier_batch_provisional_memory: list[
+            _FocusedFrontierBatchProvisionalAttempt
+        ] = []
         self._pending_frontier_route: _PendingFrontierRoute | None = None
         self._partial_route_endpoints: dict[
             Position,
@@ -727,6 +793,10 @@ class DroneMovementController:
                 (DirectiveKind.COMPONENT_TASK, "scanning"): "Frontier scan",
                 (DirectiveKind.COMPONENT_TASK, "repositioning"): "DFS reposition",
                 (DirectiveKind.COMPONENT_TASK, "returning"): "Rover return",
+                (DirectiveKind.COMPONENT_BATCH, "transit"): "Batch transit",
+                (DirectiveKind.COMPONENT_BATCH, "scanning"): "Batch scan",
+                (DirectiveKind.COMPONENT_BATCH, "repositioning"): "Batch reposition",
+                (DirectiveKind.COMPONENT_BATCH, "returning"): "Batch return",
                 (DirectiveKind.COMPONENT_FOLLOW, "following"): "Branch follow",
                 (DirectiveKind.COMPONENT_FOLLOW, "transit"): "Branch transit",
                 (DirectiveKind.COMPONENT_FOLLOW, "scanning"): "Branch scan",
@@ -1001,6 +1071,7 @@ class DroneMovementController:
         """Retarget stale local work from newly received peer SLAM."""
         if execution.directive.kind not in {
             DirectiveKind.COMPONENT_TASK,
+            DirectiveKind.COMPONENT_BATCH,
             DirectiveKind.COMPONENT_FOLLOW,
         }:
             return False
@@ -1246,6 +1317,28 @@ class DroneMovementController:
     def _apply_coordination_result(self, result: Any) -> None:
         if not isinstance(result, CoordinationResult) or not result.arrived:
             return
+        if result.highway_snapshot is not None:
+            previous = self._highway_snapshot
+            self._highway_snapshot = result.highway_snapshot
+            self._trace(
+                "drone_highway_snapshot_received",
+                highway_version=result.highway_snapshot.version,
+                replaced_version=(
+                    None if previous is None else previous.version
+                ),
+                changed=(
+                    previous is None
+                    or previous.version != result.highway_snapshot.version
+                ),
+                area_count=result.highway_snapshot.area_count,
+                edge_count=result.highway_snapshot.edge_count,
+                known_free_cells=(
+                    result.highway_snapshot.known_free_cells
+                ),
+                build_elapsed_ms=(
+                    result.highway_snapshot.build_elapsed_ms
+                ),
+            )
         if result.directive is not None:
             self._install_exploration_directive(result.directive)
             return
@@ -1334,6 +1427,21 @@ class DroneMovementController:
             execution.root_work_unit_id = root.work_unit_id
             execution.root_source_cells = root.cells
             execution.pending_authoritative_nodes = list(roots[1:])
+        elif directive.kind == DirectiveKind.COMPONENT_BATCH:
+            if (
+                len(directive.batch_members) < 2
+                or directive.spatial_lease is None
+            ):
+                return
+            execution.batch_pending_members = list(directive.batch_members)
+            execution.batch_completed_members = []
+            execution.batch_provisional_observations = []
+            execution.batch_started_at = self._simulation_time()
+            execution.batch_detour_distance = (
+                directive.estimated_detour_cost
+            )
+            if not self._start_next_batch_member(execution):
+                return
         elif directive.kind == DirectiveKind.COMPONENT_FOLLOW:
             if directive.task is None or not directive.work_units:
                 return
@@ -1360,16 +1468,140 @@ class DroneMovementController:
                 else directive.task.component_id
             ),
             work_unit_ids=(
-                () if directive.claim is None
+                tuple(
+                    unit_id
+                    for member in directive.batch_members
+                    for unit_id in member.claim.work_unit_ids
+                )
+                if directive.kind == DirectiveKind.COMPONENT_BATCH
+                else () if directive.claim is None
                 else directive.claim.work_unit_ids
             ),
             claim_token=(
-                None if directive.claim is None else directive.claim.token
+                tuple(member.claim.token for member in directive.batch_members)
+                if directive.kind == DirectiveKind.COMPONENT_BATCH
+                else None if directive.claim is None else directive.claim.token
             ),
             scan_headings=directive.scan_headings,
             probe_target=directive.probe_target,
             waited_seconds=waited,
         )
+
+    def _start_next_batch_member(
+        self,
+        execution: _CoordinationExecution,
+    ) -> bool:
+        """Select the next claimed member from exact drone-local routes."""
+        pending = execution.batch_pending_members or []
+        if not pending:
+            execution.batch_current_member = None
+            return False
+        current = self.drone.snapshot().position
+        rendezvous = self._rendezvous_position()
+        best: tuple[float, tuple[int, ...], tuple[BatchMember, ...]] | None = None
+        if rendezvous is not None:
+            for order in itertools.permutations(pending):
+                cost = self._best_local_batch_route_cost(
+                    current,
+                    tuple(item.task.preferred_entry for item in order),
+                    rendezvous,
+                    preserve_order=True,
+                )
+                key = (cost, tuple(item.task.task_id for item in order), order)
+                if best is None or key[:2] < best[:2]:
+                    best = key
+        if best is not None and math.isfinite(best[0]):
+            member = best[2][0]
+            route_cost = self._local_slam_distance(
+                current, member.task.preferred_entry,
+            )
+        else:
+            member = min(
+                pending,
+                key=lambda item: (
+                    self._local_slam_distance(
+                        current, item.task.preferred_entry,
+                    ),
+                    item.task.task_id,
+                ),
+            )
+            route_cost = self._local_slam_distance(
+                current, member.task.preferred_entry,
+            )
+        path = self._local_slam_path(
+            current, member.task.preferred_entry,
+        )
+        pending.remove(member)
+        execution.batch_current_member = member
+        execution.batch_member_path_start_index = max(
+            0, len(self.drone.snapshot().path_history) - 1,
+        )
+        execution.batch_member_started_at = self._simulation_time()
+        execution.directive = replace(
+            execution.directive,
+            task=member.task,
+            work_units=member.work_units,
+            claim=member.claim,
+            outbound_route=path,
+        )
+        remaining_nodes = max(
+            1,
+            execution.directive.maximum_total_dfs_nodes
+            - execution.batch_completed_dfs_nodes,
+        )
+        dfs = LocalDFSStack(maximum_nodes=remaining_nodes)
+        roots = tuple(
+            dfs.new_node(
+                unit.cells,
+                unit.anchor_position,
+                unit.scan_headings[0] if unit.scan_headings else 0,
+                work_unit_id=unit.work_unit_id,
+                allow_standoff=(unit.kind == WorkUnitKind.FOCUSED_ANCHOR),
+                source_task_id=member.task.task_id,
+            )
+            for unit in member.work_units
+        )
+        root = roots[0]
+        dfs.start(root, parent_position=current)
+        execution.dfs = dfs
+        execution.batch_current_dfs_nodes = 0
+        execution.root_component_id = member.task.component_id
+        execution.root_work_unit_id = root.work_unit_id
+        execution.root_source_cells = root.cells
+        execution.root_scanned = False
+        execution.work_unit_outcomes = []
+        execution.causal_successors = []
+        execution.visited_successor_anchors = []
+        execution.pending_authoritative_nodes = list(roots[1:])
+        execution.local_routes = {}
+        execution.outbound_actual_path = ()
+        execution.root_outbound_distance = 0.0
+        execution.service_distance = 0.0
+        execution.suspension_reason = None
+        execution.suspension_position = None
+        execution.suspension_energy_state = None
+        execution.route_attempts = 0
+        execution.reposition_attempts = 0
+        execution.transit_node_id = None
+        execution.transit_path_start_index = None
+        execution.observation_node_id = None
+        execution.observation_position = None
+        execution.observation_heading = None
+        execution.phase = "transit"
+        self._trace(
+            "drone_focused_frontier_batch_member_selected",
+            directive_id=execution.directive.directive_id,
+            lease_id=(
+                None if execution.directive.spatial_lease is None
+                else execution.directive.spatial_lease.lease_id
+            ),
+            task_id=member.task.task_id,
+            component_id=member.task.component_id,
+            claim_token=member.claim.token,
+            exact_route_cost=route_cost,
+            remaining_member_count=len(pending),
+        )
+        return True
 
     def _advance_coordination_execution(self) -> None:
         execution = self._coordination_execution
@@ -1377,8 +1609,22 @@ class DroneMovementController:
             return
         kind = execution.directive.kind
         if (
+            kind == DirectiveKind.COMPONENT_BATCH
+            and execution.phase != "returning"
+            and execution.batch_started_at is not None
+            and execution.directive.maximum_service_seconds > 0.0
+            and self._simulation_time() - execution.batch_started_at
+            >= execution.directive.maximum_service_seconds
+        ):
+            self._prepare_batch_return(execution, reason="service_time_limit")
+            return
+        if (
             kind != DirectiveKind.ROVER_SCAN
-            and execution.phase not in {"returning", "repositioning"}
+            and execution.phase != "returning"
+            and (
+                kind == DirectiveKind.COMPONENT_BATCH
+                or execution.phase != "repositioning"
+            )
             and self._coordination_energy_checkpoint_due(execution)
             and self._energy_requires_return(execution)
         ):
@@ -1403,6 +1649,9 @@ class DroneMovementController:
             self._advance_radial_probe(execution)
             return
         if kind == DirectiveKind.COMPONENT_TASK:
+            self._advance_component_task(execution)
+            return
+        if kind == DirectiveKind.COMPONENT_BATCH:
             self._advance_component_task(execution)
             return
         if kind == DirectiveKind.COMPONENT_FOLLOW:
@@ -1675,12 +1924,47 @@ class DroneMovementController:
             scan.newly_known_cells > 0
             or scan.confidence_gain > 1e-9
         )
+        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+            execution.batch_current_dfs_nodes += 1
         work_unit_id = frame.node.work_unit_id
         is_authoritative = work_unit_id is not None
-        if not is_authoritative:
+        if not is_authoritative and not frame.node.provisional:
             execution.visited_successor_anchors.append(
                 frame.node.anchor_position
             )
+        if frame.node.provisional:
+            observations = execution.batch_provisional_observations
+            if observations is not None:
+                observation = ProvisionalFrontierObservation(
+                    observation_id=len(observations),
+                    source_task_id=(
+                        frame.node.source_task_id
+                        if frame.node.source_task_id is not None
+                        else execution.directive.task.task_id
+                    ),
+                    cells=frame.node.cells,
+                    scan_position=scan.position,
+                    scan_heading=(
+                        scan.headings[0]
+                        if scan.headings else frame.node.scan_heading
+                    ),
+                    sensor_newly_known_cells=scan.newly_known_cells,
+                    sensor_confidence_gain=scan.confidence_gain,
+                    local_route_distance=self._polyline_distance(
+                        frame.outbound_actual_path
+                    ),
+                )
+                observations.append(observation)
+                self._focused_frontier_batch_provisional_memory.append(
+                    _FocusedFrontierBatchProvisionalAttempt(
+                        directive_id=execution.directive.directive_id,
+                        observation_id=observation.observation_id,
+                        cells=observation.cells,
+                        serviced_at=self._simulation_time(),
+                    )
+                )
+                if len(self._focused_frontier_batch_provisional_memory) > 256:
+                    del self._focused_frontier_batch_provisional_memory[:-256]
         if is_authoritative:
             disposition = "sensor_gain" if productive else "zero_gain"
             execution.work_unit_outcomes.append(WorkUnitOutcome(
@@ -1699,6 +1983,16 @@ class DroneMovementController:
             if work_unit_id == execution.root_work_unit_id:
                 execution.root_scanned = True
 
+        if (
+            execution.directive.kind == DirectiveKind.COMPONENT_BATCH
+            and execution.batch_completed_dfs_nodes
+            + execution.batch_current_dfs_nodes
+            >= execution.directive.maximum_total_dfs_nodes
+        ):
+            execution.scan = None
+            self._prepare_batch_return(execution, reason="dfs_node_limit")
+            return
+
         # The ordinary sensor scheduler may expose the next frontier just
         # before the directed completion is sampled.  A zero delta therefore
         # retires this anchor, but must not stop the local lineage walk when a
@@ -1708,7 +2002,7 @@ class DroneMovementController:
             confidence_threshold=self.frontier_confidence_threshold,
         )
         local_slam = self.drone.slam_map.snapshot(point_limit=0)
-        successors = tuple(
+        related_successors = tuple(
             cells for cells in related_local_successors(
                 local_slam,
                 frame.node.cells,
@@ -1737,13 +2031,93 @@ class DroneMovementController:
             if cells != frame.node.cells
             and cells not in dfs.visited_geometry
         )
-        if successors:
-            execution.causal_successors.extend(successors)
+        if related_successors and not frame.node.provisional:
+            execution.causal_successors.extend(related_successors)
 
-        nodes = self._reachable_local_nodes(execution, successors)
+        batch = execution.directive.kind == DirectiveKind.COMPONENT_BATCH
+        if batch:
+            low_gain = bool(
+                scan.newly_known_cells
+                <= execution.directive.low_gain_maximum_new_cells
+                and scan.confidence_gain
+                <= execution.directive.low_gain_maximum_confidence_gain
+            )
+            execution.batch_consecutive_low_gain_scans = (
+                execution.batch_consecutive_low_gain_scans + 1
+                if low_gain else 0
+            )
+            if execution.batch_consecutive_low_gain_scans >= (
+                execution.directive.maximum_consecutive_low_gain_scans
+            ):
+                related_successors = ()
+
+        nodes = self._reachable_local_nodes(
+            execution,
+            related_successors,
+            provisional=frame.node.provisional,
+        )
+        leased_nodes: tuple[LocalComponentNode, ...] = ()
+        if batch and self._batch_can_admit_provisional(execution):
+            lease = execution.directive.spatial_lease
+            dfs_reserved = tuple(
+                node.cells
+                for dfs_frame in dfs.frames
+                for node in (
+                    dfs_frame.node,
+                    *dfs_frame.pending_children,
+                )
+            )
+            excluded = tuple(dfs.visited_geometry) + dfs_reserved + tuple(
+                node.cells
+                for node in (execution.pending_authoritative_nodes or ())
+            ) + tuple(
+                member_unit.cells
+                for member in execution.directive.batch_members
+                for member_unit in member.work_units
+            )
+            leased = tuple(
+                cells for cells in leased_local_frontiers(
+                    local_slam,
+                    allowed_cells=(
+                        () if lease is None else self._spatial_lease_cells(lease)
+                    ),
+                    excluded_geometry=excluded,
+                    confidence_threshold=self.frontier_confidence_threshold,
+                    minimum_component_cells=(
+                        self.minimum_frontier_cluster_cells
+                    ),
+                    minimum_unknown_support_cells=max(
+                        1,
+                        int(getattr(
+                            self.drone.settings.frontier,
+                            "minimum_unknown_support_cells",
+                            64,
+                        )),
+                    ),
+                )
+                if cells not in related_successors
+                and cells != frame.node.cells
+            )
+            leased_nodes = self._reachable_local_nodes(
+                execution,
+                leased,
+                provisional=True,
+            )
+            remaining_slots = max(
+                0,
+                execution.directive.maximum_total_components
+                - len(execution.directive.batch_members)
+                - execution.batch_provisional_component_count,
+            )
+            leased_nodes = leased_nodes[:remaining_slots]
+            execution.batch_provisional_component_count += len(leased_nodes)
+        nodes = (*nodes, *leased_nodes)
+
         thin_node = None
-        if not nodes and successors:
-            thin_node = self._thin_local_successor(execution, successors)
+        if not nodes and related_successors:
+            thin_node = self._thin_local_successor(
+                execution, related_successors,
+            )
             if thin_node is not None:
                 nodes = (thin_node,)
         if execution.reserved_branch_count > 0 and len(nodes) > 1:
@@ -1817,6 +2191,8 @@ class DroneMovementController:
         self,
         execution: _CoordinationExecution,
         successors: Iterable[frozenset[Position]],
+        *,
+        provisional: bool = False,
     ) -> tuple[LocalComponentNode, ...]:
         slam = self.drone.slam_map.snapshot(point_limit=0)
         current = self.drone.snapshot().position
@@ -1832,6 +2208,7 @@ class DroneMovementController:
             node.anchor_position
             for node in (execution.pending_authoritative_nodes or ())
         )
+        accepted_detour = execution.batch_detour_distance
         for cells in successors:
             pose = local_node_pose(
                 cells,
@@ -1848,26 +2225,290 @@ class DroneMovementController:
             if pose is None:
                 continue
             anchor, heading = pose
-            route = self._compute_path(current, anchor)
-            if route.status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
+            if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+                path = self._local_slam_path(current, anchor)
+                route_status = PATH_COMPLETE if path else PATH_UNREACHABLE
+            else:
+                route = self._compute_path(current, anchor)
+                path = tuple(route.path)
+                route_status = route.status
+            if route_status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
+                if provisional:
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="locally_unreachable",
+                    )
                 continue
+            route_cost = self._path_distance(current, path, len(path))
+            avoided = 0.0
+            detour = 0.0
+            if provisional:
+                local_route_cost = route_cost
+                if not math.isfinite(local_route_cost):
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="local_slam_unreachable",
+                    )
+                    continue
+                economic = self._batch_local_economics(
+                    execution,
+                    anchor,
+                    local_route_cost,
+                )
+                if economic is None:
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="unroutable_economic_quote",
+                    )
+                    continue
+                avoided, detour = economic
+                if avoided <= 1e-9:
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="nonpositive_avoided_round_trip",
+                        avoided_round_trip=avoided,
+                        detour_distance=detour,
+                    )
+                    continue
+                if avoided + 1e-9 < execution.directive.minimum_avoided_round_trip:
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="insufficient_avoided_round_trip",
+                        avoided_round_trip=avoided,
+                        detour_distance=detour,
+                    )
+                    continue
+                if accepted_detour + detour > (
+                    execution.directive.maximum_detour_distance + 1e-9
+                ):
+                    self._trace(
+                        "drone_focused_frontier_batch_frontier_evaluated",
+                        directive_id=execution.directive.directive_id,
+                        anchor=anchor,
+                        accepted=False,
+                        reason="detour_limit",
+                        avoided_round_trip=avoided,
+                        detour_distance=detour,
+                        cumulative_detour_distance=accepted_detour,
+                    )
+                    continue
             node = dfs.new_node(
                 cells,
                 anchor,
                 heading,
                 allow_standoff=True,
+                provisional=provisional,
+                source_task_id=(
+                    None if execution.directive.task is None
+                    else execution.directive.task.task_id
+                ),
             )
-            path = tuple(route.path)
             ranked.append((
-                self._path_distance(current, path, len(path)),
+                route_cost,
                 node.local_id,
                 node,
                 path,
             ))
+            if provisional:
+                accepted_detour += detour
+                xs = tuple(point[0] for point in cells)
+                ys = tuple(point[1] for point in cells)
+                self._trace(
+                    "drone_focused_frontier_batch_frontier_evaluated",
+                    directive_id=execution.directive.directive_id,
+                    anchor=anchor,
+                    accepted=True,
+                    reason="positive_avoided_round_trip",
+                    avoided_round_trip=avoided,
+                    detour_distance=detour,
+                    cumulative_detour_distance=accepted_detour,
+                    frontier_cell_count=len(cells),
+                    frontier_bbox=(min(xs), min(ys), max(xs), max(ys)),
+                )
+        if provisional:
+            execution.batch_detour_distance = accepted_detour
         ranked.sort(key=lambda item: (item[0], item[1]))
         for _cost, _local_id, node, path in ranked:
             execution.local_routes[node.local_id] = path
         return tuple(item[2] for item in ranked)
+
+    @staticmethod
+    def _spatial_lease_cells(lease: SpatialLease) -> tuple[Position, ...]:
+        return tuple(
+            (x, y)
+            for y, left, right in lease.cell_spans
+            for x in range(left, right + 1)
+        )
+
+    def _batch_can_admit_provisional(
+        self,
+        execution: _CoordinationExecution,
+    ) -> bool:
+        dfs = execution.dfs
+        return bool(
+            execution.directive.spatial_lease is not None
+            and execution.batch_consecutive_low_gain_scans
+            < execution.directive.maximum_consecutive_low_gain_scans
+            and len(execution.directive.batch_members)
+            + execution.batch_provisional_component_count
+            < execution.directive.maximum_total_components
+            and execution.batch_completed_dfs_nodes
+            + execution.batch_current_dfs_nodes
+            < execution.directive.maximum_total_dfs_nodes
+            and execution.batch_detour_distance
+            < execution.directive.maximum_detour_distance
+        )
+
+    def _batch_local_economics(
+        self,
+        execution: _CoordinationExecution,
+        anchor: Position,
+        route_to_anchor_cost: float,
+    ) -> tuple[float, float] | None:
+        rendezvous = self._rendezvous_position()
+        if rendezvous is None:
+            return None
+        current = self.drone.snapshot().position
+        remaining = tuple(
+            member.task.preferred_entry
+            for member in (execution.batch_pending_members or ())
+        )
+        baseline_cost = self._best_local_batch_route_cost(
+            current,
+            remaining,
+            rendezvous,
+        )
+        later_cost = self._local_slam_distance(rendezvous, anchor)
+        inserted_tail = self._best_local_batch_route_cost(
+            anchor,
+            remaining,
+            rendezvous,
+        )
+        if not all(math.isfinite(value) for value in (
+            baseline_cost, later_cost, inserted_tail,
+        )):
+            return None
+        inserted = route_to_anchor_cost + inserted_tail
+        detour = max(0.0, inserted - baseline_cost)
+        avoided = baseline_cost + 2.0 * later_cost - inserted
+        return avoided, detour
+
+    def _best_local_batch_route_cost(
+        self,
+        start: Position,
+        waypoints: tuple[Position, ...],
+        end: Position,
+        *,
+        preserve_order: bool = False,
+    ) -> float:
+        """Return an exact small-tour cost using only drone-local SLAM."""
+        orders = (waypoints,) if preserve_order else itertools.permutations(
+            waypoints
+        )
+        best = math.inf
+        for order in orders:
+            points = (start, *order, end)
+            cost = sum(
+                self._local_slam_distance(first, second)
+                for first, second in zip(points, points[1:])
+            )
+            best = min(best, cost)
+        return best
+
+    def _local_slam_distance(
+        self,
+        start: Position,
+        goal: Position,
+    ) -> float:
+        """Shortest confidently-free distance using only this drone's SLAM."""
+        return self._local_slam_route(start, goal)[0]
+
+    def _local_slam_path(
+        self,
+        start: Position,
+        goal: Position,
+    ) -> tuple[Position, ...]:
+        """One exact confidently-free route using only this drone's SLAM."""
+        return self._local_slam_route(start, goal)[1]
+
+    def _local_slam_route(
+        self,
+        start: Position,
+        goal: Position,
+    ) -> tuple[float, tuple[Position, ...]]:
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+        occupancy = np.asarray(slam.occupancy)
+        confidence = np.asarray(slam.confidence)
+        free = (
+            (occupancy == FREE)
+            & (confidence >= self.frontier_confidence_threshold)
+        )
+        offset_x, offset_y = (int(value) for value in slam.origin)
+        start_local = (start[0] - offset_x, start[1] - offset_y)
+        goal_local = (goal[0] - offset_x, goal[1] - offset_y)
+        height, width = free.shape
+        if not all(
+            0 <= x < width and 0 <= y < height and free[y, x]
+            for x, y in (start_local, goal_local)
+        ):
+            return math.inf, ()
+        queue: list[tuple[float, int, int]] = [(0.0, *start_local)]
+        best = {start_local: 0.0}
+        parents: dict[Position, Position] = {}
+        neighbors = (
+            (-1, -1, math.sqrt(2.0)), (0, -1, 1.0),
+            (1, -1, math.sqrt(2.0)), (-1, 0, 1.0),
+            (1, 0, 1.0), (-1, 1, math.sqrt(2.0)),
+            (0, 1, 1.0), (1, 1, math.sqrt(2.0)),
+        )
+        while queue:
+            cost, x, y = heapq.heappop(queue)
+            if cost > best.get((x, y), math.inf) + 1e-9:
+                continue
+            if (x, y) == goal_local:
+                path = [(x, y)]
+                while path[-1] != start_local:
+                    path.append(parents[path[-1]])
+                return cost, tuple(
+                    (local_x + offset_x, local_y + offset_y)
+                    for local_x, local_y in reversed(path)
+                )
+            for dx, dy, step in neighbors:
+                next_x, next_y = x + dx, y + dy
+                if not (
+                    0 <= next_x < width
+                    and 0 <= next_y < height
+                    and free[next_y, next_x]
+                ):
+                    continue
+                if (
+                    dx != 0
+                    and dy != 0
+                    and (not free[y, next_x] or not free[next_y, x])
+                ):
+                    continue
+                next_cost = cost + step
+                if next_cost + 1e-9 >= best.get((next_x, next_y), math.inf):
+                    continue
+                best[(next_x, next_y)] = next_cost
+                parents[(next_x, next_y)] = (x, y)
+                heapq.heappush(queue, (next_cost, next_x, next_y))
+        return math.inf, ()
 
     def _thin_local_successor(
         self,
@@ -1909,16 +2550,24 @@ class DroneMovementController:
                 # A distant or unreachable successor is ordinary component
                 # work, not a thin continuation of this scan footprint.
                 continue
-            route = self._compute_path(current, anchor)
-            if route.status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
+            if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+                path = self._local_slam_path(current, anchor)
+                route_status = PATH_COMPLETE if path else PATH_UNREACHABLE
+            else:
+                route = self._compute_path(current, anchor)
+                path = tuple(route.path)
+                route_status = route.status
+            if route_status not in {PATH_COMPLETE, PATH_PARTIAL_LIMIT}:
                 continue
             node = dfs.new_node(
                 cells,
                 anchor,
                 heading,
                 allow_standoff=True,
+                provisional=frame.node.provisional,
+                source_task_id=frame.node.source_task_id,
             )
-            execution.local_routes[node.local_id] = tuple(route.path)
+            execution.local_routes[node.local_id] = path
             return node
         return None
 
@@ -2213,13 +2862,29 @@ class DroneMovementController:
             )
             return interrupted_by_share
 
-        result = self._compute_path(current, target)
+        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+            local_path = self._local_slam_path(current, target)
+            result = PathResult(
+                local_path,
+                PATH_COMPLETE if local_path else PATH_UNREACHABLE,
+                0,
+                0.0 if local_path else math.inf,
+            )
+        else:
+            result = self._compute_path(current, target)
         path = tuple(result.path)
         self._record_incidental_pocket_revisit(
             target,
             path,
             source="component_dfs_reposition_astar",
         )
+        self._record_focused_frontier_batch_provisional_revisit(
+            target,
+            path,
+            directive_id=execution.directive.directive_id,
+            source="component_dfs_reposition_astar",
+        )
+
         effective_target = target
         if (
             result.status == PATH_COMPLETE
@@ -2396,6 +3061,12 @@ class DroneMovementController:
         execution: _CoordinationExecution,
     ) -> None:
         """Return with a complete claim; only upload after physical contact."""
+        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+            self._capture_batch_member(execution, disposition="complete")
+            if self._start_next_batch_member(execution):
+                return
+            self._prepare_batch_return(execution)
+            return
         execution.outbound_actual_path = self._path_history_since(
             execution.path_start_index
         )
@@ -2449,12 +3120,22 @@ class DroneMovementController:
             path = ()
         status = PATH_COMPLETE if path and path[-1] == target else None
         if not path:
-            result = self._compute_path(current, target)
-            path = tuple(result.path)
-            status = result.status
+            if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+                path = self._local_slam_path(current, target)
+                status = PATH_COMPLETE if path else PATH_UNREACHABLE
+            else:
+                result = self._compute_path(current, target)
+                path = tuple(result.path)
+                status = result.status
         self._record_incidental_pocket_revisit(
             target,
             path,
+            source=source,
+        )
+        self._record_focused_frontier_batch_provisional_revisit(
+            target,
+            path,
+            directive_id=execution.directive.directive_id,
             source=source,
         )
         execution.route_attempts += 1
@@ -2513,6 +3194,7 @@ class DroneMovementController:
         stop_reason = None
         if execution.directive.kind in {
             DirectiveKind.COMPONENT_TASK,
+            DirectiveKind.COMPONENT_BATCH,
             DirectiveKind.COMPONENT_FOLLOW,
         }:
             stop_when = lambda: self._component_route_invalidated_after_share(
@@ -2527,6 +3209,7 @@ class DroneMovementController:
             incidental_transit=(
                 execution.directive.kind in {
                     DirectiveKind.COMPONENT_TASK,
+                    DirectiveKind.COMPONENT_BATCH,
                     DirectiveKind.COMPONENT_FOLLOW,
                 }
                 and execution.phase == "transit"
@@ -2587,6 +3270,7 @@ class DroneMovementController:
             or self._pending_incidental_scan is not None
             or execution.directive.kind not in {
                 DirectiveKind.COMPONENT_TASK,
+                DirectiveKind.COMPONENT_BATCH,
                 DirectiveKind.COMPONENT_FOLLOW,
             }
             or route_source not in {
@@ -2824,6 +3508,44 @@ class DroneMovementController:
                     len(route),
                 ),
                 attempted_at=attempt.attempted_at,
+            )
+
+    def _record_focused_frontier_batch_provisional_revisit(
+        self,
+        target: Position,
+        path: Iterable[Position],
+        *,
+        directive_id: int,
+        source: str,
+    ) -> None:
+        """Trace a later directive returning to lease-serviced geometry."""
+        radius = float(2 * self.frontier_stride)
+        current = self.drone.snapshot().position
+        route = tuple(path)
+        for attempt in self._focused_frontier_batch_provisional_memory:
+            if (
+                attempt.revisited
+                or attempt.directive_id == int(directive_id)
+                or not any(
+                    math.dist(target, cell) <= radius + 1e-9
+                    for cell in attempt.cells
+                )
+            ):
+                continue
+            attempt.revisited = True
+            self._trace(
+                "drone_focused_frontier_batch_frontier_revisited",
+                source=source,
+                target=target,
+                source_directive_id=attempt.directive_id,
+                current_directive_id=int(directive_id),
+                observation_id=attempt.observation_id,
+                actual_revisit_route_distance=self._path_distance(
+                    current,
+                    route,
+                    len(route),
+                ),
+                serviced_at=attempt.serviced_at,
             )
 
     @staticmethod
@@ -3185,6 +3907,9 @@ class DroneMovementController:
     ) -> None:
         self._cancel_pending_incidental_scan("directive_completed")
         directive = execution.directive
+        if directive.kind == DirectiveKind.COMPONENT_BATCH:
+            self._finish_batch_execution(execution)
+            return
         claim_token = (
             None if directive.claim is None else directive.claim.token
         )
@@ -3275,6 +4000,96 @@ class DroneMovementController:
         )
         self._coordination_execution = None
 
+    def _finish_batch_execution(
+        self,
+        execution: _CoordinationExecution,
+    ) -> None:
+        directive = execution.directive
+        report_id = self._next_coordination_report_id()
+        member_reports: list[BatchMemberReport] = []
+        for snapshot in execution.batch_completed_members or ():
+            causal = ()
+            if snapshot.causal_successors:
+                causal = (CausalTransition(
+                    predecessor_id=snapshot.member.task.component_id,
+                    successor_cells=snapshot.causal_successors,
+                    report_id=report_id,
+                    visited_successor_anchors=(
+                        snapshot.visited_successor_anchors
+                    ),
+                ),)
+            member_reports.append(BatchMemberReport(
+                task_id=snapshot.member.task.task_id,
+                component_id=snapshot.member.task.component_id,
+                component_revision=snapshot.member.task.component_revision,
+                claim_token=snapshot.member.claim.token,
+                disposition=snapshot.disposition,
+                work_unit_outcomes=snapshot.work_unit_outcomes,
+                causal_transitions=causal,
+                suspension=snapshot.suspension,
+            ))
+        lease = directive.spatial_lease
+        total_outbound = sum(
+            item.outbound_distance
+            for item in execution.batch_completed_members or ()
+        )
+        total_service = sum(
+            item.service_distance
+            for item in execution.batch_completed_members or ()
+        )
+        self._coordination_report = CoordinationReport(
+            report_id=report_id,
+            directive_id=directive.directive_id,
+            kind=directive.kind,
+            lease_id=None if lease is None else lease.lease_id,
+            batch_member_reports=tuple(member_reports),
+            provisional_observations=tuple(
+                execution.batch_provisional_observations or ()
+            ),
+            completed_scan_headings=tuple(
+                execution.completed_scan_headings or ()
+            ),
+            timed_out_scan_headings=tuple(
+                execution.timed_out_scan_headings or ()
+            ),
+            sensor_newly_known_cells=execution.sensor_newly_known_cells,
+            sensor_confidence_gain=execution.sensor_confidence_gain,
+            outbound_actual_path=execution.outbound_actual_path,
+            return_actual_path=execution.return_actual_path,
+            return_path_source=execution.return_path_source,
+            outbound_distance=total_outbound,
+            service_distance=total_service,
+            return_distance=self._polyline_distance(
+                execution.return_actual_path
+            ),
+        )
+        self._trace(
+            "drone_component_directive_completed",
+            directive_id=directive.directive_id,
+            directive_kind=directive.kind.value,
+            report_id=report_id,
+            lease_id=None if lease is None else lease.lease_id,
+            member_task_ids=tuple(
+                item.task_id for item in member_reports
+            ),
+            claim_tokens=tuple(
+                item.claim_token for item in member_reports
+            ),
+            member_dispositions=tuple(
+                item.disposition for item in member_reports
+            ),
+            provisional_observation_count=len(
+                execution.batch_provisional_observations or ()
+            ),
+            outbound_distance=total_outbound,
+            service_distance=total_service,
+            return_distance=self._polyline_distance(
+                execution.return_actual_path
+            ),
+            bound_reason=execution.batch_return_reason,
+        )
+        self._coordination_execution = None
+
     def _energy_requires_return(
         self,
         execution: _CoordinationExecution,
@@ -3295,7 +4110,19 @@ class DroneMovementController:
         if not route.path and current != rover:
             route_home_cost = math.dist(current, rover)
         next_action_cost = 1.0
-        if execution.directive.task is not None:
+        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+            next_action_cost = max(
+                1.0,
+                sum(
+                    member.estimated_service_cost
+                    for member in (
+                        *((execution.batch_current_member,) if
+                          execution.batch_current_member is not None else ()),
+                        *(execution.batch_pending_members or ()),
+                    )
+                ),
+            )
+        elif execution.directive.task is not None:
             next_action_cost = max(
                 1.0,
                 float(execution.directive.task.estimated_effort),
@@ -3346,6 +4173,15 @@ class DroneMovementController:
             ):
                 return False
             key = ("scan", scan.position, scan.heading_index)
+        elif (
+            execution.directive.kind == DirectiveKind.COMPONENT_BATCH
+            and execution.phase == "repositioning"
+        ):
+            key = (
+                "repositioning",
+                execution.reposition_target,
+                self.drone.snapshot().position,
+            )
         else:
             return False
         if execution.energy_checkpoint_key == key:
@@ -3362,6 +4198,35 @@ class DroneMovementController:
     ) -> None:
         """Suspend bounded work and retain an exact breadcrumb to the rover."""
         self._cancel_pending_incidental_scan(reason)
+        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
+            member_failure_reasons = {
+                "route_unreachable",
+                "route_progress_limit",
+                "dfs_reposition_unreachable",
+                "sensor_timeout",
+            }
+            if reason in member_failure_reasons:
+                execution.suspension_reason = str(reason)
+                execution.suspension_position = self.drone.snapshot().position
+                execution.suspension_energy_state = energy_state
+                self._capture_batch_member(
+                    execution,
+                    disposition=(
+                        "sensor_timeout"
+                        if reason == "sensor_timeout"
+                        else "unreachable"
+                    ),
+                )
+                if self._start_next_batch_member(execution):
+                    return
+                self._prepare_batch_return(execution)
+                return
+            self._prepare_batch_return(
+                execution,
+                reason=reason,
+                energy_state=energy_state,
+            )
+            return
         execution.outbound_actual_path = self._path_history_since(
             execution.path_start_index
         )
@@ -3404,6 +4269,186 @@ class DroneMovementController:
             position=self.drone.snapshot().position,
             breadcrumb_point_count=len(execution.pending_return_breadcrumb),
         )
+
+    def _capture_batch_member(
+        self,
+        execution: _CoordinationExecution,
+        *,
+        disposition: str,
+    ) -> None:
+        member = execution.batch_current_member
+        if member is None:
+            return
+        start_index = (
+            execution.batch_member_path_start_index
+            if execution.batch_member_path_start_index is not None
+            else execution.path_start_index
+        )
+        path = self._path_history_since(start_index)
+        distance = self._polyline_distance(path)
+        if execution.root_outbound_distance <= 1e-9:
+            execution.root_outbound_distance = distance
+        execution.service_distance = max(
+            0.0, distance - execution.root_outbound_distance,
+        )
+        suspension = self._build_task_suspension(execution)
+        finished_at = self._simulation_time()
+        started_at = execution.batch_member_started_at
+        snapshot = _BatchMemberSnapshot(
+            member=member,
+            disposition=disposition,
+            work_unit_outcomes=tuple(execution.work_unit_outcomes or ()),
+            causal_successors=tuple(dict.fromkeys(
+                execution.causal_successors or (),
+            )),
+            visited_successor_anchors=tuple(dict.fromkeys(
+                execution.visited_successor_anchors or (),
+            )),
+            suspension=suspension,
+            outbound_actual_path=path,
+            outbound_distance=execution.root_outbound_distance,
+            service_distance=execution.service_distance,
+            service_seconds=max(
+                0.0,
+                finished_at - (finished_at if started_at is None else started_at),
+            ),
+        )
+        if execution.batch_completed_members is None:
+            execution.batch_completed_members = []
+        execution.batch_completed_members.append(snapshot)
+        if execution.dfs is not None:
+            execution.batch_completed_dfs_nodes += (
+                execution.batch_current_dfs_nodes
+            )
+        self._trace(
+            "drone_focused_frontier_batch_member_finished",
+            directive_id=execution.directive.directive_id,
+            task_id=member.task.task_id,
+            component_id=member.task.component_id,
+            claim_token=member.claim.token,
+            disposition=disposition,
+            work_unit_outcome_count=len(snapshot.work_unit_outcomes),
+            outbound_distance=snapshot.outbound_distance,
+            service_distance=snapshot.service_distance,
+            service_seconds=snapshot.service_seconds,
+            suspended=suspension is not None,
+        )
+        execution.batch_current_member = None
+
+    def _prepare_batch_return(
+        self,
+        execution: _CoordinationExecution,
+        *,
+        reason: str | None = None,
+        energy_state: EnergyState | None = None,
+    ) -> None:
+        """Freeze every unfinished member and make one physical return."""
+        if execution.batch_current_member is not None:
+            completed_ids = {
+                outcome.work_unit_id
+                for outcome in execution.work_unit_outcomes or ()
+            }
+            member_complete = set(
+                execution.batch_current_member.claim.work_unit_ids
+            ) <= completed_ids
+            execution.suspension_reason = None if member_complete else reason
+            execution.suspension_position = self.drone.snapshot().position
+            execution.suspension_energy_state = energy_state
+            self._capture_batch_member(
+                execution,
+                disposition=(
+                    "complete"
+                    if reason is None or member_complete
+                    else "budget_exhausted"
+                ),
+            )
+        pending = execution.batch_pending_members or []
+        if reason is not None:
+            state = energy_state or EnergyState(
+                remaining_energy=float(self.drone.snapshot().battery),
+                capacity=100.0,
+                unlimited=True,
+            )
+            slam_version = int(
+                self.drone.slam_map.snapshot(point_limit=0).version
+            )
+            for member in tuple(pending):
+                suspension = TaskSuspension(
+                    task_id=member.task.task_id,
+                    claim_token=member.claim.token,
+                    drone_id=int(self.drone.id),
+                    reason=str(reason),
+                    dfs_stack=(),
+                    remaining_work_unit_ids=member.claim.work_unit_ids,
+                    position_at_suspension=self.drone.snapshot().position,
+                    actual_return_path=(),
+                    return_path_source="batch_not_started",
+                    local_slam_version=slam_version,
+                    energy_state=state,
+                )
+                if execution.batch_completed_members is None:
+                    execution.batch_completed_members = []
+                execution.batch_completed_members.append(_BatchMemberSnapshot(
+                    member=member,
+                    disposition="budget_exhausted",
+                    work_unit_outcomes=(),
+                    causal_successors=(),
+                    visited_successor_anchors=(),
+                    suspension=suspension,
+                    outbound_actual_path=(),
+                    outbound_distance=0.0,
+                    service_distance=0.0,
+                    service_seconds=0.0,
+                ))
+        pending.clear()
+        execution.batch_return_reason = reason
+        execution.outbound_actual_path = self._path_history_since(
+            execution.path_start_index
+        )
+        execution.pending_return_breadcrumb = tuple(reversed(
+            execution.outbound_actual_path
+        ))
+        execution.return_path_start_index = max(
+            0, len(self.drone.snapshot().path_history) - 1,
+        )
+        execution.phase = "returning"
+        if reason is not None:
+            elapsed = (
+                0.0 if execution.batch_started_at is None
+                else self._simulation_time() - execution.batch_started_at
+            )
+            usage, limit = {
+                "service_time_limit": (
+                    elapsed,
+                    execution.directive.maximum_service_seconds,
+                ),
+                "dfs_node_limit": (
+                    execution.batch_completed_dfs_nodes
+                    + execution.batch_current_dfs_nodes,
+                    execution.directive.maximum_total_dfs_nodes,
+                ),
+                "energy_reserve": (None, None),
+            }.get(reason, (None, None))
+            self._trace(
+                "drone_focused_frontier_batch_bound_reached",
+                directive_id=execution.directive.directive_id,
+                bound=reason,
+                usage=usage,
+                limit=limit,
+                elapsed_seconds=elapsed,
+                detour_distance=execution.batch_detour_distance,
+                current_member_task_id=(
+                    None if execution.batch_current_member is None
+                    else execution.batch_current_member.task.task_id
+                ),
+                completed_member_count=len(
+                    execution.batch_completed_members or ()
+                ),
+                suspended_member_count=sum(
+                    item.suspension is not None
+                    for item in execution.batch_completed_members or ()
+                ),
+            )
 
     def _component_return_breadcrumb(
         self,
@@ -3540,6 +4585,30 @@ class DroneMovementController:
             return True, True
         if current == target:
             return True, False
+        highway_path = self._component_check_in_highway_route(
+            current,
+            target,
+        )
+        if highway_path:
+            followed = self._follow_path(
+                highway_path,
+                source="component_checkin_highway",
+                stop_when=(
+                    stop_for_coordination_contact
+                    if can_report or dock_during_check_in
+                    else None
+                ),
+                stop_reason="report" if can_report else "dock",
+            )
+            if encountered:
+                record_return("rover_encounter")
+                if dock_result is not None:
+                    self._apply_coordination_result(dock_result)
+                return True, True
+            if followed and self.drone.snapshot().position == target:
+                record_return("highway")
+                return True, False
+            current = self.drone.snapshot().position
         result = self._compute_path(current, target)
         if result.path:
             followed = self._follow_path(
@@ -3583,6 +4652,135 @@ class DroneMovementController:
                 record_return("breadcrumb_fallback")
                 return True, False
         return False, False
+
+    def _component_check_in_highway_route(
+        self,
+        current: Position,
+        target: Position,
+    ) -> tuple[Position, ...]:
+        """Evaluate physically received highway advice for one return leg."""
+        if self.highway_mode == "off":
+            return ()
+        direct_distance = math.dist(current, target)
+        minimum_distance = (
+            self._sensor_range()
+            * self.highway_minimum_route_sensor_ranges
+        )
+        snapshot = self._highway_snapshot
+        local_version = self.drone.slam_map.version
+        if snapshot is None or direct_distance + 1e-9 < minimum_distance:
+            self._trace(
+                "drone_highway_route_evaluated",
+                mode=self.highway_mode,
+                status=("unavailable" if snapshot is None else "short_route"),
+                selected=False,
+                fallback_reason=(
+                    "snapshot_unavailable"
+                    if snapshot is None
+                    else "below_minimum_distance"
+                ),
+                highway_version=(
+                    None if snapshot is None else snapshot.version
+                ),
+                local_slam_version=local_version,
+                direct_distance=direct_distance,
+                route_distance=None,
+                route_circuity=None,
+                elapsed_ms=0.0,
+                expanded_nodes=0,
+                graph_edges=0,
+            )
+            return ()
+        route = snapshot.route(
+            current,
+            target,
+            maximum_query_ms=self.highway_maximum_query_ms,
+            maximum_connector_expansions=(
+                self.highway_maximum_connector_expansions
+            ),
+        )
+        route_distance = route.cost if route.complete else math.inf
+        circuity = self._route_circuity(route_distance, direct_distance)
+        endpoints_valid = bool(
+            route.path
+            and route.path[0] == tuple(current)
+            and route.path[-1] == tuple(target)
+        )
+        locally_valid = bool(
+            endpoints_valid and self._highway_path_locally_valid(route.path)
+        )
+        eligible = bool(
+            route.complete
+            and locally_valid
+            and circuity <= self.highway_maximum_route_circuity + 1e-9
+        )
+        selected = eligible and self.highway_mode == "active"
+        if not route.complete:
+            fallback_reason = route.status
+        elif not endpoints_valid:
+            fallback_reason = "invalid_endpoints"
+        elif not locally_valid:
+            fallback_reason = "locally_known_occupied"
+        elif circuity > self.highway_maximum_route_circuity + 1e-9:
+            fallback_reason = "circuity_limit"
+        elif self.highway_mode == "observe":
+            fallback_reason = "observe_only"
+        else:
+            fallback_reason = None
+        self._trace(
+            "drone_highway_route_evaluated",
+            mode=self.highway_mode,
+            status=route.status,
+            eligible=eligible,
+            selected=selected,
+            fallback_reason=fallback_reason,
+            highway_version=snapshot.version,
+            local_slam_version=local_version,
+            direct_distance=direct_distance,
+            route_distance=(route_distance if math.isfinite(route_distance) else None),
+            route_circuity=(circuity if math.isfinite(circuity) else None),
+            elapsed_ms=route.elapsed_ms,
+            expanded_nodes=route.expanded_nodes,
+            graph_edges=route.graph_edges,
+        )
+        return route.path if selected else ()
+
+    def _highway_path_locally_valid(
+        self,
+        path: Iterable[Position],
+    ) -> bool:
+        """Reject rover advice contradicted by this drone's newer local SLAM."""
+        slam = self.drone.slam_map.snapshot(point_limit=0)
+        occupancy = np.asarray(slam.occupancy)
+        confidence = np.asarray(slam.confidence)
+        offset_x, offset_y = (int(value) for value in slam.origin)
+        height, width = occupancy.shape
+
+        def locally_occupied(point: Position) -> bool:
+            local_x = int(point[0]) - offset_x
+            local_y = int(point[1]) - offset_y
+            return bool(
+                0 <= local_x < width
+                and 0 <= local_y < height
+                and occupancy[local_y, local_x] == OCCUPIED
+                and confidence[local_y, local_x]
+                >= self.frontier_confidence_threshold
+            )
+
+        points = tuple((int(x), int(y)) for x, y in path)
+        if not points or any(locally_occupied(point) for point in points):
+            return False
+        for previous, current in zip(points, points[1:]):
+            delta_x = current[0] - previous[0]
+            delta_y = current[1] - previous[1]
+            if max(abs(delta_x), abs(delta_y)) != 1:
+                return False
+            if delta_x and delta_y and (
+                locally_occupied((previous[0] + delta_x, previous[1]))
+                or locally_occupied((previous[0], previous[1] + delta_y))
+            ):
+                return False
+        return True
 
     def _path_history_since(self, index: int) -> tuple[Position, ...]:
         history = self.drone.snapshot().path_history
@@ -6887,6 +8085,8 @@ class DroneMovementController:
 
     def _compute_path(self, start: Position, goal: Position) -> PathResult:
         """Ask for a complete physical route or one capped route segment."""
+        started = time.perf_counter()
+        path_result: PathResult | None = None
         self._begin_calculation(
             "Pathfinding",
             f"target {goal[0]},{goal[1]}",
@@ -6897,21 +8097,48 @@ class DroneMovementController:
             if callable(segment_planner):
                 result = segment_planner(start, goal)
                 if isinstance(result, PathResult):
-                    return result
+                    path_result = result
 
-            path = tuple(self.dependencies.compute_path(start, goal))
-            status = (
-                PATH_COMPLETE
-                if path and path[-1] == goal
-                else PATH_UNREACHABLE
-            )
-            remaining = (
-                0.0
-                if status == PATH_COMPLETE
-                else math.dist(path[-1] if path else start, goal)
-            )
-            return PathResult(path, status, 0, remaining)
+            if path_result is None:
+                path = tuple(self.dependencies.compute_path(start, goal))
+                status = (
+                    PATH_COMPLETE
+                    if path and path[-1] == goal
+                    else PATH_UNREACHABLE
+                )
+                remaining = (
+                    0.0
+                    if status == PATH_COMPLETE
+                    else math.dist(path[-1] if path else start, goal)
+                )
+                path_result = PathResult(path, status, 0, remaining)
+            return path_result
         finally:
+            self._trace(
+                "drone_path_request_completed",
+                start=start,
+                goal=goal,
+                status=(
+                    "error" if path_result is None else path_result.status
+                ),
+                iterations=(
+                    0 if path_result is None else path_result.iterations
+                ),
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                path_point_count=(
+                    0 if path_result is None else len(path_result.path)
+                ),
+                endpoint=(
+                    None
+                    if path_result is None or not path_result.path
+                    else path_result.path[-1]
+                ),
+                remaining_distance=(
+                    None
+                    if path_result is None
+                    else path_result.remaining_distance
+                ),
+            )
             self._end_calculation("Pathfinding")
 
     def _accept_partial_endpoint(

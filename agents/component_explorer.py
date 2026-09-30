@@ -100,6 +100,8 @@ class LocalComponentNode:
     scan_heading: int
     work_unit_id: int | None = None
     allow_standoff: bool = False
+    provisional: bool = False
+    source_task_id: int | None = None
 
 
 @dataclass
@@ -134,6 +136,8 @@ class LocalDFSStack:
         scan_heading: int,
         work_unit_id: int | None = None,
         allow_standoff: bool = False,
+        provisional: bool = False,
+        source_task_id: int | None = None,
     ) -> LocalComponentNode:
         node = LocalComponentNode(
             local_id=self._next_local_id,
@@ -142,6 +146,8 @@ class LocalDFSStack:
             scan_heading=int(scan_heading) % 360,
             work_unit_id=work_unit_id,
             allow_standoff=bool(allow_standoff),
+            provisional=bool(provisional),
+            source_task_id=source_task_id,
         )
         self._next_local_id += 1
         return node
@@ -267,6 +273,59 @@ def related_local_successors(
         if lineage_near or scan_visible:
             successors.append(cells)
     return tuple(successors)
+
+
+def leased_local_frontiers(
+    slam: SlamSnapshot,
+    *,
+    allowed_cells: Iterable[Position],
+    excluded_geometry: Iterable[frozenset[Position]] = (),
+    confidence_threshold: float,
+    minimum_component_cells: int,
+    minimum_unknown_support_cells: int,
+) -> tuple[frozenset[Position], ...]:
+    """Return significant components wholly inside a bounded spatial lease."""
+    allowed = frozenset((int(x), int(y)) for x, y in allowed_cells)
+    if not allowed:
+        return ()
+    excluded = tuple(cells for cells in excluded_geometry if cells)
+    frontier, _diagnostics = significant_frontier_mask(
+        np.asarray(slam.occupancy),
+        np.asarray(slam.confidence),
+        confidence_threshold,
+        minimum_component_cells=minimum_component_cells,
+        minimum_unknown_support_cells=minimum_unknown_support_cells,
+    )
+    offset_x, offset_y = (int(value) for value in slam.origin)
+    admitted: list[frozenset[Position]] = []
+    for component in eight_connected_components(frontier):
+        cells = frozenset(
+            (int(x) + offset_x, int(y) + offset_y)
+            for x, y in component
+        )
+        if (
+            not cells
+            or not cells <= allowed
+            or any(cells & geometry for geometry in excluded)
+        ):
+            continue
+        # A frontier touching the lease boundary may continue into another
+        # drone's envelope once more SLAM is learned, so leave it provisional.
+        if any(
+            (neighbor_x, neighbor_y) not in allowed
+            for x, y in cells
+            for neighbor_y in range(y - 1, y + 2)
+            for neighbor_x in range(x - 1, x + 2)
+        ):
+            continue
+        admitted.append(cells)
+    return tuple(sorted(
+        admitted,
+        key=lambda cells: (
+            min((point[1], point[0]) for point in cells),
+            len(cells),
+        ),
+    ))
 
 
 def _sets_near(
