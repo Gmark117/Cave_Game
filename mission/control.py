@@ -59,6 +59,7 @@ from mission.presentation_adapter import PresentationAdapter
 from rendering.slam_renderer import SlamRenderer
 from rendering.mission_renderer import MissionRenderer
 from rendering.sector_renderer import SectorRenderer
+from rendering.highway_renderer import HighwayRenderer
 from rendering.slam_view import SlamViewService
 from mission.lifecycle import MissionControlLifecycleMixin
 
@@ -177,6 +178,9 @@ class MissionControl(MissionControlLifecycleMixin):
                 self.settings.frontier.confidence_threshold
             ),
             macro_cell_size=self.settings.highway.macro_cell_size,
+            maximum_access_distance_sensor_ranges=(
+                self.settings.highway.maximum_access_distance_sensor_ranges
+            ),
             maximum_build_ms=self.settings.highway.maximum_build_ms,
             maximum_query_ms=self.settings.highway.maximum_query_ms,
             maximum_connector_expansions=(
@@ -184,6 +188,7 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
         )
         self._last_highway_build_version: int | None = None
+        self._last_rover_knowledge_version: int | None = None
         self.mission_event = threading.Event()
         self.exploration_completion_event = threading.Event()
         self.simulation_clock = SimulationClock()
@@ -292,7 +297,15 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
             highway_mode=self.settings.highway.mode,
             highway_macro_cell_size=self.settings.highway.macro_cell_size,
-            highway_minimum_version_delta=(
+            highway_topology="corridor_backbone",
+            highway_maximum_access_distance_sensor_ranges=(
+                self.settings.highway.maximum_access_distance_sensor_ranges
+            ),
+            highway_refresh_policy="every_rover_slam_version",
+            highway_build_policy="throttled_full_rebuild_process",
+            highway_minimum_rebuild_seconds=2.0,
+            highway_minimum_version_delta=1,
+            highway_configured_minimum_version_delta=(
                 self.settings.highway.minimum_version_delta
             ),
             highway_maximum_build_ms=(
@@ -323,9 +336,10 @@ class MissionControl(MissionControlLifecycleMixin):
             frontier_unknown_basin_rescue="interior_basins_only",
             rover_periodic_sharing=True,
             rover_drone_pair_sharing=True,
+            sharing_pause_policy="once_per_continuous_contact_non_extending",
             rover_count=1,
             rover_rendezvous_protocol=(
-                "contact_carried_ack_confirmed_target_then_proposal_fallback"
+                "contact_carried_ack_departure_or_confirmed_target"
             ),
             frontier_stride=self.settings.frontier.stride,
             frontier_minimum_cluster_cells=(
@@ -401,6 +415,7 @@ class MissionControl(MissionControlLifecycleMixin):
             ),
         )
         self.sector_renderer = SectorRenderer(self.map_w, self.map_h)
+        self.highway_renderer = HighwayRenderer(self.map_w, self.map_h)
         self.last_explored_update = 0.0
         self.wall_mapping_progress = WallMappingSnapshot(0, 0, 0.0, False)
         self.floor_exploration_ratio = 0.0
@@ -487,6 +502,10 @@ class MissionControl(MissionControlLifecycleMixin):
                 ),
                 is_exploration_complete=lambda: self.exploration_complete,
                 get_docked_drone_ids=self.exploration_docked_ids,
+                highway_renderer=self.highway_renderer,
+                get_highway_snapshot=lambda rover_id: (
+                    self.highway.snapshot if rover_id == 0 else None
+                ),
             )
         )
         
@@ -534,6 +553,7 @@ class MissionControl(MissionControlLifecycleMixin):
         self._last_focused_endgame_trace_state = False
         self._last_focused_staging_hold_revision = None
         self._last_highway_build_version = None
+        self._last_rover_knowledge_version = None
 
         AgentFactory.build_drones(self)
         AgentFactory.build_rovers(self)
@@ -541,6 +561,9 @@ class MissionControl(MissionControlLifecycleMixin):
         if not self.drones:
             raise RuntimeError("component exploration requires at least one drone")
         vision_sensor = self.drones[0].sensor_controller.vision_sensor
+        self.highway.sensor_range = float(vision_sensor.max_range)
+        if self.settings.highway.mode != "off" or self.settings.focused_frontier_batch.mode != "off":
+            self.highway.start()
         self.exploration_coordinator = FrontierTaskCoordinator(
             (self.map_h, self.map_w),
             self.num_drones,
@@ -1023,6 +1046,10 @@ class MissionControl(MissionControlLifecycleMixin):
         protocol = self.rendezvous_protocol
         return protocol is None or protocol.rover_arrived(position)
 
+    def rendezvous_departed(self, position: Tuple[int, int]) -> bool:
+        protocol = self.rendezvous_protocol
+        return protocol is None or protocol.rover_departed(position)
+
     def _rendezvous_drone_contact(self, first_id: int, second_id: int) -> None:
         if self.rendezvous_protocol is not None:
             self.rendezvous_protocol.drone_drone_contact(first_id, second_id)
@@ -1307,8 +1334,10 @@ class MissionControl(MissionControlLifecycleMixin):
     def _refresh_highway_if_due(
         self,
         rover_slam,
+        *,
+        refresh_source: str = "physical_check_in",
     ) -> HighwayBuildResult | None:
-        """Refresh bounded rover navigation advice at physical check-in only."""
+        """Request advice once per newly received rover SLAM version."""
         if (
             self.settings.highway.mode == "off"
             and self.settings.focused_frontier_batch.mode == "off"
@@ -1316,14 +1345,14 @@ class MissionControl(MissionControlLifecycleMixin):
             return None
         version = int(rover_slam.version)
         last_version = self._last_highway_build_version
-        if (
-            last_version is not None
-            and version - last_version
-            < self.settings.highway.minimum_version_delta
-        ):
+        if last_version == version:
             return None
         self._last_highway_build_version = version
         result = self.highway.refresh(rover_slam)
+        self._record_highway_build(result, version, refresh_source)
+        return result
+
+    def _record_highway_build(self, result, version, refresh_source):
         retained = self.highway.snapshot
         self.runtime_trace.record(
             "rover_highway_build_completed",
@@ -1331,6 +1360,8 @@ class MissionControl(MissionControlLifecycleMixin):
             mode=self.settings.highway.mode,
             status=result.status,
             requested_version=version,
+            source_version=result.source_version,
+            build_kind=result.build_kind,
             published_version=(
                 None if retained is None else retained.version
             ),
@@ -1342,8 +1373,48 @@ class MissionControl(MissionControlLifecycleMixin):
             edge_count=result.edge_count,
             known_free_cells=result.known_free_cells,
             connector_expansions=result.connector_expansions,
+            topology="corridor_backbone",
+            refresh_source=refresh_source,
+            component_count=0 if retained is None else retained.component_count,
+            maximum_access_distance=(
+                None if retained is None else retained.maximum_access_distance
+            ),
+            measured_access_distance=(
+                None if retained is None else retained.measured_access_distance
+            ),
+            pruned_branches=0 if retained is None else retained.pruned_branches,
+            capillary_branches=0 if retained is None else retained.capillary_branches,
+            skeleton_scale=None if retained is None else retained.skeleton_scale,
+            skeleton_method=None if retained is None else retained.skeleton_method,
         )
-        return result
+
+    def _poll_highway(self):
+        result = self.highway.poll()
+        if result is not None:
+            graph = result.snapshot
+            version = result.source_version if result.source_version is not None else self._last_highway_build_version
+            self._record_highway_build(result, version, "background_worker")
+            if graph is not None and self.exploration_coordinator is not None:
+                self.exploration_coordinator.update_highway_snapshot(graph)
+
+    def _refresh_rover_knowledge_if_changed(self) -> None:
+        """Refresh frontiers and highways together on the primary rover worker."""
+        coordinator = self.exploration_coordinator
+        if coordinator is None or not self.rovers or self.rovers[0] is None:
+            return
+        slam_map = self.rovers[0].slam_map
+        if slam_map.version == self._last_rover_knowledge_version:
+            return
+        rover_slam = slam_map.snapshot(point_limit=0)
+        self._refresh_highway_if_due(rover_slam, refresh_source="rover_knowledge_update")
+        coordinator.update_highway_snapshot(self.highway.snapshot)
+        reconcile = coordinator.refresh_rover_knowledge(rover_slam)
+        if reconcile is not None:
+            self._record_frontier_reconcile(
+                reconcile, rover_slam, coordinator.published_snapshot(),
+                refresh_source="rover_knowledge_update",
+            )
+        self._last_rover_knowledge_version = int(rover_slam.version)
 
     def _perform_exploration_check_in(
         self,
@@ -1383,6 +1454,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 unlimited=True,
             ),
         )
+        self._last_rover_knowledge_version = int(rover_slam.version)
         if (
             self.settings.highway.mode in {"observe", "active"}
             and self.highway.snapshot is not None
@@ -1611,57 +1683,65 @@ class MissionControl(MissionControlLifecycleMixin):
                 replayed=False,
             )
         if result.reconcile_result is not None:
-            reconcile = result.reconcile_result
-            snapshot = coordination_snapshot
-            for unit_id in reconcile.low_gain_deferred_work_unit_ids:
-                unit = coordinator.registry.work_units[unit_id]
-                self.runtime_trace.record(
-                    "rover_frontier_low_gain_deferred",
-                    sim_time=self.simulation_time(),
-                    component_id=unit.component_id,
-                    work_unit_id=unit_id,
-                    anchor=unit.anchor_position,
-                    revision=reconcile.revision,
-                )
+            self._record_frontier_reconcile(
+                result.reconcile_result, rover_slam, coordination_snapshot,
+            )
+        return result
+
+    def _record_frontier_reconcile(
+        self, reconcile, rover_slam, snapshot, *, refresh_source="physical_check_in",
+    ) -> None:
+        """Trace both report-driven and proximity-driven registry refreshes."""
+        coordinator = self.exploration_coordinator
+        for unit_id in reconcile.low_gain_deferred_work_unit_ids:
+            unit = coordinator.registry.work_units[unit_id]
             self.runtime_trace.record(
-                "rover_frontier_registry_reconciled",
+                "rover_frontier_low_gain_deferred",
+                sim_time=self.simulation_time(),
+                component_id=unit.component_id,
+                work_unit_id=unit_id,
+                anchor=unit.anchor_position,
+                revision=reconcile.revision,
+            )
+        self.runtime_trace.record(
+            "rover_frontier_registry_reconciled",
+            sim_time=self.simulation_time(),
+            revision=reconcile.revision,
+            elapsed_ms=reconcile.elapsed_ms,
+            rover_slam_version=rover_slam.version,
+            refresh_source=refresh_source,
+            active_component_ids=reconcile.active_component_ids,
+            active_component_count=len(reconcile.active_component_ids),
+            ready_work_unit_ids=reconcile.ready_work_unit_ids,
+            ready_work_unit_count=len(reconcile.ready_work_unit_ids),
+            dormant_component_count=sum(
+                component.state.value == "dormant"
+                for component in snapshot.components
+            ),
+            resolved_component_count=sum(
+                component.state.value == "resolved"
+                for component in snapshot.components
+            ),
+            exploration_modes={
+                mode: sum(
+                    component.exploration_mode.value == mode
+                    for component in snapshot.components
+                    if component.state.value == "active"
+                )
+                for mode in ("focused", "wall_follow", "sweep")
+            },
+            focused_endgame=snapshot.focused_endgame,
+        )
+        for transition in reconcile.transitions:
+            self.runtime_trace.record(
+                "rover_frontier_lineage_changed",
                 sim_time=self.simulation_time(),
                 revision=reconcile.revision,
-                elapsed_ms=reconcile.elapsed_ms,
-                rover_slam_version=rover_slam.version,
-                active_component_ids=reconcile.active_component_ids,
-                active_component_count=len(reconcile.active_component_ids),
-                ready_work_unit_ids=reconcile.ready_work_unit_ids,
-                ready_work_unit_count=len(reconcile.ready_work_unit_ids),
-                dormant_component_count=sum(
-                    component.state.value == "dormant"
-                    for component in snapshot.components
-                ),
-                resolved_component_count=sum(
-                    component.state.value == "resolved"
-                    for component in snapshot.components
-                ),
-                exploration_modes={
-                    mode: sum(
-                        component.exploration_mode.value == mode
-                        for component in snapshot.components
-                        if component.state.value == "active"
-                    )
-                    for mode in ("focused", "wall_follow", "sweep")
-                },
-                focused_endgame=coordination_snapshot.focused_endgame,
+                transition_kind=transition.kind.value,
+                parent_ids=transition.parent_ids,
+                child_ids=transition.child_ids,
+                evidence=transition.evidence,
             )
-            for transition in reconcile.transitions:
-                self.runtime_trace.record(
-                    "rover_frontier_lineage_changed",
-                    sim_time=self.simulation_time(),
-                    revision=reconcile.revision,
-                    transition_kind=transition.kind.value,
-                    parent_ids=transition.parent_ids,
-                    child_ids=transition.child_ids,
-                    evidence=transition.evidence,
-                )
-        return result
 
     def _process_exploration_check_ins(self) -> None:
         """Drain queued component reports without involving drone workers."""
@@ -2397,6 +2477,7 @@ class MissionControl(MissionControlLifecycleMixin):
                 if not self.pause_checkpoint():
                     break
                 if rover_id == 0:
+                    self._poll_highway()
                     self._process_exploration_check_ins()
                     with self._exploration_check_in_lock:
                         self.rovers[rover_id].move()
@@ -2409,6 +2490,7 @@ class MissionControl(MissionControlLifecycleMixin):
                         tuple(self.rovers[rover_id].pos)
                     )
                     self.terrain_sharing.share_with_rovers()
+                    self._refresh_rover_knowledge_if_changed()
                 if not self.wait_simulation_delay(self.delay):
                     break
         finally:

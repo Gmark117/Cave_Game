@@ -212,12 +212,13 @@ class HighwayConfig:
 
     mode: str = "off"
     macro_cell_size: int = 32
-    minimum_version_delta: int = 4
+    minimum_version_delta: int = 1  # Legacy key; live refresh follows every version.
     maximum_build_ms: float = 250.0
     maximum_query_ms: float = 50.0
     maximum_connector_expansions: int = 4096
     minimum_route_sensor_ranges: float = 2.0
     maximum_route_circuity: float = 3.0
+    maximum_access_distance_sensor_ranges: float = 2.0
 
     def __post_init__(self) -> None:
         mode = str(self.mode).casefold()
@@ -237,6 +238,8 @@ class HighwayConfig:
             raise ValueError("highway budgets must be non-negative")
         if self.maximum_route_circuity < 1.0:
             raise ValueError("highway maximum route circuity must be at least one")
+        if not 0.0 < self.maximum_access_distance_sensor_ranges < float("inf"):
+            raise ValueError("highway access distance must be positive and finite")
         object.__setattr__(self, "mode", mode)
 
 

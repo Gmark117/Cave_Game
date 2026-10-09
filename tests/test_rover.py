@@ -108,6 +108,27 @@ class RoverTests(unittest.TestCase):
         self.assertEqual(self.rover.status, "Rendezvous")
         self.rover_targets.acquire.assert_not_called()
 
+    def test_departure_evidence_is_recorded_on_first_movement_only(self):
+        departed = Mock(return_value=True)
+        self.rover.navigation = replace(self.rover.navigation, rendezvous_departed=departed)
+        self.rover.move()
+        self.rover.move()
+        departed.assert_not_called()
+        self.rover.move()
+        departed.assert_called_once_with((2, 0))
+        self.assertEqual(self.rover.pos, (1, 0))
+        self.rover.move()
+        departed.assert_called_once_with((2, 0))
+
+    def test_departure_commit_failure_keeps_authorized_path_stationary(self):
+        self.rover.navigation = replace(self.rover.navigation,
+                                        rendezvous_departed=lambda _position: False)
+        self.rover.move()
+        self.rover.move()
+        self.rover.move()
+        self.assertEqual(self.rover.pos, (0, 0))
+        self.assertEqual(self.rover.current_path, [(1, 0), (2, 0)])
+
     def test_report_stop_pauses_an_authorized_route_without_losing_it(
         self,
     ) -> None:

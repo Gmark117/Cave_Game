@@ -132,10 +132,13 @@ class PresentationAdapterTests(unittest.TestCase):
     def test_path_and_vision_actions_are_applied_by_adapter(self) -> None:
         adapter = PresentationAdapter(10, 10)
         drones = make_drones()
+        rovers = [SimpleNamespace(show_highway=True)]
         control_center = SimpleNamespace(
             handle_click=Mock(side_effect=[
                 ("drone_path", 1),
                 ("drone_vision", 1),
+                ("rover_highway", 0),
+                ("rover_highway", 0),
             ]),
         )
 
@@ -146,6 +149,13 @@ class PresentationAdapterTests(unittest.TestCase):
         drones[1].toggle_vision.assert_called_once_with()
         self.assertFalse(drones[1].show_path)
         self.assertFalse(drones[1].show_vision)
+        adapter.handle_click((1, 1), control_center, drones, rovers)
+        self.assertFalse(rovers[0].show_highway)
+        adapter.handle_click((1, 1), control_center, drones, rovers)
+        self.assertTrue(rovers[0].show_highway)
+        adapter.handle_control_action(("rover_highway", 99), drones, rovers)
+        adapter.handle_control_action(("rover_highway", -1), drones, rovers)
+        self.assertTrue(rovers[0].show_highway)
 
     def test_selected_rover_shows_its_map_and_clears_drone_selection(self) -> None:
         adapter = PresentationAdapter(10, 10)

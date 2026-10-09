@@ -49,7 +49,7 @@ class RendezvousProtocolTests(unittest.TestCase):
         protocol.drone_rover_contact(0)
         protocol.drone_drone_contact(0, 1)
 
-        self.assertEqual(protocol.drone_endpoint(1), (0, 0))
+        self.assertEqual(protocol.drone_endpoint(1), (10, 0))
         self.assertEqual(
             protocol.snapshot().drone_confirmed_endpoints[1].position,
             (10, 0),
@@ -95,6 +95,28 @@ class RendezvousProtocolTests(unittest.TestCase):
         self.assertGreater(second.epoch, first.epoch)
         self.assertFalse(protocol.can_depart((3, 3)))
         self.assertFalse(protocol.can_depart((4, 4)))
+
+    def test_departure_evidence_requires_ack_and_physical_carrier(self):
+        protocol = RendezvousProtocol(2, (0, 0))
+        protocol.propose((10, 0))
+        protocol.drone_rover_contact(0)
+        self.assertFalse(protocol.rover_departed((10, 0)))
+        protocol.drone_rover_contact(1)
+        self.assertTrue(protocol.rover_departed((10, 0)))
+        self.assertEqual(protocol.drone_endpoint(0), (0, 0))
+        self.assertEqual(protocol.drone_endpoint(1), (0, 0))
+        protocol.drone_rover_contact(0)
+        self.assertEqual(protocol.drone_endpoint(0), (10, 0))
+        self.assertEqual(protocol.drone_endpoint(1), (0, 0))
+        protocol.drone_drone_contact(0, 1)
+        self.assertEqual(protocol.drone_endpoint(1), (10, 0))
+        self.assertEqual(protocol.snapshot().drone_confirmed_endpoints[1].position, (0, 0))
+        self.assertTrue(protocol.rover_arrived((10, 0)))
+        protocol.propose((20, 0))
+        protocol.drone_rover_contact(1)
+        protocol.drone_drone_contact(0, 1)
+        self.assertEqual(protocol.drone_endpoint(0), (10, 0))
+        self.assertFalse(protocol.can_depart((20, 0)))
 
 
 if __name__ == "__main__":

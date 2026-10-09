@@ -49,6 +49,21 @@ encounter checks at every step, then falls back to segmented A* or the existing
 breadcrumb if the advice cannot complete. Other route classes do not use the
 highway in this rollout.
 
+`navigation/highway_backbone.py` computes a medial-axis corridor network from
+the rover's confidently free cells. Terminal-spur pruning preserves links
+between junctions and cycles; bounded geodesic access coverage supplies optional
+capillaries. The access-distance setting uses drone LiDAR ranges and defaults
+to 2.0. A precomputed cardinal predecessor field attaches arbitrary poses to
+branch interiors; nearby visible branches provide additional entry/exit
+candidates. Dijkstra includes connector costs, and validated straightening
+removes bends before the exact returned path is costed. Those same costs feed
+Focused Frontier Batching. The tiled builder remains available only for
+offline comparison. Failed or over-budget attempts publish no partial graph;
+the previous complete immutable snapshot remains available. Large maps use a
+conservative reduced skeleton only if every free component and hole survives.
+Narrow bridges and small loops force finer resolution. Lifted chords and the
+geodesic access field use the original SLAM pixels, with the same 250 ms budget.
+
 The main thread handles events, sensing, mission status, and rendering. Each
 drone has a worker for directive execution and nearby field exchange. Each
 rover has a separate movement worker; the primary rover worker drains queued
@@ -56,15 +71,54 @@ component check-ins and performs periodic rover exchange so reconciliation and
 map merges cannot block the display loop.
 Cave generation and drone A* use process-based workers.
 
-`HighwayService` is separate navigation advice. At a verified rover check-in,
-the rover may rebuild a complete macro-area graph from its detached local SLAM
-snapshot. Builds are version-debounced and bounded; an incomplete build is
-discarded while the last complete immutable snapshot remains available. Patch D
+`HighwayService` is separate navigation advice. The primary rover worker submits
+each newly received SLAM version after physical sharing or check-in. A single
+low-priority process performs complete whole-map rebuilds, with only one job
+running, at least two wall-clock seconds between submissions, and newer inputs
+coalesced. A completed graph replaces the previous graph atomically. There are
+no regional graphs or seam links. The yellow
+frontier registry reconciles immediately from the submitted snapshot without
+scheduling work or acknowledging reports; live claims retain their lineage
+blockers. It can therefore lead the overlay while a build is pending.
+The legacy `minimum_version_delta` setting remains readable but no longer skips
+versions. Unchanged free geometry can reuse a graph with a newer version. Free
+additions allow publication of the coherent older input while the next update
+is queued; a correction removing any input free cell discards that result.
+Unchanged free geometry triggers no periodic rebuild. Jobs retain the 250 ms
+build budget. When reduction cannot preserve fine topology, large supported
+inputs use native thinning at original resolution. One prepared whole-map
+skeleton can survive a failed attempt and be reused only for identical free
+geometry, origin, and settings; no partial graph is published. This lets access
+field construction finish in one retry of that input before taking the latest
+queued additions. A correction removing input free cells cancels the retry.
+Incomplete builds keep the last complete immutable snapshot. Patch D
 uses bounded graph queries for batch economics. Its wall-clock planning budget
 also covers cache hits and a radius-padded lease-preview raster, with reserved
 finalization time and singular fallback before authority is mutated. A drone
 receives a snapshot only in the physical coordination result and never reads
 rover graph state remotely.
+
+For an eligible active highway return, `navigation/return_route.py` compares
+against a strictly shorter alternative using only the drone's confidently free
+SLAM. It first checks a safe direct path, then an existing complete cached path
+with every segment revalidated, then bounded A*. Highway query and comparison
+share the 50 ms allowance; search is also capped at 4,096 expansions. An
+incomplete comparison retains highway advice, and observe mode keeps its
+existing motion. `drone_return_route_compared` records both costs and the chosen
+source; a planned saving does not prove an actual mission saving.
+
+`navigation/local_slam_routes.py` bounds the drone-side batch route searches
+that formerly repeated full-grid Python Dijkstra for each tour permutation.
+Member selection, successor ranking, and provisional economics share a 250 ms
+decision deadline and 128-query limit. Individual A* queries are capped at 50 ms
+and 4,096 expansions. A versioned cache shares complete routes and their
+reversals; changed local SLAM invalidates it. Only complete costs justify local
+economic decisions. If optimization is incomplete, member selection retains
+the rover's tour order. Claimed transit can follow safe partial progress using
+the existing segmented-route retry policy. A planning budget miss is reported
+as such rather than proof of unreachability. New
+`drone_local_route_planning_completed` events expose time, query/cache counts,
+and budget status.
 
 ## Startup and Shutdown
 
@@ -320,6 +374,14 @@ The mission-wide terrain store remains telemetry/UI state, not a drone
 decision source. Sharing is the explicit path by which one drone's local
 knowledge reaches another.
 
+The first meaningful exchange in a continuous peer or rover contact starts a
+0.75-second simulation-time movement pause. Later exchanges still deliver map
+deltas and contact ACKs but do not restart the pause. Contact loss rearms it,
+including departures observed between periodic passes by a movement checkpoint.
+Overlapping exchanges share the current deadline. `drone_sharing_pause_started`
+records each actual pause and its duration; `mission_constructed` identifies
+the policy as `once_per_continuous_contact_non_extending`.
+
 ### Rover discovery and component coordination
 
 The primary rover owns the authoritative accumulated `SlamMap` and a
@@ -469,16 +531,21 @@ routes; service distance, terrain asperity, and wall clearance rank staging.
 Each new endpoint is immutable until reached. Endpoint announcements and
 acknowledgements move only on verified drone-drone or drone-rover contact, and
 the rover cannot depart until all drone acknowledgements have reached it.
-Drones distinguish a known proposal from rover-confirmed endpoint knowledge
-carried by physical contact or peer relay. A returning drone that physically
+Drones distinguish proposals from contact-carried confirmed stops and actual
+departure commitments. Universal ACK permits movement but does not broadcast a
+new target. The rover records departure on its first movement step; a later
+physical contact can carry that evidence to a drone and then to a peer. Newer
+departure or arrival evidence advances the recipient's target immediately. A
+return in progress stops at its next contact checkpoint and replans while
+retaining its report or execution. A returning drone that physically
 meets the rover reserves a stop, ends its return route, and queues its report
 at that encounter. The queued check-in atomically docks the drone, after which
 the rover may resume its retained route and carry it while the report is
 processed. An empty-handed check-in uses the same physical predicate at its
 current pose and after every route step, so meeting the rover ends that route
-and docks immediately. An undocked drone still returns to its selected endpoint;
-if that endpoint is physically empty, it falls forward to the freshest
-rover-confirmed stop before trying a newer proposal. Dock sessions emit one
+and docks immediately. Without stronger evidence an undocked drone returns to
+its selected endpoint; finding that endpoint physically empty permits the
+existing proposal fallback. Dock sessions emit one
 acquisition event and one release summary with carried distance, path, duration,
 learned endpoint epochs, and release directive. The trace analyzer separately
 reports docking, late-run display coverage,

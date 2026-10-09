@@ -1,9 +1,9 @@
 """Versioned rover-SLAM highway graphs and bounded route queries.
 
 The highway is navigation advice derived only from a detached rover SLAM
-snapshot.  It never owns exploration work.  A snapshot partitions each coarse
-tile into distinct confidently-free regions, connects neighboring regions at
-safe boundary portals, and stores exact local polylines for every graph edge.
+snapshot. It never owns exploration work. Corridor snapshots contain a sparse
+branching backbone and exact, locally validated polylines. The tiled builder
+is retained for offline comparisons and historical snapshot compatibility.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Iterable
+from types import MappingProxyType
+from typing import Mapping
 
 import cv2
 import numpy as np
@@ -77,6 +79,17 @@ class HighwayBuildResult:
     edge_count: int = 0
     known_free_cells: int = 0
     connector_expansions: int = 0
+    source_version: int | None = None
+    build_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class HighwaySegment:
+    """One undirected backbone branch, including its intermediate pixels."""
+
+    source: int
+    target: int
+    path: tuple[Position, ...]
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,17 @@ class HighwayGraphSnapshot:
     adjacency: tuple[tuple[HighwayEdge, ...], ...]
     known_free_cells: int
     build_elapsed_ms: float
+    access_predecessors: np.ndarray | None = None
+    segments: tuple[HighwaySegment, ...] = ()
+    network_locations: Mapping[Position, tuple[int, int]] | None = None
+    network_nodes: Mapping[Position, int] | None = None
+    maximum_access_distance: float = 0.0
+    measured_access_distance: float = 0.0
+    component_count: int = 0
+    pruned_branches: int = 0
+    capillary_branches: int = 0
+    skeleton_scale: int = 1
+    skeleton_method: str = "medial_axis"
 
     def __post_init__(self) -> None:
         labels = np.asarray(self.area_labels, dtype=np.int32)
@@ -104,6 +128,23 @@ class HighwayGraphSnapshot:
             labels = labels.copy()
             labels.setflags(write=False)
             object.__setattr__(self, "area_labels", labels)
+        if self.access_predecessors is not None:
+            predecessors = np.asarray(self.access_predecessors, dtype=np.int8)
+            if predecessors.shape != labels.shape:
+                raise ValueError("highway access field must match its SLAM window")
+            if predecessors.flags.writeable:
+                predecessors = predecessors.copy()
+                predecessors.setflags(write=False)
+            object.__setattr__(self, "access_predecessors", predecessors)
+        for name in ("network_locations", "network_nodes"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name) or {})))
+
+    def __reduce__(self):
+        # MappingProxyType is deliberately immutable but is not picklable.
+        values = [dict(getattr(self, field.name)) if field.name in
+                  {"network_locations", "network_nodes"} else getattr(self, field.name)
+                  for field in fields(self)]
+        return (type(self), tuple(values))
 
     @property
     def area_count(self) -> int:
@@ -123,6 +164,13 @@ class HighwayGraphSnapshot:
         required_version: int | None = None,
     ) -> HighwayRoute:
         """Return a bounded exact-polyline route through this snapshot."""
+        if self.access_predecessors is not None:
+            from navigation.highway_backbone import route_backbone
+            return route_backbone(
+                self, start, goal, maximum_query_ms=maximum_query_ms,
+                maximum_connector_expansions=maximum_connector_expansions,
+                required_version=required_version,
+            )
         started = time.perf_counter()
         if required_version is not None and self.version != int(required_version):
             return HighwayRoute(
@@ -329,6 +377,26 @@ def build_highway_graph(
     macro_cell_size: int,
     maximum_build_ms: float,
     maximum_connector_expansions: int,
+    maximum_access_distance: float = 80.0,
+    preparation_cache=None,
+) -> HighwayBuildResult:
+    """Build bounded corridor advice; the old tile size remains readable."""
+    from navigation.highway_backbone import build_backbone
+    return build_backbone(
+        slam, confidence_threshold=confidence_threshold,
+        macro_cell_size=macro_cell_size, maximum_build_ms=maximum_build_ms,
+        maximum_access_distance=maximum_access_distance,
+        preparation_cache=preparation_cache,
+    )
+
+
+def build_tiled_highway_graph(
+    slam: SlamSnapshot,
+    *,
+    confidence_threshold: float,
+    macro_cell_size: int,
+    maximum_build_ms: float,
+    maximum_connector_expansions: int,
 ) -> HighwayBuildResult:
     """Build a complete immutable graph or discard the bounded attempt."""
     started = time.perf_counter()
@@ -494,6 +562,8 @@ class HighwayService:
         maximum_build_ms: float,
         maximum_query_ms: float,
         maximum_connector_expansions: int,
+        maximum_access_distance_sensor_ranges: float = 2.0,
+        sensor_range: float = 40.0,
     ) -> None:
         self.confidence_threshold = float(confidence_threshold)
         self.macro_cell_size = max(2, int(macro_cell_size))
@@ -503,13 +573,43 @@ class HighwayService:
             1,
             int(maximum_connector_expansions),
         )
+        self.maximum_access_distance_sensor_ranges = float(maximum_access_distance_sensor_ranges)
+        self.sensor_range = float(sensor_range)
         self._snapshot: HighwayGraphSnapshot | None = None
+        self._worker = None
+
+    def start(self) -> None:
+        """Enable nonblocking throttled full rebuilds for a running mission."""
+        if self._worker is None:
+            from navigation.highway_worker import HighwayWorker
+            self._worker = HighwayWorker(dict(
+                confidence_threshold=self.confidence_threshold,
+                macro_cell_size=self.macro_cell_size,
+                maximum_build_ms=self.maximum_build_ms,
+                maximum_access_distance=self.maximum_access_distance_sensor_ranges * self.sensor_range,
+            ))
+
+    def poll(self) -> HighwayBuildResult | None:
+        result = None if self._worker is None else self._worker.poll(self._snapshot)
+        if result is not None and result.snapshot is not None:
+            self._snapshot = result.snapshot
+        return result
+
+    def shutdown(self) -> None:
+        if self._worker is not None:
+            self._worker.shutdown()
+            self._worker = None
 
     @property
     def snapshot(self) -> HighwayGraphSnapshot | None:
         return self._snapshot
 
     def refresh(self, slam: SlamSnapshot) -> HighwayBuildResult:
+        if self._worker is not None:
+            result = self._worker.request(slam, self._snapshot)
+            if result.snapshot is not None:
+                self._snapshot = result.snapshot
+            return result
         current = self._snapshot
         if current is not None and current.version == int(slam.version):
             return HighwayBuildResult(
@@ -526,6 +626,9 @@ class HighwayService:
             macro_cell_size=self.macro_cell_size,
             maximum_build_ms=self.maximum_build_ms,
             maximum_connector_expansions=self.maximum_connector_expansions,
+            maximum_access_distance=(
+                self.maximum_access_distance_sensor_ranges * self.sensor_range
+            ),
         )
         if result.snapshot is not None:
             self._snapshot = result.snapshot
@@ -681,6 +784,7 @@ def _direct_labeled_path(
     goal: Position,
     *,
     area_id: int | None,
+    deadline: float = math.inf,
 ) -> tuple[Position, ...]:
     """Return an exact straight connector through authorized labeled cells."""
     x0, y0 = start
@@ -702,6 +806,8 @@ def _direct_labeled_path(
         )
 
     while True:
+        if len(points) % 64 == 0 and time.perf_counter() > deadline:
+            return ()
         point = (x0, y0)
         if not inside(point):
             return ()

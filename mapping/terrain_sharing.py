@@ -30,6 +30,8 @@ class TerrainSharingService:
         self.last_rover_share_time: float | None = None
         self._active_pairs: set[Tuple[int, int]] = set()
         self._physical_contact_pairs: set[Tuple[int, int]] = set()
+        self._peer_pause_pairs: set[Tuple[int, int]] = set()
+        self._rover_pause_pairs: set[Tuple[int, int]] = set()
         self._last_pair_versions: dict[
             Tuple[int, int], tuple[tuple[int, int], tuple[int, int]]
         ] = {}
@@ -224,6 +226,7 @@ class TerrainSharingService:
             return
         with self._cooldown_lock:
             self._rover_suppressed_drones.discard(drone_id)
+        self._clear_rover_pauses(drone_id)
 
         if not self._reserve_drone_schedule(drone_id, now):
             return
@@ -297,6 +300,7 @@ class TerrainSharingService:
         if self._at_any_rover(drone, drone_snapshot):
             self._clear_physical_contacts(drone_id)
             return
+        self._clear_rover_pauses(drone_id)
         now = self._simulation_time()
         for other_id, other_drone in enumerate(drones):
             if other_id == int(drone_id):
@@ -344,6 +348,7 @@ class TerrainSharingService:
             present = pair_key in self._physical_contact_pairs
             if not in_contact:
                 self._physical_contact_pairs.discard(pair_key)
+                self._peer_pause_pairs.discard(pair_key)
                 return False
             self._physical_contact_pairs.add(pair_key)
             return not present
@@ -355,6 +360,25 @@ class TerrainSharingService:
             self._physical_contact_pairs = {
                 pair for pair in self._physical_contact_pairs
                 if normalized_id not in pair
+            }
+            self._peer_pause_pairs = {
+                pair for pair in self._peer_pause_pairs
+                if normalized_id not in pair
+            }
+
+    def _clear_rover_pauses(
+        self,
+        drone_id: int,
+        rover_id: int | None = None,
+    ) -> None:
+        """Rearm a brief pause after observed separation from a rover."""
+        with self._cooldown_lock:
+            self._rover_pause_pairs = {
+                pair for pair in self._rover_pause_pairs
+                if not (
+                    pair[0] == int(drone_id)
+                    and (rover_id is None or pair[1] == int(rover_id))
+                )
             }
 
     def _exchange_visible_pair(
@@ -516,8 +540,8 @@ class TerrainSharingService:
         ):
             return False
 
-        # The exchange is normally faster than a rendered frame. Let both
-        # owners expose it briefly and skip translation during that interval.
+        # Pause once per encounter. Continued map delivery during the same
+        # contact must not keep extending a drone's movement hold.
         self._begin_visible_peer_exchange(
             drone,
             other_drone,
@@ -560,14 +584,19 @@ class TerrainSharingService:
         )
         return bool(changed or other_slam_changed or drone_slam_changed)
 
-    @staticmethod
     def _begin_visible_peer_exchange(
+        self,
         drone: Any,
         other_drone: Any,
         drone_snapshot: Any,
         other_snapshot: Any,
     ) -> None:
-        """Notify both movement owners that a meaningful exchange began."""
+        """Expose the first meaningful exchange in a continuous peer contact."""
+        pair_key = tuple(sorted((int(drone.id), int(other_drone.id))))
+        with self._cooldown_lock:
+            if pair_key in self._peer_pause_pairs:
+                return
+            self._peer_pause_pairs.add(pair_key)
         first_callback = getattr(
             getattr(drone, "movement_controller", None),
             "begin_peer_sharing",
@@ -698,8 +727,10 @@ class TerrainSharingService:
         distance = math.sqrt(dx * dx + dy * dy)
         proximity_threshold = min(rover.radius, drone.radius)
         if distance >= proximity_threshold:
+            self._clear_rover_pauses(int(drone.id), rover_id)
             return False
         if not self.has_line_of_sight(rover.pos, drone_snapshot.position):
+            self._clear_rover_pauses(int(drone.id), rover_id)
             self._trace(
                 trace_event,
                 drone_id=int(drone.id),
@@ -760,14 +791,19 @@ class TerrainSharingService:
         )
         return True
 
-    @staticmethod
     def _begin_visible_rover_exchange(
+        self,
         drone: Any,
         rover: Any,
         *,
         rover_id: int,
     ) -> None:
-        """Notify a drone that a meaningful physical rover exchange ran."""
+        """Expose the first meaningful exchange in a continuous rover contact."""
+        pair_key = (int(drone.id), int(rover_id))
+        with self._cooldown_lock:
+            if pair_key in self._rover_pause_pairs:
+                return
+            self._rover_pause_pairs.add(pair_key)
         callback = getattr(
             getattr(drone, "movement_controller", None),
             "begin_rover_sharing",

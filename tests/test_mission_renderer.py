@@ -94,6 +94,10 @@ class MissionRendererTests(unittest.TestCase):
                 "docked_drone_ids",
                 (),
             )),
+            highway_renderer=getattr(control, "highway_renderer", None),
+            get_highway_snapshot=lambda _rover_id: getattr(
+                control, "highway_snapshot", None,
+            ),
         )
 
     def test_draw_uses_stable_scene_layer_order(self) -> None:
@@ -170,6 +174,10 @@ class MissionRendererTests(unittest.TestCase):
         control.sector_renderer = SimpleNamespace(
             draw=lambda *args: events.append("sectors"),
         )
+        control.highway_snapshot = object()
+        control.highway_renderer = SimpleNamespace(
+            draw=Mock(side_effect=lambda *args: events.append("highways")),
+        )
         renderer = MissionRenderer(self.make_dependencies(control))
 
         renderer.draw()
@@ -180,6 +188,7 @@ class MissionRendererTests(unittest.TestCase):
                 "clear",
                 "slam",
                 "sectors",
+                "highways",
                 "drone_path",
                 "rover_path",
                 "drone_vision",
@@ -214,6 +223,13 @@ class MissionRendererTests(unittest.TestCase):
         self.assertFalse(control_center_values["music_enabled"])
         self.assertFalse(control_center_values["show_full_map"])
         self.assertTrue(control_center_values["exploration_complete"])
+        control.highway_renderer.draw.assert_called_once_with(
+            control.game.window, control.highway_snapshot,
+        )
+        rover.show_highway = False
+        control.highway_renderer.draw.reset_mock()
+        renderer.draw()
+        control.highway_renderer.draw.assert_not_called()
 
     def test_draw_omits_vision_overlay_for_docked_drone(self) -> None:
         events = []

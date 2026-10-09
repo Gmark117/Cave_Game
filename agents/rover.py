@@ -30,6 +30,7 @@ class RoverSnapshot:
     path_remaining: int
     show_path: bool
     heading_deg: float
+    show_highway: bool = True
 
 
 class Rover:
@@ -67,6 +68,7 @@ class Rover:
                 "rendezvous_arrived",
                 lambda _position: True,
             ),
+            rendezvous_departed=getattr(control, "rendezvous_departed", lambda _position: True),
         )
          
         self.id       = id # Unique identifier of the rover
@@ -86,9 +88,11 @@ class Rover:
         self.delay      = control.delay
 
         self.show_path    = True
+        self.show_highway = True
         self.speed_factor = 4
         self.current_path: List[Tuple[int, int]] = []
         self._announced_path: List[Tuple[int, int]] = []
+        self._departure_announced = False
         self.target: Optional[Tuple[int, int]] = None
          
         self.border    = []
@@ -124,6 +128,7 @@ class Rover:
             path_remaining=len(self.current_path),
             show_path=bool(self.show_path),
             heading_deg=float(self.heading_deg),
+            show_highway=bool(self.show_highway),
         )
 
     # Define the radius based on the map size
@@ -144,6 +149,11 @@ class Rover:
             self.status = 'Rendezvous'
             return
         if self.current_path:
+            if not self._departure_announced:
+                if not self.navigation.rendezvous_departed(self.target):
+                    self.status = 'Announcing'
+                    return
+                self._departure_announced = True
             self.status = 'Advancing'
             previous = self.pos
             self.pos = self.current_path.pop(0)
@@ -195,6 +205,7 @@ class Rover:
                 self.status = 'Ready'
                 return
             self.current_path = list(path)
+            self._departure_announced = False
             self._announced_path.clear()
             self.status = 'Advancing'
             self._trace(

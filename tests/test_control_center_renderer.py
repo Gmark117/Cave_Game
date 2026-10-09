@@ -176,7 +176,7 @@ class ControlCenterRendererTests(unittest.TestCase):
                             (rover_id, action)
                             for rover_id, action, _ in hit_map.rover_toggles
                         },
-                        {(0, "selected")},
+                        {(0, "highway"), (0, "selected")},
                     )
 
         self.assertTrue(

@@ -173,9 +173,10 @@ class ControlCenterController:
             if overlay_type == "selected":
                 return ("drone_heatmap", drone_id)
         for rover_id, overlay_type, rect in hit_map.rover_toggles:
-            if (
-                pygame.Rect(rect).collidepoint(mouse_pos)
-                and overlay_type == "selected"
-            ):
+            if not pygame.Rect(rect).collidepoint(mouse_pos):
+                continue
+            if overlay_type == "highway":
+                return ("rover_highway", rover_id)
+            if overlay_type == "selected":
                 return ("rover_heatmap", rover_id)
         return None

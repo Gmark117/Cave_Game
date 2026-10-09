@@ -44,7 +44,14 @@ class MissionRenderer:
                 {drone.id: drone.color for drone in drones},
             )
 
-        # Layer order: SLAM, sectors, historical paths, translucent vision
+        if dependencies.highway_renderer is not None:
+            for rover in rovers:
+                if getattr(rover, "show_highway", True):
+                    dependencies.highway_renderer.draw(
+                        window, dependencies.get_highway_snapshot(int(rover.id)),
+                    )
+
+        # Layer order: SLAM, sectors, highways, historical paths, translucent vision
         # cones, icons, then the control center.
         for drone, snapshot in zip(drones, drone_snapshots):
             drone.renderer.draw_path(snapshot)

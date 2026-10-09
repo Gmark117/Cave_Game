@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 import itertools
 import logging
 import math
@@ -12,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Tuple
 
 import numpy as np
+from navigation.local_slam_routes import LocalSlamRoutePlanner, bounded_local_planning
 
 from agents.component_explorer import (
     FrontierObservationPose,
@@ -564,6 +564,12 @@ class DroneMovementController:
             1.0, float(highway.maximum_route_circuity),
         )
         self._highway_snapshot: HighwayGraphSnapshot | None = None
+        self._last_complete_path: tuple[Position, ...] = ()
+        self._return_route_source = "highway"
+        self._local_slam_planner = LocalSlamRoutePlanner(
+            drone.slam_map, self.frontier_confidence_threshold, trace=self._trace,
+        )
+        self._last_local_route_status = "unavailable"
         coverage_started_at = self._simulation_time()
         initial_coverage_cell = self._coverage_cell(
             drone.snapshot().position
@@ -664,13 +670,19 @@ class DroneMovementController:
         ))
 
     def _begin_sharing(self, activity: DroneActivitySnapshot) -> None:
-        """Publish one physical exchange for a short visible dwell."""
-        deadline = self._simulation_time() + self._SHARING_SECONDS
+        """Give overlapping exchanges one bounded, non-extending pause."""
+        now = self._simulation_time()
         with self._activity_lock:
             self._sharing_activity = activity
-            self._sharing_until = max(
-                self._sharing_until,
-                deadline,
+            started = now >= self._sharing_until
+            if started:
+                self._sharing_until = now + self._SHARING_SECONDS
+        if started:
+            self._trace(
+                "drone_sharing_pause_started",
+                duration_seconds=self._SHARING_SECONDS,
+                peer_id=activity.peer_id,
+                rover_id=activity.rover_id,
             )
 
     def _active_transient_activity(self) -> DroneActivitySnapshot | None:
@@ -1487,6 +1499,7 @@ class DroneMovementController:
             waited_seconds=waited,
         )
 
+    @bounded_local_planning("batch_member_selection")
     def _start_next_batch_member(
         self,
         execution: _CoordinationExecution,
@@ -1510,13 +1523,16 @@ class DroneMovementController:
                 key = (cost, tuple(item.task.task_id for item in order), order)
                 if best is None or key[:2] < best[:2]:
                     best = key
-        if best is not None and math.isfinite(best[0]):
+        if (best is not None and math.isfinite(best[0])
+                and not self._local_slam_planner.active["budget_exhausted"]):
             member = best[2][0]
             route_cost = self._local_slam_distance(
                 current, member.task.preferred_entry,
             )
         else:
-            member = min(
+            # Retain the rover's admitted tour if bounded local optimization
+            # cannot finish. A budget miss does not establish unreachability.
+            member = pending[0] if self._local_slam_planner.active["budget_exhausted"] else min(
                 pending,
                 key=lambda item: (
                     self._local_slam_distance(
@@ -1529,7 +1545,7 @@ class DroneMovementController:
                 current, member.task.preferred_entry,
             )
         path = self._local_slam_path(
-            current, member.task.preferred_entry,
+            current, member.task.preferred_entry, allow_partial=True,
         )
         pending.remove(member)
         execution.batch_current_member = member
@@ -2187,6 +2203,7 @@ class DroneMovementController:
             ),
         ))
 
+    @bounded_local_planning("batch_successors")
     def _reachable_local_nodes(
         self,
         execution: _CoordinationExecution,
@@ -2374,6 +2391,7 @@ class DroneMovementController:
             < execution.directive.maximum_detour_distance
         )
 
+    @bounded_local_planning("batch_provisional_economics")
     def _batch_local_economics(
         self,
         execution: _CoordinationExecution,
@@ -2436,79 +2454,20 @@ class DroneMovementController:
         goal: Position,
     ) -> float:
         """Shortest confidently-free distance using only this drone's SLAM."""
-        return self._local_slam_route(start, goal)[0]
+        route = self._local_slam_planner.route(start, goal)
+        return route.cost if route.complete else math.inf
 
     def _local_slam_path(
         self,
         start: Position,
         goal: Position,
+        *,
+        allow_partial: bool = False,
     ) -> tuple[Position, ...]:
         """One exact confidently-free route using only this drone's SLAM."""
-        return self._local_slam_route(start, goal)[1]
-
-    def _local_slam_route(
-        self,
-        start: Position,
-        goal: Position,
-    ) -> tuple[float, tuple[Position, ...]]:
-        slam = self.drone.slam_map.snapshot(point_limit=0)
-        occupancy = np.asarray(slam.occupancy)
-        confidence = np.asarray(slam.confidence)
-        free = (
-            (occupancy == FREE)
-            & (confidence >= self.frontier_confidence_threshold)
-        )
-        offset_x, offset_y = (int(value) for value in slam.origin)
-        start_local = (start[0] - offset_x, start[1] - offset_y)
-        goal_local = (goal[0] - offset_x, goal[1] - offset_y)
-        height, width = free.shape
-        if not all(
-            0 <= x < width and 0 <= y < height and free[y, x]
-            for x, y in (start_local, goal_local)
-        ):
-            return math.inf, ()
-        queue: list[tuple[float, int, int]] = [(0.0, *start_local)]
-        best = {start_local: 0.0}
-        parents: dict[Position, Position] = {}
-        neighbors = (
-            (-1, -1, math.sqrt(2.0)), (0, -1, 1.0),
-            (1, -1, math.sqrt(2.0)), (-1, 0, 1.0),
-            (1, 0, 1.0), (-1, 1, math.sqrt(2.0)),
-            (0, 1, 1.0), (1, 1, math.sqrt(2.0)),
-        )
-        while queue:
-            cost, x, y = heapq.heappop(queue)
-            if cost > best.get((x, y), math.inf) + 1e-9:
-                continue
-            if (x, y) == goal_local:
-                path = [(x, y)]
-                while path[-1] != start_local:
-                    path.append(parents[path[-1]])
-                return cost, tuple(
-                    (local_x + offset_x, local_y + offset_y)
-                    for local_x, local_y in reversed(path)
-                )
-            for dx, dy, step in neighbors:
-                next_x, next_y = x + dx, y + dy
-                if not (
-                    0 <= next_x < width
-                    and 0 <= next_y < height
-                    and free[next_y, next_x]
-                ):
-                    continue
-                if (
-                    dx != 0
-                    and dy != 0
-                    and (not free[y, next_x] or not free[next_y, x])
-                ):
-                    continue
-                next_cost = cost + step
-                if next_cost + 1e-9 >= best.get((next_x, next_y), math.inf):
-                    continue
-                best[(next_x, next_y)] = next_cost
-                parents[(next_x, next_y)] = (x, y)
-                heapq.heappush(queue, (next_cost, next_x, next_y))
-        return math.inf, ()
+        route = self._local_slam_planner.route(start, goal)
+        self._last_local_route_status = route.status
+        return route.path if route.complete or (allow_partial and route.status == PATH_PARTIAL_LIMIT) else ()
 
     def _thin_local_successor(
         self,
@@ -2863,10 +2822,12 @@ class DroneMovementController:
             return interrupted_by_share
 
         if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
-            local_path = self._local_slam_path(current, target)
+            local_path = self._local_slam_path(current, target, allow_partial=True)
             result = PathResult(
                 local_path,
-                PATH_COMPLETE if local_path else PATH_UNREACHABLE,
+                (PATH_COMPLETE if local_path and local_path[-1] == target else
+                 PATH_PARTIAL_LIMIT if local_path or self._last_local_route_status == "budget_exhausted"
+                 else PATH_UNREACHABLE),
                 0,
                 0.0 if local_path else math.inf,
             )
@@ -3029,7 +2990,8 @@ class DroneMovementController:
             return
         self._prepare_execution_return(
             execution,
-            reason="dfs_reposition_unreachable",
+            reason=("route_planning_budget" if result.status == PATH_PARTIAL_LIMIT
+                    else "dfs_reposition_unreachable"),
         )
 
     def _component_reposition_breadcrumb(
@@ -3118,11 +3080,14 @@ class DroneMovementController:
         path = tuple(preferred_route) if execution.route_attempts == 0 else ()
         if path and path[0] != current:
             path = ()
-        status = PATH_COMPLETE if path and path[-1] == target else None
+        status = (PATH_COMPLETE if path and path[-1] == target else
+                  PATH_PARTIAL_LIMIT if path else None)
         if not path:
             if execution.directive.kind == DirectiveKind.COMPONENT_BATCH:
-                path = self._local_slam_path(current, target)
-                status = PATH_COMPLETE if path else PATH_UNREACHABLE
+                path = self._local_slam_path(current, target, allow_partial=True)
+                status = (PATH_COMPLETE if path and path[-1] == target else
+                          PATH_PARTIAL_LIMIT if path or self._last_local_route_status == "budget_exhausted"
+                          else PATH_UNREACHABLE)
             else:
                 result = self._compute_path(current, target)
                 path = tuple(result.path)
@@ -3150,7 +3115,8 @@ class DroneMovementController:
                 )
                 self._prepare_execution_return(
                     execution,
-                    reason="route_unreachable",
+                    reason=("route_planning_budget" if status == PATH_PARTIAL_LIMIT
+                            else "route_unreachable"),
                 )
             return False
         effective_target = target
@@ -3231,7 +3197,9 @@ class DroneMovementController:
         if execution.route_attempts >= 8:
             self._prepare_execution_return(
                 execution,
-                reason="route_progress_limit",
+                reason=("route_planning_budget"
+                        if execution.directive.kind == DirectiveKind.COMPONENT_BATCH
+                        and status == PATH_PARTIAL_LIMIT else "route_progress_limit"),
             )
         return False
 
@@ -4204,6 +4172,7 @@ class DroneMovementController:
                 "route_progress_limit",
                 "dfs_reposition_unreachable",
                 "sensor_timeout",
+                "route_planning_budget",
             }
             if reason in member_failure_reasons:
                 execution.suspension_reason = str(reason)
@@ -4214,6 +4183,7 @@ class DroneMovementController:
                     disposition=(
                         "sensor_timeout"
                         if reason == "sensor_timeout"
+                        else "budget_exhausted" if reason == "route_planning_budget"
                         else "unreachable"
                     ),
                 )
@@ -4558,10 +4528,12 @@ class DroneMovementController:
         request_dock = self.dependencies.request_exploration_dock
         can_report = execution is not None or self._coordination_report is not None
         encountered = False
+        initial_endpoint = self._rendezvous_position()
+        retargeted = False
         dock_result: CoordinationResult | None = None
 
         def stop_for_coordination_contact() -> bool:
-            nonlocal dock_result, encountered
+            nonlocal dock_result, encountered, retargeted
             if can_report and callable(request_stop):
                 encountered = bool(request_stop(self.drone.id))
             elif dock_during_check_in and callable(request_dock):
@@ -4569,7 +4541,17 @@ class DroneMovementController:
                 if isinstance(candidate, CoordinationResult) and candidate.arrived:
                     dock_result = candidate
                     encountered = True
-            return encountered
+            if not encountered and initial_endpoint == target:
+                latest_endpoint = self._rendezvous_position()
+                if latest_endpoint is not None and latest_endpoint != target:
+                    retargeted = True
+                    self._trace("drone_component_rendezvous_retargeted",
+                                previous_endpoint=target, endpoint=latest_endpoint,
+                                reason="physical_movement_evidence")
+            return encountered or retargeted
+
+        def return_stop_reason():
+            return "rendezvous_updated" if retargeted else ("report" if can_report else "dock")
 
         def record_return(source: str) -> None:
             if execution is not None:
@@ -4578,11 +4560,13 @@ class DroneMovementController:
                 )
                 execution.return_path_source = source
 
-        if stop_for_coordination_contact():
+        if stop_for_coordination_contact() and not retargeted:
             record_return("rover_encounter")
             if dock_result is not None:
                 self._apply_coordination_result(dock_result)
             return True, True
+        if retargeted:
+            return False, False
         if current == target:
             return True, False
         highway_path = self._component_check_in_highway_route(
@@ -4592,21 +4576,23 @@ class DroneMovementController:
         if highway_path:
             followed = self._follow_path(
                 highway_path,
-                source="component_checkin_highway",
+                source=f"component_checkin_{self._return_route_source}",
                 stop_when=(
                     stop_for_coordination_contact
                     if can_report or dock_during_check_in
                     else None
                 ),
-                stop_reason="report" if can_report else "dock",
+                stop_reason=return_stop_reason,
             )
+            if retargeted:
+                return False, False
             if encountered:
                 record_return("rover_encounter")
                 if dock_result is not None:
                     self._apply_coordination_result(dock_result)
                 return True, True
             if followed and self.drone.snapshot().position == target:
-                record_return("highway")
+                record_return(self._return_route_source)
                 return True, False
             current = self.drone.snapshot().position
         result = self._compute_path(current, target)
@@ -4619,8 +4605,10 @@ class DroneMovementController:
                     if can_report or dock_during_check_in
                     else None
                 ),
-                stop_reason="report" if can_report else "dock",
+                stop_reason=return_stop_reason,
             )
+            if retargeted:
+                return False, False
             if encountered:
                 record_return("rover_encounter")
                 if dock_result is not None:
@@ -4641,8 +4629,10 @@ class DroneMovementController:
                     if can_report or dock_during_check_in
                     else None
                 ),
-                stop_reason="report" if can_report else "dock",
+                stop_reason=return_stop_reason,
             )
+            if retargeted:
+                return False, False
             if encountered:
                 record_return("rover_encounter")
                 if dock_result is not None:
@@ -4658,7 +4648,9 @@ class DroneMovementController:
         current: Position,
         target: Position,
     ) -> tuple[Position, ...]:
-        """Evaluate physically received highway advice for one return leg."""
+        """Compare physically received advice with a bounded local alternative."""
+        comparison_started = time.perf_counter()
+        self._return_route_source = "highway"
         if self.highway_mode == "off":
             return ()
         direct_distance = math.dist(current, target)
@@ -4715,6 +4707,33 @@ class DroneMovementController:
             and circuity <= self.highway_maximum_route_circuity + 1e-9
         )
         selected = eligible and self.highway_mode == "active"
+        chosen_path = route.path if selected else ()
+        shorter_local = False
+        if selected:
+            from navigation.return_route import local_return_alternative
+            alternative = local_return_alternative(
+                self.drone.slam_map.snapshot(point_limit=0), current, target,
+                confidence_threshold=self.frontier_confidence_threshold,
+                incumbent_cost=route_distance,
+                maximum_ms=max(0.0, self.highway_maximum_query_ms -
+                               (time.perf_counter() - comparison_started) * 1000),
+                maximum_expansions=self.highway_maximum_connector_expansions,
+                cached_path=self._last_complete_path,
+            )
+            shorter_local = alternative.complete
+            if shorter_local:
+                chosen_path = alternative.path
+                selected = False
+                self._return_route_source = "local"
+            self._trace(
+                "drone_return_route_compared", start=current, goal=target,
+                highway_version=snapshot.version, local_slam_version=alternative.snapshot_version,
+                highway_distance=route_distance,
+                local_distance=alternative.cost if alternative.complete else None,
+                comparison_status=alternative.status, selected_source=self._return_route_source,
+                elapsed_ms=(time.perf_counter() - comparison_started) * 1000,
+                expanded_nodes=alternative.expanded_nodes,
+            )
         if not route.complete:
             fallback_reason = route.status
         elif not endpoints_valid:
@@ -4723,6 +4742,8 @@ class DroneMovementController:
             fallback_reason = "locally_known_occupied"
         elif circuity > self.highway_maximum_route_circuity + 1e-9:
             fallback_reason = "circuity_limit"
+        elif shorter_local:
+            fallback_reason = "shorter_local_route"
         elif self.highway_mode == "observe":
             fallback_reason = "observe_only"
         else:
@@ -4743,7 +4764,7 @@ class DroneMovementController:
             expanded_nodes=route.expanded_nodes,
             graph_edges=route.graph_edges,
         )
-        return route.path if selected else ()
+        return chosen_path
 
     def _highway_path_locally_valid(
         self,
@@ -8112,6 +8133,8 @@ class DroneMovementController:
                     else math.dist(path[-1] if path else start, goal)
                 )
                 path_result = PathResult(path, status, 0, remaining)
+            if path_result.status == PATH_COMPLETE:
+                self._last_complete_path = tuple(path_result.path)
             return path_result
         finally:
             self._trace(
@@ -8230,7 +8253,7 @@ class DroneMovementController:
         *,
         source: str = "path",
         stop_when: Callable[[], bool] | None = None,
-        stop_reason: str | None = None,
+        stop_reason: str | Callable[[], str] | None = None,
         incidental_transit: bool = False,
         path_target: Position | None = None,
         path_status: str | None = None,
@@ -8331,14 +8354,15 @@ class DroneMovementController:
             moved_points,
         )
         self._stagnation_distance_travelled += travelled_distance
+        actual_stop_reason = stop_reason() if callable(stop_reason) else stop_reason
         self._trace(
             "drone_motion",
             source=source,
             completed=completed,
             stopped_for_report=(
-                stopped_for_contact and stop_reason in {None, "report"}
+                stopped_for_contact and actual_stop_reason in {None, "report"}
             ),
-            stop_reason=stop_reason if stopped_for_contact else None,
+            stop_reason=actual_stop_reason if stopped_for_contact else None,
             start=start,
             end=end,
             point_count=moved_points,

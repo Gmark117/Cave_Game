@@ -116,13 +116,16 @@ class ControlCenterViewModelTests(unittest.TestCase):
 
         rover.battery = 1800
         rover.status = "Updating"
+        rover.show_highway = False
         updated = build_rover_status_views([rover])
 
         self.assertEqual(initial[0].name, "Huey")
         self.assertEqual(initial[0].battery, 2400)
         self.assertEqual(initial[0].status, "Ready")
+        self.assertTrue(initial[0].show_highway)
         self.assertEqual(updated[0].battery, 1800)
         self.assertEqual(updated[0].status, "Updating")
+        self.assertFalse(updated[0].show_highway)
 
         rover.status = "Advancing"
         moving = build_rover_status_views([rover])

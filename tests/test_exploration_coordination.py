@@ -598,6 +598,26 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
         )
         split_slam = split_line_slam()
 
+        # Proximity data may arrive before the parent's physical report.
+        before = coordinator.snapshot()
+        refreshed = coordinator.refresh_rover_knowledge(split_slam)
+        self.assertIsNotNone(refreshed)
+        observed = coordinator.published_snapshot()
+        self.assertGreater(observed.revision, before.revision)
+        self.assertEqual(observed.claims, before.claims)
+        self.assertEqual(observed.waiting_drone_ids, before.waiting_drone_ids)
+        self.assertFalse(observed.mission_exhausted)
+        children = {
+            component.component_id for component in observed.components
+            if first.task.component_id in component.parent_ids
+        }
+        self.assertTrue(children)
+        self.assertTrue(all(
+            unit.state == WorkUnitState.BLOCKED
+            for unit in observed.work_units if unit.component_id in children
+        ))
+        self.assertIsNone(coordinator.refresh_rover_knowledge(split_slam))
+
         coordinator.check_in(
             0,
             split_slam,
@@ -628,6 +648,30 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
             for task in released_snapshot.tasks
             if task.component_id in child_ids
         ))
+
+    def test_rover_knowledge_refresh_cannot_finish_mission_or_deliver_ack(self):
+        coordinator = self.coordinator(drones=1)
+        initial = slam_with_line()
+        self.assertIsNone(coordinator.refresh_rover_knowledge(initial))
+        scans = self._start_initial_round(coordinator, initial)
+        self._finish_round(coordinator, scans, initial)
+        directive = coordinator.claim_directive(0).directive
+        before = coordinator.snapshot()
+        coordinator.refresh_rover_knowledge(known_free_slam(version=2))
+        observed = coordinator.published_snapshot()
+        self.assertEqual(observed.claims, before.claims)
+        self.assertEqual(observed.waiting_drone_ids, before.waiting_drone_ids)
+        self.assertFalse(observed.mission_exhausted)
+        self.assertIsNone(coordinator.claim_directive(0).directive)
+        report = CoordinationReport(
+            report_id=700, directive_id=directive.directive_id, kind=directive.kind,
+            task_id=directive.task.task_id, component_id=directive.task.component_id,
+            claim_token=directive.claim.token,
+        )
+        result = coordinator.check_in(0, known_free_slam(version=2), report=report)
+        self.assertTrue(result.report_accepted)
+        self.assertTrue(coordinator.snapshot().mission_exhausted)
+        self.assertEqual(coordinator.claim_directive(0).directive.kind, DirectiveKind.HOME)
 
     def test_assignment_prefers_deeper_continuation_before_route_cost(self) -> None:
         coordinator = self.coordinator(drones=1)
@@ -1091,6 +1135,33 @@ class FrontierTaskCoordinatorTests(unittest.TestCase):
         self.assertTrue(replayed.report_replayed)
         self.assertIs(coordinator._active_directives[0], newer_active)
         self.assertEqual(coordinator.registry.revision, revision)
+
+    def test_proximity_refresh_preserves_batch_claims_and_lease_until_report(self):
+        coordinator = self.coordinator(
+            drones=1, focused_frontier_batch_mode="active",
+            focused_frontier_batch_maximum_detour_sensor_ranges=100.0,
+            focused_frontier_batch_minimum_avoided_round_trip_sensor_ranges=0.0,
+        )
+        self._install_focused_tasks(coordinator, ((20, 16), (24, 16)))
+        coordinator._schedule(known_free_slam())
+        directive = coordinator.claim_directive(0).directive
+        before = coordinator.snapshot()
+        self.assertEqual(len(before.claims), 2)
+        self.assertEqual(len(before.spatial_leases), 1)
+        self.assertIsNotNone(coordinator.refresh_rover_knowledge(known_free_slam(version=2)))
+        observed = coordinator.published_snapshot()
+        self.assertEqual(observed.claims, before.claims)
+        self.assertEqual(observed.spatial_leases, before.spatial_leases)
+        self.assertFalse(observed.mission_exhausted)
+        self.assertIsNone(coordinator.claim_directive(0).directive)
+        report = self._complete_batch_report(directive, report_id=702)
+        accepted = coordinator.check_in(0, known_free_slam(version=2), report=report)
+        self.assertTrue(accepted.report_accepted)
+        self.assertFalse(coordinator.snapshot().claims)
+        self.assertFalse(coordinator.snapshot().spatial_leases)
+        replay = coordinator.check_in(0, known_free_slam(version=2), report=report)
+        self.assertTrue(replay.report_accepted)
+        self.assertTrue(replay.report_replayed)
 
 
 if __name__ == "__main__":

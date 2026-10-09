@@ -3410,6 +3410,10 @@ def _highway_summary_lines(
         event for event in events
         if event.get("event") == "drone_highway_route_evaluated"
     )
+    comparisons = tuple(event for event in events
+                        if event.get("event") == "drone_return_route_compared")
+    local_planning = tuple(event for event in events
+                           if event.get("event") == "drone_local_route_planning_completed")
     path_requests = tuple(
         event for event in events
         if event.get("event") == "drone_path_request_completed"
@@ -3418,7 +3422,7 @@ def _highway_summary_lines(
         event for event in events
         if event.get("event") == "rover_focused_frontier_batch_planning_completed"
     )
-    if not (builds or snapshots or routes or path_requests or planning):
+    if not (builds or snapshots or routes or comparisons or path_requests or planning or local_planning):
         return []
 
     def timings(source: Iterable[Mapping[str, Any]]) -> list[float]:
@@ -3446,6 +3450,26 @@ def _highway_summary_lines(
             "retained_previous="
             f"{sum(_boolean(event.get('retained_previous')) is True for event in builds)}"
         )
+        if latest.get("topology") == "corridor_backbone":
+            lines.append(
+                "  corridor backbone: "
+                f"nodes={latest.get('area_count', 0)} "
+                f"components={latest.get('component_count', 0)} "
+                f"pruned={latest.get('pruned_branches', 0)} "
+                f"capillaries={latest.get('capillary_branches', 0)} "
+                f"access={latest.get('measured_access_distance')}/"
+                f"{latest.get('maximum_access_distance')}px"
+            )
+        background = [event for event in builds if event.get("build_kind") in {"regional", "full"}]
+        if background:
+            completed = [event for event in background if event.get("status") == "complete"]
+            lines.append(
+                "  background updates: "
+                f"jobs={len(background)} kinds={dict(sorted(Counter(str(event.get('build_kind')) for event in background).items()))} "
+                f"superseded={sum(event.get('status') == 'superseded' for event in background)} "
+                f"rebuilt_regions={sum(int(event.get('rebuilt_regions', 0) or 0) for event in completed)} "
+                f"reused_regions={sum(int(event.get('reused_regions', 0) or 0) for event in completed)}"
+            )
     if snapshots:
         lines.append(
             "  physical publications: "
@@ -3476,6 +3500,41 @@ def _highway_summary_lines(
             f"query_max={_format_optional(max(elapsed, default=None), 'ms')} "
             f"route_mean={_format_optional(statistics.mean(finite_costs) if finite_costs else None, 'px')} "
             f"circuity_mean={_format_optional(statistics.mean(finite_circuity) if finite_circuity else None)}"
+        )
+    if comparisons:
+        elapsed = timings(comparisons)
+        savings = sum(
+            max(0, (_finite_float(event.get("highway_distance")) or 0) -
+                (_finite_float(event.get("local_distance")) or 0))
+            for event in comparisons if event.get("selected_source") == "local"
+        )
+        lines.append(
+            "  local return comparisons: "
+            f"count={len(comparisons)} "
+            f"selected={dict(sorted(Counter(str(event.get('selected_source')) for event in comparisons).items()))} "
+            f"statuses={dict(sorted(Counter(str(event.get('comparison_status')) for event in comparisons).items()))} "
+            f"planned_savings={savings:.2f}px "
+            f"total={sum(elapsed):.2f}ms max={_format_optional(max(elapsed, default=None), 'ms')}"
+        )
+    promotions = [event for event in events if event.get("event") == "drone_rendezvous_target_promoted"]
+    retargets = [event for event in events if event.get("event") == "drone_component_rendezvous_retargeted"
+                and event.get("reason") == "physical_movement_evidence"]
+    if promotions or retargets:
+        lines.append(
+            "  contact-carried return updates: "
+            f"promotions={len(promotions)} "
+            f"evidence={dict(sorted(Counter(str(event.get('evidence')) for event in promotions).items()))} "
+            f"interrupted_routes={len(retargets)}"
+        )
+    if local_planning:
+        elapsed = timings(local_planning)
+        lines.append(
+            "  drone-local route planning: "
+            f"passes={len(local_planning)} "
+            f"statuses={dict(sorted(Counter(str(event.get('status', 'unknown')) for event in local_planning).items()))} "
+            f"max={_format_optional(max(elapsed, default=None), 'ms')} "
+            f"route_queries={sum(int(event.get('route_queries', 0) or 0) for event in local_planning)} "
+            f"cache_hits={sum(int(event.get('route_cache_hits', 0) or 0) for event in local_planning)}"
         )
     if path_requests:
         elapsed = timings(path_requests)

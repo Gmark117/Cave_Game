@@ -114,6 +114,7 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
                 defaults.highway,
                 mode="observe",
                 macro_cell_size=24,
+                maximum_access_distance_sensor_ranges=1.25,
                 minimum_version_delta=3,
                 maximum_build_ms=750.0,
                 maximum_query_ms=30.0,
@@ -293,6 +294,7 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
             {
                 "mode",
                 "macro_cell_size",
+                "maximum_access_distance_sensor_ranges",
                 "minimum_version_delta",
                 "maximum_build_ms",
                 "maximum_query_ms",

@@ -4,8 +4,9 @@ Status: Patch A is implemented and live-tested. Patch A2 is implemented and
 unit-tested, with live trace validation pending. Patch C is implemented behind
 the default-off `off`/`observe`/`active` mode, unit-tested, and paired on seeds
 0 and 5; it remains default-off. Patch B and Patch D are implemented behind
-separate committed-default-off rollouts and unit-tested; fresh matched live
-validation of the highway-integrated behavior remains pending.
+separate committed-default-off rollouts and unit-tested. Matched Highway and
+Focused Frontier Batching runs on seeds 0 and 5, followed by a combined
+all-active seed-5 run, passed live validation; all rollouts remain default-off.
 
 ## Current evidence and boundaries
 
@@ -143,31 +144,49 @@ probe, and homing behavior are unchanged.
 
 **Authority and input.** The rover builds a versioned highway from its own fused SLAM snapshot after drone data reaches it through verified contact. It does not derive highway edges from rover movement or planned rover paths. It cannot use the simulator cave map, display-wide floor map, a drone's unshared SLAM, or live peer positions. Unknown and insufficient-confidence cells are closed for highway construction. Each edge stores an exact traversable polyline and the rover SLAM version that justified it.
 
-**Macro-areas.** Partition rover-known navigable free space into coarse tiles,
-then distinguish disconnected free regions *within* a tile. Each reachable
-region is a macro-area for routing coverage, not exploration ownership. Every
-contiguous safe boundary run supplies a deterministic adjacent-tile portal.
-Edges store exact strict-diagonal polylines from area anchors through those
-portals. Query-time start and goal connectors are bounded to their macro-areas;
-the sparse area route uses Dijkstra over the stored edges. A build either
-publishes one complete immutable snapshot or retains the previous complete
-snapshot. Builds are version-debounced and hard-bounded, as are connector
-queries; there is no partially visible graph.
+**Corridor backbone.** The original tiled graph is retained for offline
+comparison. Runtime construction now extracts a medial-axis skeleton from
+rover-known free space, repairs one-cell elbows, and contracts chains into
+junctions and exact polylines. Essential links and loops survive terminal-spur
+pruning. Capillaries are added until cardinal geodesic access from every known
+free cell is within `maximum_access_distance_sensor_ranges` times the drone's
+LiDAR range. Smaller values produce more branches. Unknown and low-confidence
+cells cannot provide access or shortcuts. A complete immutable graph is
+published atomically; failed attempts retain the previous graph. Regional
+stitching was evaluated and removed after live evidence showed redundant
+overlapping branches. A separate process now rebuilds the complete map at most
+once every two wall-clock seconds, coalescing newer inputs. Conservative
+reduction or original-resolution native thinning handles supported maps;
+one preparation can be reused only for an identical input after a budget miss.
+One retry precedes newer queued additions; a free-cell correction cancels it.
+No partial graph is published, and unsupported inputs retain fallback.
 
 **Physical publication.** Give a drone a graph snapshot or versioned delta only at the same verified rover-contact exchange that carries SLAM. If that contact uploaded new SLAM, the graph computed from it may be delivered at a later physical contact; building it does not broadcast it remotely. An initial patch may use direct rover–drone delivery only. Drone–drone relay of tagged snapshots is a separate optional extension, still gated by physical contact. An older locally held graph remains usable as advice if its edges validate; no agent reads the rover's live graph remotely.
 
-**Drone route choice.** For a long route, search a small set of reachable graph entries near the current pose and exits near the target. Estimate the *whole* route cost: local A* to entry + precomputed graph path + local A* from exit to target. Choose the lowest-cost valid pair, rather than the Euclidean-nearest exit alone. Follow the stored graph polyline directly. Bound each connector search to a local window and expansion budget, widening only when needed before falling back. The existing segmented A* remains available for short/direct routes, missing or stale graph coverage, failed connectors, and graph paths whose cost is clearly excessive. A drone may leave the suggestion when its own newer SLAM or collision validation shows a better or required deviation; it keeps local invalid-edge memory until sharing can inform the rover. Do not require Euclidean distance to the target to decrease on every step, since going around a wall can legitimately increase it.
+**Drone route choice.** A safe direct route bypasses the graph. Otherwise,
+precomputed cardinal predecessor chains connect the endpoints to branch
+interiors. Up to eight nearby branches supply additional visible entries at
+each end. Multi-source Dijkstra compares connector plus graph plus exit cost.
+The selected path is straightened only through confidently known free cells
+with strict diagonal validation, then its actual cost is recomputed for both
+navigation and batching. This bounded heuristic does not guarantee a global
+shortest path. Connector/query limits, newer drone-local obstacle rejection,
+report-encounter priority, and segmented A*/breadcrumb fallbacks remain intact.
 
 The current drone A* adapter uses the simulator cave map. This patch keeps that adapter for connector and fallback searches while ensuring the *highway itself* comes only from physically collated rover SLAM. Replacing the adapter with belief-only drone A* would be a separate behavior change and should not be hidden inside this patch.
 
 **Execution priority.** Physical report encounter and safety validation outrank highway following. A newly learned rendezvous endpoint or task change invalidates the remaining route and selects again from the drone's locally held knowledge. The highway can guide check-in, task transit, DFS reposition, and homing, but first enable it for check-in and compare that isolated behavior before widening its use. The route planner must not reassign component work.
 
-The committed initial limits are a 32-pixel macro cell, four-version rebuild
-debounce, 250 ms whole-build budget, 50 ms query budget, and 4,096 connector
-expansions. Straight safe connectors avoid local A* work. On a synthetic
-1,615-by-1,010 all-free snapshot, the optimized complete build takes about
-145 ms on the development machine; live traces remain the authority for real
-cave cost.
+Each newly received rover SLAM version is submitted, with one process job in
+flight and newer uploads coalesced. The limits remain a 250 ms build budget,
+50 ms query/comparison budget, and 4,096 connector/search steps. Eligible active
+returns compare highway advice with a strictly shorter drone-local route;
+cached paths must be revalidated against current local SLAM. The access-distance default is
+2.0 LiDAR ranges. `macro_cell_size` remains readable for old configurations but
+is unused by the corridor builder. The old 145 ms all-free timing applies to
+the tiled baseline, not this replacement. Frozen-map comparisons and the
+native-work limit are recorded in `HIGHWAY_BACKBONE_VALIDATION.md`; live
+validation of the corridor replacement remains pending.
 
 **Implemented sequence.**
 
@@ -217,7 +236,9 @@ and waiting remain excluded.
 
 **Status and purpose.** Implemented behind a committed-default-off
 `FOCUSED_FRONTIER_BATCH` rollout; focused unit and interaction coverage is in
-place, while matched live validation remains pending. Focused Frontier
+place. Matched observe/active validation on seeds 0 and 5 and the combined
+seed-5 baseline passed; the later highway/rendezvous adjustments require fresh
+live evidence. Focused Frontier
 Batching reduces repeated drone-to-rover round trips during the registry's
 focused phase by claiming nearby existing component tasks together and by
 allowing bounded, provisional service of frontiers newly exposed inside an

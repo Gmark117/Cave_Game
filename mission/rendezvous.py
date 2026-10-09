@@ -55,9 +55,9 @@ class RendezvousProtocol:
         self._lock = threading.RLock()
         self._current = initial
         self._proposal: RendezvousEndpoint | None = None
-        # Announcements are knowledge; targets are the last physically
-        # confirmed rendezvous point each drone will try first. Keeping them
-        # separate prevents a proposal from pulling every acknowledgement
+        # Announcements are knowledge; targets follow contact-carried arrival
+        # or actual departure evidence. Keeping them separate prevents a
+        # proposal from pulling every acknowledgement
         # carrier away from the rover before the rover may depart.
         self._drone_announcements = {
             drone_id: initial for drone_id in range(self.drone_count)
@@ -66,10 +66,13 @@ class RendezvousProtocol:
             drone_id: initial for drone_id in range(self.drone_count)
         }
         # A rover visit is stronger evidence than a proposed destination.
-        # Carry it separately so a drone that missed several stops can visit
-        # the newest rover-confirmed stop before chasing a later proposal.
+        # Carry confirmed stops separately from departures and proposals.
         self._drone_confirmed = {
             drone_id: initial for drone_id in range(self.drone_count)
+        }
+        self._departure: RendezvousEndpoint | None = None
+        self._drone_departures: dict[int, RendezvousEndpoint | None] = {
+            drone_id: None for drone_id in range(self.drone_count)
         }
         self._drone_ack_ledgers = {
             drone_id: {0: {drone_id}}
@@ -108,8 +111,18 @@ class RendezvousProtocol:
             # proposal remains known but does not become this drone's target
             # until it later observes that the rover left this endpoint.
             self._learn_endpoint(normalized, self._current)
-            self._drone_targets[normalized] = self._current
+            target = self._departure or self._current
+            previous = self._drone_targets[normalized]
+            self._drone_targets[normalized] = target
+            if target.epoch > previous.epoch:
+                self._trace(
+                    "drone_rendezvous_target_promoted", drone_id=normalized,
+                    previous_endpoint=previous.position, endpoint=target.position,
+                    rendezvous_epoch=target.epoch,
+                    evidence="rover_departure" if self._departure else "confirmed_stop",
+                )
             self._drone_confirmed[normalized] = self._current
+            self._drone_departures[normalized] = self._departure
             if self._proposal is not None:
                 self._learn_endpoint(normalized, self._proposal)
             drone_ledger = self._drone_ack_ledgers[normalized]
@@ -156,6 +169,22 @@ class RendezvousProtocol:
             )
             self._drone_confirmed[first] = confirmed
             self._drone_confirmed[second] = confirmed
+            departures = [self._drone_departures[drone_id]
+                          for drone_id in (first, second)
+                          if self._drone_departures[drone_id] is not None]
+            departure = max(departures, key=lambda endpoint: endpoint.epoch) if departures else None
+            evidence = confirmed if departure is None or confirmed.epoch >= departure.epoch else departure
+            for drone_id in (first, second):
+                self._drone_departures[drone_id] = departure
+                if evidence.epoch > self._drone_targets[drone_id].epoch:
+                    previous = self._drone_targets[drone_id]
+                    self._drone_targets[drone_id] = evidence
+                    self._trace(
+                        "drone_rendezvous_target_promoted", drone_id=drone_id,
+                        previous_endpoint=previous.position, endpoint=evidence.position,
+                        rendezvous_epoch=evidence.epoch,
+                        evidence="confirmed_stop" if evidence == confirmed else "rover_departure",
+                    )
             first_ledger = self._drone_ack_ledgers[first]
             second_ledger = self._drone_ack_ledgers[second]
             epochs = set(first_ledger) | set(second_ledger)
@@ -241,11 +270,25 @@ class RendezvousProtocol:
                 return False
             self._current = proposal
             self._proposal = None
+            self._departure = None
             self._trace(
                 "rover_rendezvous_endpoint_reached",
                 rendezvous_epoch=proposal.epoch,
                 endpoint=proposal.position,
             )
+            return True
+
+    def rover_departed(self, position: Position) -> bool:
+        """Record actual departure after universal ACK, without broadcasting."""
+        target = tuple(map(int, position))
+        with self._lock:
+            if self._proposal is None or not self.can_depart(target):
+                return False
+            if self._departure == self._proposal:
+                return True
+            self._departure = self._proposal
+            self._trace("rover_rendezvous_departure_committed",
+                        rendezvous_epoch=self._departure.epoch, endpoint=target)
             return True
 
     def snapshot(self) -> RendezvousSnapshot:

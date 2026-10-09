@@ -41,6 +41,9 @@ class MissionControlLifecycleMixin:
             clear_docks(reason="shutdown")
 
         self.pathfinding.shutdown()
+        highway = getattr(self, "highway", None)
+        if highway is not None:
+            highway.shutdown()
 
         self.clock = None
         self._runtime_initialized = False

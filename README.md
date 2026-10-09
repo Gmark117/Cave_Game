@@ -145,9 +145,10 @@ announces an immutable endpoint. It cannot depart until every drone has
 acknowledged that endpoint and the complete acknowledgement set has returned
 to the rover through direct or relayed LOS/proximity contacts. An announcement
 does not immediately replace a drone's rendezvous target, even after universal
-acknowledgement: reports first return to the last rover-confirmed endpoint
-learned by physical contact or relay. An empty older endpoint leads to the
-freshest rover-confirmed stop before any newer proposal. A queued check-in is
+acknowledgement. Physical contact or relay of an actual departure or newer
+confirmed stop advances that target immediately, including during a return
+flight. A proposal alone requires finding the remembered stop physically empty
+before falling forward. A queued check-in is
 not an empty endpoint; the drone waits for the rover worker to accept its
 report. This keeps an acknowledgement carrier from waiting at a destination
 the rover cannot yet legally depart toward.
@@ -275,6 +276,10 @@ The sharing model is intentionally limited.
 - Rover sharing is bidirectional for both terrain and SLAM. Periodic proximity
   exchange runs on the primary rover worker; component/probe rendezvous also
   guarantees an arrival exchange and one departure refresh.
+- The first meaningful exchange in each continuous peer or rover encounter
+  pauses translation for 0.75 simulation seconds. Further map updates and ACKs
+  continue without renewing that pause; overlapping encounters share its
+  deadline. Separation rearms the pause for the next encounter.
 - A checked-in drone is mechanically docked and carried at the rover's logical
   position while it awaits a directive. Its movement, route planning, rotation,
   and sensors remain inactive, while physical rover contact can continue map
@@ -345,17 +350,54 @@ received occupancy and terrain knowledge can be inspected independently of the
 combined or per-drone view. Drone rows display the live directive phase, while
 the debug tab adds directive, task, component, DFS depth, and target context;
 rover rows expose navigation/hold state and their current target. Each agent
-renderer owns paths, vision, and icons; the drone breadcrumb
-path is the only navigation overlay. The control-center facade builds immutable frame
+renderer owns paths, vision, and icons. With Highway in `observe` or `active`
+mode, a cached overlay draws the rover's latest complete highway graph as
+grey polylines at 85% opacity. The path-icon toggle beside the rover's
+local-map selector controls this overlay and starts enabled; Highway itself
+remains default-off. The control-center facade builds immutable frame
 data, its controller owns timer/tab/input state, and its renderer owns all
 Pygame resources and hit geometry. `mission/presentation_adapter.py` keeps
 presentation state isolated so toggles do not contaminate the simulation
 model.
 
+The rover builds a branching corridor backbone from its received SLAM using
+a medial-axis skeleton, retaining loops and narrow connections. Short terminal
+spurs are pruned, then capillaries are added until every known free cell has
+bounded access through free space. `[HIGHWAY]
+maximum_access_distance_sensor_ranges = 2.0` controls that bound in drone LiDAR
+ranges: smaller values produce a denser network. The old `macro_cell_size` key
+remains readable but does not shape this backbone. Routes compare nearby
+entries and exits and safely straighten bends; costs reflect the followed path.
+Eligible active returns also check for a strictly shorter route through the
+drone's current known free space. Cached paths are revalidated, and the bounded
+comparison retains highway advice if no complete better route is found.
+The primary rover worker submits each newly received local SLAM version to a
+separate highway process and refreshes the yellow frontier registry immediately
+from the same input. Full-map rebuilds run at most once every two wall-clock
+seconds, with one job in flight and newer uploads coalesced. Each complete graph
+replaces the previous graph; regional stitching has been removed. Unchanged
+free geometry needs no rebuild. New free cells can follow in a later snapshot;
+corrections invalidate affected in-flight builds. Assignments and drone highway delivery still require
+physical check-ins. The legacy `minimum_version_delta` key remains readable;
+refresh follows every new version. Large full-map builds use a conservative
+reduced skeleton only when connected regions and holes survive. Large inputs
+requiring full resolution use native thinning, with one preparation retained
+for one retry of the identical map if another bounded attempt is needed.
+New additions stay queued; corrections cancel an unsafe retry. All routes and access distances are
+validated at original resolution. Build and query budgets retain the last
+complete graph or use the existing fallback.
+See [the frozen-map comparison](docs/HIGHWAY_BACKBONE_VALIDATION.md).
+
+Drone-side Focused Frontier Batching route work also has a 250 ms decision
+budget and 128-query cap. Drone-local A* queries use at most 50 ms and 4,096
+expansions, with routes cached only for the current local SLAM version. An
+incomplete cost cannot justify provisional work. Safe partial paths can advance
+claimed transit, and incomplete tour optimization retains the rover's order.
+
 Rendering is layered so the visual output stays readable:
 
 1. Black canvas and SLAM or terrain surface
-2. Agent paths
+2. Component markers, highways, and agent paths
 3. Drone vision
 4. Agent icons
 5. Control center and stop button
@@ -418,7 +460,7 @@ Simulation settings available in-game:
 | Drone path rendering | Implemented | Each drone's complete travelled breadcrumb path is rendered incrementally |
 | Battery management | Contract implemented | Unlimited runtime policy uses route-to-task, next-action, route-home, reserve, accept, return, and suspension hooks; drain/charging remain deferred |
 | Route-based component transit | Implemented | A* routes are unrestricted by territory and actual breadcrumbs remain the return fallback |
-| Rover A* highway network | Planned | Deferred from this patch; drones currently use their own local-SLAM A* and recorded breadcrumbs |
+| Rover highway network | Implemented, default-off | Rover-SLAM graph, physical publication, bounded return-route advice, and a grey overlay with a rover-row visibility toggle |
 | Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |
 | Drift modeling | Planned | Not yet implemented |
 

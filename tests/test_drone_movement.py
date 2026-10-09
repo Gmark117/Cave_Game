@@ -400,6 +400,24 @@ class DroneMovementTests(unittest.TestCase):
         self.assertEqual(self.drone.snapshot().position, (18, 16))
         self.assertAlmostEqual(waits[0], controller._SHARING_SECONDS)
 
+    def test_overlapping_peer_and_rover_exchanges_do_not_extend_pause(self) -> None:
+        controller = self.drone.movement_controller
+        clock = [10.0]
+        controller.dependencies = replace(
+            controller.dependencies, simulation_time=lambda: clock[0],
+        )
+        controller.begin_peer_sharing(1, (18, 16))
+        clock[0] += 0.5
+        controller.begin_rover_sharing(0, (16, 16))
+        self.assertAlmostEqual(controller._sharing_remaining(), 0.25)
+        clock[0] += 0.26
+        self.assertEqual(controller._sharing_remaining(), 0.0)
+        self.assertNotEqual(controller.activity_snapshot().state, "Sharing")
+        controller.begin_peer_sharing(2, (20, 16))
+        self.assertAlmostEqual(
+            controller._sharing_remaining(), controller._SHARING_SECONDS,
+        )
+
     def test_pathfinding_and_recalculation_are_exposed_as_activity_states(
         self,
     ) -> None:

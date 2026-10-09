@@ -186,5 +186,10 @@ class PresentationAdapter:
             )
         elif action == "drone_path" and drone_id is not None:
             self.toggle_drone_path(drone_id, drone_objects)
+        elif action == "rover_highway" and drone_id is not None:
+            rovers = rover_objects or []
+            if 0 <= int(drone_id) < len(rovers):
+                rover = rovers[int(drone_id)]
+                rover.show_highway = not rover.show_highway
         elif action == "drone_vision" and drone_id is not None:
             self.toggle_drone_vision(drone_id, drone_objects)

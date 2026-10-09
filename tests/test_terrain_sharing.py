@@ -175,6 +175,31 @@ class TerrainSharingTests(unittest.TestCase):
         contact.assert_called_once_with(0, 1)
         self.assertEqual(service.last_drone_share[0], 10.0)
 
+    def test_continuous_peer_contact_delivers_new_data_with_only_one_pause(self):
+        control = make_control()
+        source = make_agent(0, (1, 1))
+        target = make_agent(1, (2, 1))
+        control.drones = [source, target]
+        service = TerrainSharingService(control.dependencies)
+        contact = Mock()
+        object.__setattr__(control.dependencies, "on_drone_contact", contact)
+
+        for x in range(3):
+            self.seed_slam(source, x, 0, 1, 0.9)
+            service.share_with_nearby_drones(0)
+            self.assertEqual(int(target.slam_map.snapshot().occupancy[0, x]), 1)
+        source.movement_controller.begin_peer_sharing.assert_called_once()
+        target.movement_controller.begin_peer_sharing.assert_called_once()
+        self.assertEqual(contact.call_count, 3)
+
+        source.runtime_state.move_to((12, 1))
+        service.physical_contact_checkpoint(0)
+        source.runtime_state.move_to((1, 1))
+        self.seed_slam(source, 3, 0, 1, 0.9)
+        service.physical_contact_checkpoint(0)
+        self.assertEqual(source.movement_controller.begin_peer_sharing.call_count, 2)
+        self.assertEqual(target.movement_controller.begin_peer_sharing.call_count, 2)
+
     def test_peer_protocol_contact_requires_proximity_and_line_of_sight(self) -> None:
         control = make_control()
         contact = Mock()
@@ -453,6 +478,51 @@ class TerrainSharingTests(unittest.TestCase):
 
         self.assertFalse(arrived)
         self.assertEqual(rover.slam_map.version, 0)
+
+    def test_continuous_rover_contact_does_not_renew_pause_or_block_delivery(self):
+        control = make_control()
+        drone = make_agent(0, (1, 1))
+        rover = make_agent(0, (2, 1))
+        control.drones = [drone]
+        control.rovers = [rover]
+        service = TerrainSharingService(control.dependencies)
+        contact = Mock()
+        object.__setattr__(control.dependencies, "on_drone_rover_contact", contact)
+
+        for x in range(3):
+            control.simulation_time.return_value = 10.0 + x * 0.5
+            self.seed_slam(rover, x, 0, 1, 0.9)
+            service.share_with_rovers()
+            self.assertEqual(int(drone.slam_map.snapshot().occupancy[0, x]), 1)
+        self.seed_slam(rover, 3, 0, 1, 0.9)
+        self.assertTrue(service.share_on_departure(0, 0))
+        self.assertEqual(int(drone.slam_map.snapshot().occupancy[0, 3]), 1)
+        drone.movement_controller.begin_rover_sharing.assert_called_once()
+        self.assertEqual(contact.call_count, 4)
+
+        # Observe a departure on the movement path, between periodic passes.
+        drone.runtime_state.move_to((12, 1))
+        service.physical_contact_checkpoint(0)
+        drone.runtime_state.move_to((1, 1))
+        self.seed_slam(rover, 0, 1, 1, 0.9)
+        self.assertTrue(service.check_in_with_rover(0, 0))
+        self.assertEqual(drone.movement_controller.begin_rover_sharing.call_count, 2)
+
+    def test_rover_pause_rearms_after_line_of_sight_is_lost(self):
+        control = make_control()
+        drone = make_agent(0, (0, 0))
+        rover = make_agent(0, (2, 0))
+        control.drones = [drone]
+        control.rovers = [rover]
+        service = TerrainSharingService(control.dependencies)
+        self.seed_slam(rover, 0, 1, 1, 0.9)
+        self.assertTrue(service.check_in_with_rover(0, 0))
+        control.map_matrix[0, 1] = 1
+        self.assertFalse(service.check_in_with_rover(0, 0))
+        control.map_matrix[0, 1] = 0
+        self.seed_slam(rover, 0, 2, 1, 0.9)
+        self.assertTrue(service.check_in_with_rover(0, 0))
+        self.assertEqual(drone.movement_controller.begin_rover_sharing.call_count, 2)
 
     def test_departure_share_refreshes_map_changed_during_standby(self) -> None:
         control = make_control()

@@ -1,6 +1,7 @@
 import os
 import threading
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,6 +16,7 @@ from agents.drone_runtime_state import DroneRuntimeState
 from mission.control import MissionControl
 from config.simulation_config import (
     ExplorationConfig,
+    HighwayConfig,
     MissionConfig,
     SimulationConfig,
 )
@@ -26,7 +28,7 @@ from mapping.exploration_sectors import (
     SectorOutcomeReport,
     SectorSuppressionOutcome,
 )
-from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
+from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamMap, SlamSnapshot
 from mapping.wall_mapping import WallMappingSnapshot, exposed_wall_mask
 from mission.exploration_coordination import (
     CoordinationResult,
@@ -35,6 +37,7 @@ from mission.exploration_coordination import (
     ExplorationPhase,
 )
 from navigation.pathfinding import PathfindingService
+from navigation.highway import HighwayBuildResult, build_highway_graph
 from rendering.mission_renderer import MissionRenderer
 
 
@@ -73,6 +76,75 @@ class FakeGame:
 
 
 class MissionLifecycleTests(unittest.TestCase):
+    def test_frontiers_refresh_while_highway_is_pending_and_publish_without_assignment(self):
+        mission = MissionControl(FakeGame())
+        mission.settings = replace(mission.settings, highway=HighwayConfig(mode="active"))
+        slam = SlamMap(8, 8)
+        slam.update_from_observations((2, 2), free_cells=((2, 2), (3, 2)), occupied_cells=())
+        mission.rovers = [SimpleNamespace(slam_map=slam)]
+        coordinator = Mock()
+        coordinator.refresh_rover_knowledge.return_value = None
+        mission.exploration_coordinator = coordinator
+        mission.runtime_trace = SimpleNamespace(record=Mock())
+        mission.highway = Mock(snapshot=None)
+        mission.highway.refresh.return_value = HighwayBuildResult("pending", None, 0)
+
+        mission._refresh_rover_knowledge_if_changed()
+        self.assertEqual(coordinator.refresh_rover_knowledge.call_args.args[0].version, slam.version)
+        result = build_highway_graph(slam.snapshot(point_limit=0), confidence_threshold=.6,
+                                     macro_cell_size=4, maximum_build_ms=1000,
+                                     maximum_connector_expansions=256)
+        mission.highway.snapshot = result.snapshot
+        mission.highway.poll.return_value = result
+        mission._poll_highway()
+        coordinator.update_highway_snapshot.assert_called_with(result.snapshot)
+        coordinator.check_in.assert_not_called()
+        coordinator.claim_directive.assert_not_called()
+        self.assertEqual(coordinator.refresh_rover_knowledge.call_count, 1)
+
+    def test_new_rover_data_refreshes_highway_and_registry_without_check_in(self):
+        mission = MissionControl(FakeGame())
+        mission.settings = replace(mission.settings, highway=HighwayConfig(mode="active"))
+        slam = SlamMap(8, 8)
+        slam.update_from_observations((2, 2), free_cells=((2, 2), (3, 2)), occupied_cells=())
+        mission.rovers = [SimpleNamespace(slam_map=slam)]
+        coordinator = Mock()
+        coordinator.refresh_rover_knowledge.return_value = None
+        mission.exploration_coordinator = coordinator
+        mission.runtime_trace = SimpleNamespace(record=Mock())
+
+        mission._refresh_rover_knowledge_if_changed()
+        first = mission.highway.snapshot
+        self.assertIsNotNone(first)
+        mission._refresh_rover_knowledge_if_changed()
+        self.assertIs(mission.highway.snapshot, first)
+        self.assertEqual(coordinator.refresh_rover_knowledge.call_count, 1)
+
+        slam.update_from_observations((2, 2), free_cells=((4, 2),), occupied_cells=())
+        mission._refresh_rover_knowledge_if_changed()
+        latest = mission.highway.snapshot
+        self.assertEqual(latest.version, slam.version)
+        self.assertNotEqual(latest.version, first.version)
+        received = coordinator.refresh_rover_knowledge.call_args.args[0]
+        self.assertEqual(received.version, latest.version)
+        coordinator.update_highway_snapshot.assert_called_with(latest)
+        coordinator.check_in.assert_not_called()
+        coordinator.claim_directive.assert_not_called()
+
+    def test_primary_rover_worker_refreshes_after_periodic_physical_sharing(self):
+        mission = MissionControl(FakeGame())
+        calls = []
+        mission.rovers = [SimpleNamespace(pos=(2, 2), move=lambda: None)]
+        mission.exploration_coordinator = Mock()
+        mission._process_exploration_check_ins = Mock()
+        mission._move_docked_drones_locked = Mock()
+        mission.pause_checkpoint = Mock(return_value=True)
+        mission.wait_simulation_delay = Mock(return_value=False)
+        mission.terrain_sharing.share_with_rovers = lambda: calls.append("share")
+        mission._refresh_rover_knowledge_if_changed = lambda: calls.append("refresh")
+        mission.rover_thread(0)
+        self.assertEqual(calls, ["share", "refresh"])
+
     @staticmethod
     def _runtime_drone(drone_id: int, position=(4, 4)):
         state = DroneRuntimeState(
@@ -834,6 +906,8 @@ class MissionLifecycleTests(unittest.TestCase):
             "interior_basins_only",
         )
         self.assertTrue(constructed.kwargs["rover_periodic_sharing"])
+        self.assertEqual(constructed.kwargs["highway_refresh_policy"], "every_rover_slam_version")
+        self.assertEqual(constructed.kwargs["highway_minimum_version_delta"], 1)
         self.assertTrue(constructed.kwargs["rover_drone_pair_sharing"])
         self.assertTrue(
             mission.terrain_sharing.dependencies.periodic_rover_sharing_enabled
@@ -952,8 +1026,10 @@ class MissionLifecycleTests(unittest.TestCase):
         self.assertFalse(mission.is_mission_over())
 
         mission.pathfinding.shutdown = Mock()
+        mission.highway.shutdown = Mock()
         mission._shutdown_mission([])
         mission.pathfinding.shutdown.assert_called_once_with()
+        mission.highway.shutdown.assert_called_once_with()
         self.assertTrue(mission.mission_event.is_set())
 
     def test_drone_and_rover_pathfinding_delegate_to_owned_service(self) -> None:

@@ -228,6 +228,9 @@ class MenuSettingsRepository:
         config["HIGHWAY"] = {
             "mode": settings.highway.mode,
             "macro_cell_size": str(settings.highway.macro_cell_size),
+            "maximum_access_distance_sensor_ranges": str(
+                settings.highway.maximum_access_distance_sensor_ranges
+            ),
             "minimum_version_delta": str(
                 settings.highway.minimum_version_delta
             ),
@@ -685,6 +688,10 @@ class MenuSettingsRepository:
     ) -> HighwayConfig:
         """Parse bounded rover-highway construction and rollout controls."""
         return HighwayConfig(
+            maximum_access_distance_sensor_ranges=float(section.get(
+                "maximum_access_distance_sensor_ranges",
+                defaults.maximum_access_distance_sensor_ranges,
+            )),
             mode=str(section.get("mode", defaults.mode)),
             macro_cell_size=int(section.get(
                 "macro_cell_size",

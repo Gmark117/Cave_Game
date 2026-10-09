@@ -310,7 +310,24 @@ class ControlCenterWidgetMixin:
         y_center: int,
         selected_rover_heatmap_id: Optional[int],
     ) -> None:
-        """Draw the rover-local SLAM/terrain selection button."""
+        """Draw highway visibility and rover-local SLAM/terrain buttons."""
+        highway_rect = pygame.Rect(
+            Display.LEGEND_WIDTH - DRONE_BUTTON_SIZE * 2 - 5 - 12,
+            y_center - DRONE_BUTTON_SIZE // 2,
+            DRONE_BUTTON_SIZE,
+            DRONE_BUTTON_SIZE,
+        )
+        self.draw_toggle_button(
+            highway_rect,
+            "P",
+            status.show_highway,
+            status.color,
+        )
+        self._rover_toggles.append((
+            status.id,
+            "highway",
+            self._absolute_rect(highway_rect),
+        ))
         rect = pygame.Rect(
             Display.LEGEND_WIDTH - DRONE_BUTTON_SIZE - 12,
             y_center - DRONE_BUTTON_SIZE // 2,

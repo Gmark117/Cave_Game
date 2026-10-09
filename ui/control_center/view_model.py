@@ -63,6 +63,7 @@ class RoverStatusView:
     status: str
     detail: str = ""
     target: tuple[int, int] | None = None
+    show_highway: bool = True
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,7 @@ def build_rover_status_views(
             status=_rover_status(status),
             detail=detail,
             target=target,
+            show_highway=bool(getattr(snapshot, "show_highway", True)),
         ))
     return tuple(views)
 

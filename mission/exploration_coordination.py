@@ -604,6 +604,31 @@ class FrontierTaskCoordinator:
         """Return the latest immutable publication without acquiring the lock."""
         return self._published_snapshot
 
+    def refresh_rover_knowledge(
+        self,
+        rover_slam: SlamSnapshot,
+    ) -> RegistryReconcileResult | None:
+        """Refresh rover-local frontiers without issuing directives or ACKs.
+
+        Existing lineage blockers keep descendants of live claims unavailable.
+        Reports and scheduling still run only through physical check-ins.
+        """
+        with self._lock:
+            if (
+                not self._initial_scan_complete
+                or self._discovery_round is not None
+                or self._mission_exhausted
+                or (
+                    self._last_rover_slam is not None
+                    and self._last_rover_slam.version == rover_slam.version
+                )
+            ):
+                return None
+            result = self._reconcile(rover_slam, ())
+            self._last_rover_slam = rover_slam
+            self._published_snapshot = self._snapshot_unlocked()
+            return result
+
     def evaluate_return(
         self,
         drone_id: int,

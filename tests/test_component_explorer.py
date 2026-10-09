@@ -53,7 +53,7 @@ from navigation.astar_pathfinder import (
     PATH_UNREACHABLE,
     PathResult,
 )
-from navigation.highway import build_highway_graph
+from navigation.highway import HighwayRoute, build_highway_graph
 
 
 class ComponentControl:
@@ -529,6 +529,69 @@ class ComponentMovementTests(unittest.TestCase):
             "locally_known_occupied",
         )
 
+    def test_return_chooses_shorter_route_known_to_drone(self):
+        controller = self.drone.movement_controller
+        occupancy = np.full((64, 64), FREE, np.int8)
+        self.drone.slam_map.merge_from(SlamSnapshot(occupancy, np.ones((64, 64), np.float32)))
+        path = (tuple((16, y) for y in range(16, 25)) +
+                tuple((x, 24) for x in range(17, 41)) +
+                tuple((40, y) for y in range(23, 15, -1)))
+        controller._highway_snapshot = Mock(version=11)
+        controller._highway_snapshot.route.return_value = HighwayRoute(
+            "complete", path, 40, 11, 0, 0,
+        )
+        controller.highway_mode = "active"
+        controller.highway_minimum_route_sensor_ranges = 0
+        trace = Mock()
+        controller.dependencies = replace(controller.dependencies, runtime_trace=trace)
+        with patch.object(controller, "_compute_path") as compute:
+            self.assertEqual(controller._return_to_coordination_point((40, 16)), (True, False))
+        compute.assert_not_called()
+        comparison = next(call.kwargs for call in trace.record.call_args_list
+                          if call.args[0] == "drone_return_route_compared")
+        self.assertEqual(comparison["selected_source"], "local")
+        self.assertEqual(comparison["local_distance"], 24)
+        motion = next(call.kwargs for call in trace.record.call_args_list if call.args[0] == "drone_motion")
+        self.assertEqual(motion["source"], "component_checkin_local")
+
+    def test_observe_does_not_run_or_select_local_comparison(self):
+        controller = self.drone.movement_controller
+        controller._highway_snapshot = self._highway_snapshot()
+        controller.highway_mode = "observe"
+        controller.highway_minimum_route_sensor_ranges = 0
+        with patch("navigation.return_route.local_return_alternative") as alternative:
+            self.assertFalse(controller._component_check_in_highway_route((16, 16), (40, 16)))
+        alternative.assert_not_called()
+
+    def test_physical_relay_interrupts_return_without_delivering_report(self):
+        controller = self.drone.movement_controller
+        endpoint = [(24, 16)]
+        report = CoordinationReport(report_id=42, directive_id=42,
+                                    kind=DirectiveKind.COMPONENT_TASK)
+        controller._coordination_report = report
+        trace = Mock()
+        check_in = Mock()
+
+        def contact_checkpoint(_drone_id):
+            if self.drone.snapshot().position == (18, 16):
+                endpoint[0] = (30, 16)
+
+        controller.dependencies = replace(
+            controller.dependencies, get_check_in_position=lambda: endpoint[0],
+            request_exploration_report_stop=lambda _drone_id: False,
+            physical_contact_checkpoint=contact_checkpoint,
+            exploration_check_in=check_in, runtime_trace=trace,
+        )
+        path = PathResult(tuple((x, 16) for x in range(16, 25)), PATH_COMPLETE, 9, 0)
+        with patch.object(controller, "_compute_path", return_value=path):
+            self.assertEqual(controller._return_to_coordination_point((24, 16)), (False, False))
+        self.assertEqual(self.drone.snapshot().position, (18, 16))
+        self.assertIs(controller._coordination_report, report)
+        check_in.assert_not_called()
+        motion = next(call.kwargs for call in trace.record.call_args_list if call.args[0] == "drone_motion")
+        self.assertEqual(motion["stop_reason"], "rendezvous_updated")
+        self.assertFalse(motion["stopped_for_report"])
+
     @staticmethod
     def _batch_member(task_id: int, entry: tuple[int, int]) -> BatchMember:
         unit = ComponentWorkUnit(
@@ -678,6 +741,54 @@ class ComponentMovementTests(unittest.TestCase):
             {item.claim_token for item in report.batch_member_reports},
             {10, 11},
         )
+
+    def test_batch_planning_budget_keeps_rover_order_and_claim_failure_report(self):
+        controller = self.drone.movement_controller
+        controller._local_slam_planner.MAXIMUM_QUERIES = 0
+        controller._install_exploration_directive(ExplorationDirective(
+            directive_id=102, kind=DirectiveKind.COMPONENT_BATCH,
+            batch_members=(self._batch_member(1, (30, 16)), self._batch_member(0, (20, 16))),
+            spatial_lease=SpatialLease(
+                lease_id=4, owner_drone_id=0, directive_id=102, issued_revision=1,
+                cell_spans=((16, 18, 32),), member_task_ids=(1, 0),
+            ),
+            maximum_total_dfs_nodes=48,
+        ))
+        execution = controller._coordination_execution
+        self.assertEqual(execution.batch_current_member.task.task_id, 1)
+        controller._prepare_execution_return(execution, reason="route_planning_budget")
+        self.assertEqual(execution.batch_current_member.task.task_id, 0)
+        self.assertEqual(len(execution.batch_completed_members), 1)
+        report = execution.batch_completed_members[0]
+        self.assertEqual(report.member.claim.token, 11)
+        self.assertEqual(report.disposition, "budget_exhausted")
+        self.assertEqual(report.suspension.reason, "route_planning_budget")
+
+    def test_batch_transit_uses_bounded_partial_route_without_completing_member(self):
+        controller = self.drone.movement_controller
+        occupancy = np.full((64, 64), FREE, np.int8)
+        occupancy[:40, 28] = OCCUPIED
+        self.drone.slam_map.merge_from(SlamSnapshot(occupancy, np.ones((64, 64), np.float32)))
+        controller._local_slam_planner.MAXIMUM_EXPANSIONS = 4
+        execution = _CoordinationExecution(
+            directive=ExplorationDirective(directive_id=101, kind=DirectiveKind.COMPONENT_BATCH),
+            phase="transit", path_start_index=0,
+        )
+        with patch.object(controller, "_component_route_invalidated_after_share", return_value=False):
+            self.assertFalse(controller._advance_directive_transit(
+                execution, (40, 16), source="component_task_transit",
+            ))
+        self.assertEqual(self.drone.snapshot().position, (19, 16))
+        self.assertEqual(execution.phase, "transit")
+        self.assertEqual(execution.route_attempts, 1)
+        self.assertTrue(math.isinf(controller._local_slam_distance((16, 16), (40, 16))))
+        execution.route_attempts = 7
+        with patch.object(controller, "_component_route_invalidated_after_share", return_value=False), \
+                patch.object(controller, "_prepare_execution_return") as suspend:
+            self.assertFalse(controller._advance_directive_transit(
+                execution, (40, 16), source="component_task_transit",
+            ))
+        suspend.assert_called_once_with(execution, reason="route_planning_budget")
 
     def test_incidental_scan_requires_exact_pose_and_newer_sequence_then_resumes_suffix(self):
         controller, execution = self._install_incidental_execution()

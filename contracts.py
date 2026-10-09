@@ -144,6 +144,8 @@ class MissionRendererDependencies:
     get_sector_snapshot: Callable[[], Any] = lambda: None
     is_exploration_complete: Callable[[], bool] = lambda: False
     get_docked_drone_ids: Callable[[], frozenset[int]] = frozenset
+    highway_renderer: Any | None = None
+    get_highway_snapshot: Callable[[int], Any] = lambda _rover_id: None
 
 
 @dataclass(frozen=True)
@@ -202,3 +204,4 @@ class RoverNavigationDependencies:
         lambda _position: True
     )
     rendezvous_arrived: Callable[[Position], bool] = lambda _position: True
+    rendezvous_departed: Callable[[Position], bool] = lambda _position: True

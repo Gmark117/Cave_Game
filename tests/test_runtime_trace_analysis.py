@@ -1895,6 +1895,12 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
                 "area_count": 20,
                 "edge_count": 31,
                 "retained_previous": False,
+                "topology": "corridor_backbone",
+                "component_count": 1,
+                "pruned_branches": 4,
+                "capillary_branches": 2,
+                "maximum_access_distance": 80.0,
+                "measured_access_distance": 65.0,
             },
             {
                 "event": "drone_highway_snapshot_received",
@@ -1930,10 +1936,37 @@ class RuntimeTraceAnalysisTests(unittest.TestCase):
 
         self.assertIn("Highway routing:", summary)
         self.assertIn("graph builds: attempts=1", summary)
+        self.assertIn("corridor backbone: nodes=20 components=1 pruned=4 capillaries=2 access=65.0/80.0px", summary)
         self.assertIn("drone return routes: evaluated=1 eligible=1 selected=1", summary)
         self.assertIn("A* requests: count=1", summary)
         self.assertIn("focused frontier batch planning: passes=1", summary)
         self.assertIn("route_queries=6 cache_hits=12 candidates=3 batches=1", summary)
+
+    def test_summary_distinguishes_background_work_and_local_return_choice(self):
+        summary = "\n".join(summarize([
+            {"event": "rover_highway_build_completed", "status": "pending", "elapsed_ms": 0},
+            {"event": "rover_highway_build_completed", "status": "complete", "build_kind": "regional",
+             "rebuilt_regions": 2, "reused_regions": 10, "elapsed_ms": 130},
+            {"event": "rover_highway_build_completed", "status": "superseded", "build_kind": "full",
+             "elapsed_ms": 200},
+            {"event": "drone_return_route_compared", "selected_source": "local",
+             "comparison_status": "complete", "highway_distance": 100, "local_distance": 80,
+             "elapsed_ms": 4},
+            {"event": "drone_rendezvous_target_promoted", "evidence": "confirmed_stop"},
+            {"event": "drone_component_rendezvous_retargeted", "reason": "physical_movement_evidence"},
+        ]))
+        self.assertIn("background updates: jobs=2", summary)
+        self.assertIn("superseded=1 rebuilt_regions=2 reused_regions=10", summary)
+        self.assertIn("local return comparisons: count=1 selected={'local': 1}", summary)
+        self.assertIn("planned_savings=20.00px", summary)
+        self.assertIn("contact-carried return updates: promotions=1 evidence={'confirmed_stop': 1} interrupted_routes=1", summary)
+
+    def test_summary_reports_bounded_drone_local_planning(self):
+        summary = "\n".join(summarize([
+            {"event": "drone_local_route_planning_completed", "source": "batch_member_selection",
+             "status": "budget_exhausted", "elapsed_ms": 249, "route_queries": 6, "route_cache_hits": 8},
+        ]))
+        self.assertIn("drone-local route planning: passes=1 statuses={'budget_exhausted': 1} max=249.00ms route_queries=6 cache_hits=8", summary)
 
 
 if __name__ == "__main__":

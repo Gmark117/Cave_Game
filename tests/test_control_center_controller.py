@@ -33,7 +33,10 @@ class ControlCenterControllerTests(unittest.TestCase):
                 (0, "vision", (70, 0, 10, 10)),
                 (0, "selected", (90, 0, 10, 10)),
             ),
-            rover_toggles=((1, "selected", (110, 0, 10, 10)),),
+            rover_toggles=(
+                (1, "selected", (110, 0, 10, 10)),
+                (1, "highway", (130, 0, 10, 10)),
+            ),
         )
 
         self.assertEqual(
@@ -68,6 +71,10 @@ class ControlCenterControllerTests(unittest.TestCase):
         self.assertEqual(
             controller.handle_click((115, 5), hit_map),
             ("rover_heatmap", 1),
+        )
+        self.assertEqual(
+            controller.handle_click((135, 5), hit_map),
+            ("rover_highway", 1),
         )
 
     def test_hit_map_is_detached_from_source_rect_values(self) -> None:
