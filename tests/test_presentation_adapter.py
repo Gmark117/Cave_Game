@@ -44,7 +44,7 @@ def make_drones(count: int = 3):
 
 class PresentationAdapterTests(unittest.TestCase):
     def test_global_heatmap_hides_and_restores_all_agent_overlays(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         control_center = SimpleNamespace(
             handle_click=Mock(return_value=("terrain_heatmap", None)),
@@ -62,7 +62,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(all(drone.show_vision for drone in drones))
 
     def test_reset_owns_default_heatmap_and_overlay_state(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         adapter.show_terrain_heatmap = True
         adapter.show_full_map = True
@@ -84,7 +84,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(all(drone.show_vision for drone in drones))
 
     def test_full_map_action_toggles_underlay_without_overlay_changes(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         adapter.terrain_heatmap_dirty = False
         control_center = SimpleNamespace(
@@ -99,7 +99,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(all(drone.show_vision for drone in drones))
 
     def test_selected_drone_limits_visible_overlays(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         control_center = SimpleNamespace(
             handle_click=Mock(return_value=("drone_heatmap", 1)),
@@ -130,7 +130,7 @@ class PresentationAdapterTests(unittest.TestCase):
         )
 
     def test_path_and_vision_actions_are_applied_by_adapter(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         rovers = [SimpleNamespace(show_highway=True)]
         control_center = SimpleNamespace(
@@ -158,7 +158,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(rovers[0].show_highway)
 
     def test_selected_rover_shows_its_map_and_clears_drone_selection(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         rovers = [object(), object()]
         adapter.selected_drone_heatmap_id = 2
@@ -179,7 +179,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(all(not drone.show_vision for drone in drones))
 
     def test_invalid_drone_action_leaves_state_unchanged(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         control_center = SimpleNamespace(
             handle_click=Mock(return_value=("drone_heatmap", 99)),
@@ -192,7 +192,7 @@ class PresentationAdapterTests(unittest.TestCase):
         self.assertTrue(all(drone.show_vision for drone in drones))
 
     def test_unhandled_click_leaves_state_unchanged(self) -> None:
-        adapter = PresentationAdapter(10, 10)
+        adapter = PresentationAdapter()
         drones = make_drones()
         control_center = SimpleNamespace(handle_click=Mock(return_value=None))
 

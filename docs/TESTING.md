@@ -120,11 +120,12 @@ they protect.
 | Menu facade and settings conversion | `test_menu.py` | Unit/file integration | The `Game`-facing API, mission start, default seed ownership, settings conversion, and simulation INI round trips remain stable. |
 | Menu controller | `test_menu_controller.py` | Unit/state-machine | Navigation, named actions, selector/slider bounds, and top-row/numpad seed entry are independent from rendering. |
 | Menu rendering | `test_menu_renderer.py` | Surface/interaction | Background and row composition are renderer-owned and consume typed menu rows. |
-| Menu settings repository | `test_menu_settings_repository.py` | File integration | Current-format round trips, default/local precedence, missing-file behavior, and section-level malformed-value fallback are protected. |
+| Menu settings repository | `test_menu_settings_repository.py` | File integration | Dataclass field round trips, shipped-active versus constructor-off modes, whole-file local precedence, legacy batch sections, historical rendering keys, scalar conversion, and section-level malformed-value fallback are protected. |
 | Menu audio | `test_menu_audio_service.py` | Unit/service | Mixer initialization, volume, music, and button-sound behavior are isolated behind mocks. |
 | Game event flags | `test_game.py` | Unit | Keyboard-to-flag mapping is independent from window creation. |
-| Map-generation helpers | `test_mapgen_helpers.py` | Unit/resource | Brush application, cleanup primitives, seeded noise, process monitoring, and shared-memory helpers are isolated. |
+| Map-generation helpers | `test_mapgen_helpers.py` | Unit/resource | Brush application, cleanup primitives, process monitoring, and shared-memory helpers are isolated. The disabled wall-transition-noise experiment has been removed. |
 | Map-generation services | `test_cave_generator.py`, `test_worm_process_runner.py`, `test_cave_post_processor.py`, `test_terrain_roughness_generator.py`, `test_map_artifact_writer.py` | Unit/resource/file integration | Pure orchestration, process ownership, post-processing fallback, deterministic roughness, and artifact output are tested at their owning modules. |
+| Trace replay | `test_runtime_trace_analysis.py` | Replay/characterization | Current summaries and historical waypoint/MCTS/batch telemetry remain readable; structured calculations live in `tools/trace_metrics.py`. |
 | Map-generator facade | `test_map_generator.py` | Interaction | The game-facing facade delegates generation and output while preserving mission-facing generated data. |
 
 ## When To Apply Each Test Type

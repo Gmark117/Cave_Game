@@ -130,16 +130,3 @@ class MissionDebugInfo:
                 )
 
         return lines
-
-    def build_lines(
-        self,
-        drone_snapshots: Optional[Iterable[DroneSnapshot]] = None,
-    ) -> List[str]:
-        """Build the legacy combined stream for compatibility."""
-        snapshots = (
-            None if drone_snapshots is None else tuple(drone_snapshots)
-        )
-        return (
-            self.build_system_lines(snapshots)
-            + self.build_debug_lines(snapshots)
-        )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
 import itertools
@@ -21,7 +21,6 @@ from mapping.frontier_registry import (
     ExplorationMode,
     FrontierComponentRecord,
     FrontierComponentRegistry,
-    FrontierRegistrySnapshot,
     LineageKind,
     RegistryReconcileResult,
     SensorFootprint,
@@ -525,7 +524,6 @@ class FrontierTaskCoordinator:
         self._mission_exhausted = False
         self._focused_endgame = False
         self._last_rover_slam: SlamSnapshot | None = None
-        self._last_reconcile_result: RegistryReconcileResult | None = None
         self._pending_batch_evaluations: list[FocusedFrontierBatchEvaluation] = []
         self._last_batch_planning_summary: FocusedFrontierBatchPlanningSummary | None = None
         self._highway_snapshot: HighwayGraphSnapshot | None = None
@@ -1072,7 +1070,6 @@ class FrontierTaskCoordinator:
                     if unit_id not in set(retired)
                 ),
             )
-            self._last_reconcile_result = reconcile
         if active.spatial_lease is not None:
             self._leases_by_id.pop(active.spatial_lease.lease_id, None)
         self._accepted_report_ids.add(report.report_id)
@@ -1247,7 +1244,6 @@ class FrontierTaskCoordinator:
             rover_slam,
             causal_transitions=tuple(causal),
         )
-        self._last_reconcile_result = result
         self._apply_lineage_blocks(result)
         self._refresh_component_blocks()
         self._sync_tasks()

@@ -4,7 +4,6 @@ import heapq
 import math
 import time
 
-import numpy as np
 
 from mapping.slam_map import FREE
 from navigation.highway import HighwayRoute, _direct_labeled_path, _extend_path, _path_cost

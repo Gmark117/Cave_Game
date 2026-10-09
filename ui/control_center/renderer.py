@@ -61,7 +61,6 @@ class ControlCenterRenderer(
         self._static_surfaces: dict[Any, pygame.Surface] = {}
         self._static_fragments: dict[str, pygame.Surface] = {}
         self._dynamic_cache: dict[str, dict[str, Any]] = {}
-        self._tab_sprites: dict[str, pygame.Surface] = {}
         self._handle_map = {
             "center": "center",
             "midtop": "midtop",
@@ -83,7 +82,6 @@ class ControlCenterRenderer(
         self._button_sprites: dict[str, pygame.Surface] = {}
 
         self._pre_render_statics()
-        self._load_tab_sprites()
 
     def render(self, view: ControlCenterViewModel) -> ControlHitMap:
         """Draw one immutable frame and return its detached hit geometry."""

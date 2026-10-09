@@ -150,14 +150,11 @@ class TerrainSharingService:
         floor = dependencies.terrain_knowledge.floor_mask[::stride, ::stride]
 
         src_known = floor & (src_conf > 0.0)
-        if not np.any(src_known):
-            return False
-
-        tgt_known = floor & (tgt_conf > 0.0)
         src_known_count = int(np.count_nonzero(src_known))
         if src_known_count == 0:
             return False
 
+        tgt_known = floor & (tgt_conf > 0.0)
         new_info = src_known & (~tgt_known)
         new_info_ratio = np.count_nonzero(new_info) / src_known_count
         if new_info_ratio >= self.min_new_info_ratio:
@@ -500,7 +497,6 @@ class TerrainSharingService:
         used to mix borders extracted from different map versions; recipients
         now rebuild them from the merged local SLAM on their movement thread.
         """
-        _ = drone_snapshot, other_snapshot
         drone_terrain = drone.terrain_knowledge.snapshot()
         other_terrain = other_drone.terrain_knowledge.snapshot()
 

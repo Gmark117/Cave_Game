@@ -1,5 +1,14 @@
 # SLAM Exploration Plan
 
+This is the historical design proposal, not a description of the current
+runtime. `PerfectPoseLocalizer`, `PoseEstimate`, local SLAM, and the energy
+contracts are implemented. `RandomDirectionPolicy` owns seeded heading choice;
+`CoverageMemory` owns traversal pressure. Directive execution and component DFS
+remain in their current owners; the proposed `ExplorationContext` and full
+policy interface were not adopted. Landmark detection/correction and finite
+battery drain/charging remain future behavior work. See [CODEFLOW](CODEFLOW.md)
+and the [cleanup audit](CLEANUP_AUDIT.md) for the implemented boundaries.
+
 ## Summary
 
 Implement the next SLAM/exploration phase in this order:

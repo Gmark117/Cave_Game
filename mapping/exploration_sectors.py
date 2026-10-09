@@ -757,7 +757,7 @@ class ExplorationSectorCoordinator:
             )
             for component in tracked_components
         )
-        seeds = self._select_seeds(candidates, estimated_effort, blocked)
+        seeds = self._select_seeds(candidates, estimated_effort)
         owners = self._flood_assign(seeds, traversal_cost, blocked)
         owners, workload_diagnostics = self._rebalance_frontier_work(
             owners,
@@ -1178,7 +1178,6 @@ class ExplorationSectorCoordinator:
         self,
         candidates: Iterable[SectorCell],
         estimated_effort: np.ndarray,
-        blocked: np.ndarray,
     ) -> tuple[SectorCell, ...]:
         """Choose workload-aware, well-separated deterministic seed cells."""
         available = sorted(set(candidates), key=lambda cell: (cell[1], cell[0]))

@@ -141,9 +141,6 @@ class CaveGenerator:
 
         bin_map = self.post_processor.process(
             run_result.bin_map,
-            self.width,
-            self.height,
-            self.seed,
             worm_inputs,
         )
         terrain_roughness = self.roughness_generator.generate(bin_map, rng)

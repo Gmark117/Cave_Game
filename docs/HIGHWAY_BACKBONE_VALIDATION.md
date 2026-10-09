@@ -2,8 +2,9 @@
 
 The 2026-10-08 change replaces tile-shaped routing with a medial-axis corridor
 backbone, pruned terminal spurs, optional capillaries, and validated route
-straightening. Highway, Incidental Scan, and Focused Frontier Batching remain
-default-off. Physical publication and local-SLAM authority are unchanged.
+straightening. The shipped settings now enable Highway, Incidental Scan, and
+Focused Frontier Batching; their configuration constructors retain `off`
+fallbacks. Physical publication and local-SLAM authority are unchanged.
 
 `maximum_access_distance_sensor_ranges = 2.0` bounds cardinal geodesic access
 to the network in drone LiDAR ranges. Smaller values add more capillaries.
@@ -157,14 +158,31 @@ Return targets still advance only on physically carried confirmed arrival or
 actual departure evidence. Proposals alone do not redirect ACK carriers;
 universal ACK, claims, lineage, docking, and report acceptance retain their
 contracts. Highway, Incidental Scan, and Focused Frontier Batching retain
-default-off configuration models; existing local active test settings are
-preserved.
+`off` constructor fallbacks, while the shipped `simulation.default.ini` now
+sets all three to `active`.
 
-Fresh live validation should compare frame-stage times, drone-local planning
-bounds, graph publication latency, route fallbacks, accepted reports, and
-ACK/quiescence behavior. Do not infer causal improvement from mission time.
+Future matched validation should compare frame-stage times, drone-local
+planning bounds, graph publication latency, route fallbacks, accepted reports,
+and ACK/quiescence behavior. Do not infer causal improvement from mission time.
 
-Verification after these changes: 608 automated tests passed, `compileall`
+Verification before the latest live run: 608 automated tests passed, `compileall`
 passed, and `git diff --check` reported only LF/CRLF warnings. Historical
 all-active seed-5 trace analysis still succeeds. SHA-256 hashes of all four
-generated `Assets/Map` files are unchanged. No new live mission was run.
+generated `Assets/Map` files were unchanged at that checkpoint.
+
+## Latest all-active live baseline and cleanup
+
+`mission_trace_20261009_125123_464282.jsonl` completed exploration at 345.71 s
+with 97.62% floor coverage and captured shutdown at 364.89 s. All 48 claims
+received reports. One Focused Frontier Batch had two applicable, complete
+members; there were no rejected/replayed batch reports, open batch claims, or
+open leases. All 55 docks released. Drone-local planning peaked at 76.74 ms.
+Seven eligible returns used highway-derived routes; observed shortcuts match
+intentional route straightening. The user reported a smooth run. This is
+concurrent live evidence, not causal proof of a performance gain.
+
+The subsequent [behavior-preserving cleanup](CLEANUP_AUDIT.md) retains these
+contracts. Its analyzer produces exactly the same summary as commit `05a2d8a`
+for this trace and the historical all-active seed-5 trace. Cleanup verification
+includes the complete automated suite and a real background-worker smoke check
+on synthetic maps; it does not regenerate cave assets or run a new mission.

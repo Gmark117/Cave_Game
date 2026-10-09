@@ -406,7 +406,7 @@ class MissionControl(MissionControlLifecycleMixin):
         self.exploration_complete = False
 
         # Initialize presentation adapter for UI state and map rendering
-        self.presentation = PresentationAdapter(self.map_w, self.map_h)
+        self.presentation = PresentationAdapter()
         self.slam_renderer = SlamRenderer(
             self.map_w,
             self.map_h,

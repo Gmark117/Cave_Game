@@ -155,6 +155,30 @@ class PathfindingServiceTests(unittest.TestCase):
         semaphore.acquire.assert_called_once_with()
         semaphore.release.assert_called_once_with()
 
+    def test_failed_requests_release_the_semaphore_and_keep_each_api_fallback(self) -> None:
+        for method_name in ("compute_path", "compute_path_segment"):
+            for failure_at in ("submit", "result"):
+                with self.subTest(method=method_name, failure_at=failure_at):
+                    service = PathfindingService(np.zeros((4, 4), dtype=np.uint8), 1)
+                    service.map_shm = SimpleNamespace(name="mission-map")
+                    service.map_shape = (4, 4)
+                    service.pool_sem = Mock()
+                    future = Mock()
+                    service.pool = Mock()
+                    service.pool.submit.return_value = future
+                    failing_call = service.pool.submit if failure_at == "submit" else future.result
+                    failing_call.side_effect = OSError("worker unavailable")
+
+                    with self.assertLogs("navigation.pathfinding", level="WARNING"):
+                        result = getattr(service, method_name)((0, 0), (3, 3))
+
+                    service.pool_sem.acquire.assert_called_once_with()
+                    service.pool_sem.release.assert_called_once_with()
+                    if method_name == "compute_path":
+                        self.assertEqual(result, [])
+                    else:
+                        self.assertEqual(result.status, astar_pathfinder.PATH_RESOURCE_UNAVAILABLE)
+
     def test_weighted_path_delegates_with_service_cave_map(self) -> None:
         cave_map = np.zeros((3, 3), dtype=np.uint8)
         roughness = np.full((3, 3), 0.25, dtype=np.float32)

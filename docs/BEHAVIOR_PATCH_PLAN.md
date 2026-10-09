@@ -1,12 +1,20 @@
-# Proposed behavior patches: contact, routing, scanning, and focused frontier batching
+# Behavior patches and historical rollout plan: contact, routing, scanning, and focused frontier batching
 
-Status: Patch A is implemented and live-tested. Patch A2 is implemented and
-unit-tested, with live trace validation pending. Patch C is implemented behind
-the default-off `off`/`observe`/`active` mode, unit-tested, and paired on seeds
-0 and 5; it remains default-off. Patch B and Patch D are implemented behind
-separate committed-default-off rollouts and unit-tested. Matched Highway and
-Focused Frontier Batching runs on seeds 0 and 5, followed by a combined
-all-active seed-5 run, passed live validation; all rollouts remain default-off.
+Current status (2026-10-09): Patches A/A2, Highway, Incidental Scan, and
+Focused Frontier Batching are implemented and live-tested. The shipped
+`GameConfig/simulation.default.ini` sets all three optional feature modes to
+`active`; their dataclass constructors still fall back to `off`. The latest
+all-active trace, `mission_trace_20261009_125123_464282.jsonl`, completed
+exploration at 345.71 s with 97.62% floor coverage, all 48 claims reported,
+all 55 docks released, and shutdown at 364.89 s. No batch claims or leases
+remained open. See [highway validation](HIGHWAY_BACKBONE_VALIDATION.md) and
+the [cleanup audit](CLEANUP_AUDIT.md) for current evidence and verification.
+
+This document retains the original design and staged experiment protocols as
+historical rationale. Those rollout instructions do not override the current
+shipped settings or authorize further behavior changes. Native highway work
+can overrun the attempt budget before the next check; whole-run asynchronous
+timing is not causal performance proof.
 
 ## Current evidence and boundaries
 
@@ -137,8 +145,8 @@ rotation behavior.
 **Implementation status.** The rover-SLAM graph, bounded queries, physical
 snapshot publication, check-in-only drone following, configuration, telemetry,
 and analyzer output are implemented behind `[HIGHWAY] mode = off|observe|active`.
-The committed mode is `off`. `observe` publishes and evaluates the same advice
-as `active` but leaves motion on the existing segmented A* path. The first
+The shipped mode is `active`; the constructor fallback is `off`. `observe` publishes and evaluates the same advice
+as `active` but leaves motion on the existing segmented A* path. The implemented
 active scope is component return/check-in only; task transit, DFS reposition,
 probe, and homing behavior are unchanged.
 
@@ -173,9 +181,9 @@ navigation and batching. This bounded heuristic does not guarantee a global
 shortest path. Connector/query limits, newer drone-local obstacle rejection,
 report-encounter priority, and segmented A*/breadcrumb fallbacks remain intact.
 
-The current drone A* adapter uses the simulator cave map. This patch keeps that adapter for connector and fallback searches while ensuring the *highway itself* comes only from physically collated rover SLAM. Replacing the adapter with belief-only drone A* would be a separate behavior change and should not be hidden inside this patch.
+The ordinary segmented drone A* fallback uses the simulator cave map. Highway connectors and the bounded return comparison use known-free SLAM, and the highway itself comes only from physically collated rover SLAM. Replacing the adapter with belief-only drone A* would be a separate behavior change and should not be hidden inside this patch.
 
-**Execution priority.** Physical report encounter and safety validation outrank highway following. A newly learned rendezvous endpoint or task change invalidates the remaining route and selects again from the drone's locally held knowledge. The highway can guide check-in, task transit, DFS reposition, and homing, but first enable it for check-in and compare that isolated behavior before widening its use. The route planner must not reassign component work.
+**Execution priority.** Physical report encounter and safety validation outrank highway following. A newly learned rendezvous endpoint or task change invalidates the remaining route and selects again from the drone's locally held knowledge. Drone highway following is restricted to eligible component return/check-in. Widening that scope would be separate behavior work. The route planner must not reassign component work.
 
 Each newly received rover SLAM version is submitted, with one process job in
 flight and newer uploads coalesced. The limits remain a 250 ms build budget,
@@ -185,8 +193,8 @@ cached paths must be revalidated against current local SLAM. The access-distance
 2.0 LiDAR ranges. `macro_cell_size` remains readable for old configurations but
 is unused by the corridor builder. The old 145 ms all-free timing applies to
 the tiled baseline, not this replacement. Frozen-map comparisons and the
-native-work limit are recorded in `HIGHWAY_BACKBONE_VALIDATION.md`; live
-validation of the corridor replacement remains pending.
+native-work limits and the latest complete live validation are recorded in
+`HIGHWAY_BACKBONE_VALIDATION.md`.
 
 **Implemented sequence.**
 
@@ -205,7 +213,8 @@ validation of the corridor replacement remains pending.
 
 **Implementation status.** The local-SLAM detector, persistent attempt memory,
 resumable transit overlay, budgets, trace events, UI state, settings round-trip,
-and analyzer aggregation are implemented. The committed default is `off`.
+and analyzer aggregation are implemented. The shipped mode is `active`;
+the constructor fallback is `off`.
 Matched seed 5 and seed 0 `observe`/`active` runs completed all five active
 scans without timeout or cancellation, retained all interrupted routes, and
 learned 2,333 cells with 1.53 s of scan waiting. Active was faster and shorter
@@ -234,11 +243,10 @@ and waiting remain excluded.
 
 ## Patch D — Focused Frontier Batching
 
-**Status and purpose.** Implemented behind a committed-default-off
-`FOCUSED_FRONTIER_BATCH` rollout; focused unit and interaction coverage is in
-place. Matched observe/active validation on seeds 0 and 5 and the combined
-seed-5 baseline passed; the later highway/rendezvous adjustments require fresh
-live evidence. Focused Frontier
+**Status and purpose.** Implemented behind the configurable
+`FOCUSED_FRONTIER_BATCH` mode; focused unit and interaction coverage is in
+place. Matched observe/active validation on seeds 0 and 5, the combined
+seed-5 baseline, and the latest October 9 all-active run provide live evidence. Focused Frontier
 Batching reduces repeated drone-to-rover round trips during the registry's
 focused phase by claiming nearby existing component tasks together and by
 allowing bounded, provisional service of frontiers newly exposed inside an
@@ -262,8 +270,8 @@ starts that work. If a complete plan cannot be finalized inside the remaining
 budget, it is discarded before any claim or lease mutation.
 
 Focused Frontier Batching has its own
-`[FOCUSED_FRONTIER_BATCH] mode = off|observe|active` rollout and is committed
-`off`. `off` must preserve the current scheduler, directive shapes, claim path,
+`[FOCUSED_FRONTIER_BATCH] mode = off|observe|active` setting. The shipped mode
+is `active`; its constructor fallback remains `off`. `off` must preserve the current scheduler, directive shapes, claim path,
 executor, report path, and trace output. `observe` computes the same seed
 assignments, candidate batches, leases, costs, and rejection reasons that
 `active` would compute, but it neither changes assignment ordering nor reserves
@@ -473,11 +481,11 @@ provisional node is done, or a global bound requires return, freeze all
 contexts, return once, and create one batch report. Patch A report encounter may
 shorten that return exactly as it does now.
 
-Proposed conservative initial `[FOCUSED_FRONTIER_BATCH]` defaults are:
+Current shipped `[FOCUSED_FRONTIER_BATCH]` settings are:
 
 ```ini
 [FOCUSED_FRONTIER_BATCH]
-mode = off
+mode = active
 maximum_claimed_components = 3
 maximum_total_components = 4
 lease_margin_sensor_ranges = 1.0
@@ -633,7 +641,7 @@ docking and release, empty check-in, energy suspension, report retry, waiting,
 team quiescence, and universal ACK gating. Add analyzer fixtures for observe,
 active, replay, stale member, bounds, and Patch C interaction.
 
-Implementation should be staged through these seams:
+The original implementation was staged through these seams:
 
 1. Add config/settings/UI round-trip, frozen contracts, snapshot visibility,
    atomic registry claim-group and pure cost/lease helpers in
@@ -649,7 +657,11 @@ Implementation should be staged through these seams:
    contracts and validation commands. Do not run or overwrite generated map
    assets as part of implementation or tests.
 
-### Staged live rollout and acceptance
+### Historical staged live rollout and acceptance
+
+The following protocol records the original isolation/acceptance criteria.
+The current shipped modes are active following reviewed live validation;
+constructor fallbacks and explicit off/observe configurations remain supported.
 
 First validate `[HIGHWAY] observe` versus `active` with `FOCUSED_FRONTIER_BATCH=off` and
 `INCIDENTAL_SCAN=off`, checking graph/build budgets and check-in route behavior.

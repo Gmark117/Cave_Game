@@ -29,7 +29,7 @@ def _initialize_worker():
         pass
 
 
-def _build(slam, settings, kind):
+def _build(slam, settings):
     return build_highway_graph(slam, maximum_connector_expansions=4096,
                                preparation_cache=_preparation_cache, **settings)
 
@@ -49,7 +49,6 @@ class HighwayWorker:
         self.future = None
         self.job_slam = None
         self.job_free = None
-        self.job_kind = None
         self.job_version = self.job_geometry = None
         self.job_retry = False
         self.retry = None
@@ -66,7 +65,7 @@ class HighwayWorker:
             return HighwayBuildResult("cached", graph, 0, graph.area_count,
                                       graph.edge_count, graph.known_free_cells,
                                       source_version=slam.version, build_kind="cached")
-        self._submit(current)
+        self._submit()
         return HighwayBuildResult("pending" if not self.closed else "unavailable", None, 0,
                                   known_free_cells=int(np.count_nonzero(self.latest_free)),
                                   source_version=slam.version)
@@ -79,15 +78,13 @@ class HighwayWorker:
         return (geometry == self.latest_geometry and free.shape == self.latest_free.shape
                 and not np.any(free & ~self.latest_free))
 
-    def _submit(self, current):
+    def _submit(self):
         now = self.now()
         if self.closed or self.future is not None or self.latest is None or now - self.last_submission < self.MINIMUM_INTERVAL:
             return
-        dirty = not self._matches_publication()
-        if not dirty:
+        if self._matches_publication():
             self.retry = None
             return
-        kind = "full"
         self.job_slam = self.latest
         self.job_free = self.latest_free
         self.job_geometry = self.latest_geometry
@@ -98,15 +95,14 @@ class HighwayWorker:
             if self._safe_subset(free, geometry):
                 self.job_slam, self.job_free, self.job_geometry = slam, free, geometry
                 self.job_retry = True
-        self.job_kind = kind
         self.job_version = self.job_slam.version
         self.last_submission = now
         try:
-            self.future = self.executor.submit(_build, self.job_slam, self.settings, kind)
+            self.future = self.executor.submit(_build, self.job_slam, self.settings)
         except (RuntimeError, OSError):
             self.closed = True
 
-    def poll(self, current):
+    def poll(self):
         result = None
         if self.future is not None and self.future.done():
             try:
@@ -116,7 +112,7 @@ class HighwayWorker:
                 result = HighwayBuildResult("unavailable", None, 0)
                 self.closed = True
             self.future = None
-            result = replace(result, source_version=self.job_version, build_kind=self.job_kind)
+            result = replace(result, source_version=self.job_version, build_kind="full")
             if (result.status == "budget_exhausted" and not self.job_retry
                     and self._safe_subset(self.job_free, self.job_geometry)):
                 # Finish one exact input before newer additions replace its
@@ -135,12 +131,11 @@ class HighwayWorker:
                     result = replace(result, snapshot=graph)
                     self.published_free = self.latest_free if unchanged else self.job_free
                     self.published_geometry = self.job_geometry
-                    current = graph
                 else:
                     # Stale results cannot roll back a corrected wall or a
                     # newer publication.
                     result = replace(result, status="superseded", snapshot=None)
-        self._submit(current)
+        self._submit()
         return result
 
     def shutdown(self):

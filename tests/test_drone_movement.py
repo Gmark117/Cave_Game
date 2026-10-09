@@ -903,7 +903,7 @@ class DroneMovementTests(unittest.TestCase):
         current = (16, 32)
         self.drone.runtime_state.move_to(current)
         now = controller._simulation_time()
-        controller._record_coverage_transition(
+        controller.coverage_memory.record_transition(
             current,
             (48, 32),
             now,
@@ -943,27 +943,33 @@ class DroneMovementTests(unittest.TestCase):
         controller = self.drone.movement_controller
         current = (16, 32)
         now = controller._simulation_time()
-        controller._record_coverage_transition(
+        controller.coverage_memory.record_transition(
             current,
             (48, 32),
             now,
         )
-        immediate = controller._coverage_heading_penalties(
+        immediate = controller.coverage_memory.heading_penalties(
             (90,),
             current=current,
             apply_penalty=True,
+            now=controller._simulation_time(),
+            width=self.drone.game.width,
+            height=self.drone.game.height,
         )[3][90]
         controller.dependencies = replace(
             controller.dependencies,
             simulation_time=lambda: (
-                now + 10.0 * controller.coverage_memory_decay_seconds
+                now + 10.0 * controller.coverage_memory.decay_seconds
             ),
         )
 
-        decayed = controller._coverage_heading_penalties(
+        decayed = controller.coverage_memory.heading_penalties(
             (90,),
             current=current,
             apply_penalty=True,
+            now=controller._simulation_time(),
+            width=self.drone.game.width,
+            height=self.drone.game.height,
         )[3][90]
 
         self.assertGreater(decayed, immediate)
@@ -985,7 +991,7 @@ class DroneMovementTests(unittest.TestCase):
         current = (48, 48)
         self.drone.runtime_state.move_to(current)
         now = controller._simulation_time()
-        controller._record_coverage_transition(
+        controller.coverage_memory.record_transition(
             current,
             (16, 48),
             now,

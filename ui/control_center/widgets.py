@@ -6,7 +6,6 @@ from typing import Any, Optional
 import pygame
 
 from asset_config.gameplay import Display
-from asset_config.media import Images
 
 
 BUTTON_ASSET_DIR = (
@@ -28,16 +27,6 @@ BUTTON_SEPARATOR_RADIUS = 3
 
 class ControlCenterWidgetMixin:
     """Draw tabs, toggles, and renderer-owned hit rectangles."""
-
-    def draw_heatmap_toggle(self, enabled: bool) -> None:
-        """Draw the global terrain heatmap toggle and save its hit rect."""
-        rect = self._button_row_rects(1, self.TAB_Y)[0]
-        self.draw_image_button(
-            rect,
-            self._state_asset_name("lidar_view", enabled),
-            active=enabled,
-        )
-        self._heatmap_toggle = self._absolute_rect(rect)
 
     def draw_mission_controls(
         self,
@@ -125,115 +114,6 @@ class ControlCenterWidgetMixin:
             return
         self.draw_image_button(rect, asset_name, active=active)
 
-    def draw_tab_icon(
-        self,
-        target: pygame.Surface,
-        tab_name: str,
-        color: tuple[int, int, int],
-    ) -> None:
-        """Draw a loaded tab sprite, or a simple fallback icon."""
-        width, height = target.get_size()
-        center_x = width // 2
-        center_y = height // 2
-
-        if tab_name in self._tab_sprites:
-            image = self._tab_sprites[tab_name]
-            target.blit(
-                image,
-                (
-                    (width - image.get_width()) // 2,
-                    (height - image.get_height()) // 2,
-                ),
-            )
-            return
-
-        if tab_name == "drones":
-            pygame.draw.circle(
-                target,
-                color,
-                (center_x, center_y + 2),
-                5,
-                width=2,
-            )
-            pygame.draw.line(
-                target,
-                color,
-                (center_x - 10, center_y - 6),
-                (center_x + 10, center_y - 6),
-                2,
-            )
-            pygame.draw.line(
-                target,
-                color,
-                (center_x, center_y - 11),
-                (center_x, center_y - 1),
-                2,
-            )
-        elif tab_name == "rovers":
-            pygame.draw.rect(
-                target,
-                color,
-                pygame.Rect(center_x - 10, center_y - 6, 20, 10),
-                width=2,
-                border_radius=2,
-            )
-            pygame.draw.circle(
-                target,
-                color,
-                (center_x - 7, center_y + 8),
-                3,
-                width=1,
-            )
-            pygame.draw.circle(
-                target,
-                color,
-                (center_x + 7, center_y + 8),
-                3,
-                width=1,
-            )
-        elif tab_name == "debug":
-            pygame.draw.circle(
-                target,
-                color,
-                (center_x - 2, center_y - 2),
-                6,
-                width=2,
-            )
-            pygame.draw.line(
-                target,
-                color,
-                (center_x + 3, center_y + 3),
-                (center_x + 10, center_y + 10),
-                2,
-            )
-            pygame.draw.line(
-                target,
-                color,
-                (center_x - 2, center_y - 6),
-                (center_x - 2, center_y + 2),
-                1,
-            )
-            pygame.draw.line(
-                target,
-                color,
-                (center_x - 6, center_y - 2),
-                (center_x + 2, center_y - 2),
-                1,
-            )
-        else:
-            for index, bar_height in enumerate((6, 11, 8)):
-                pygame.draw.rect(
-                    target,
-                    color,
-                    pygame.Rect(
-                        center_x - 9 + index * 7,
-                        center_y + 6 - bar_height,
-                        4,
-                        bar_height,
-                    ),
-                    border_radius=1,
-                )
-
     def _draw_drone_toggles(
         self,
         status: Any,
@@ -270,19 +150,16 @@ class ControlCenterWidgetMixin:
             path_rect,
             "P",
             status.show_path,
-            status.color,
         )
         self.draw_toggle_button(
             vision_rect,
             "V",
             status.show_vision,
-            status.color,
         )
         self.draw_toggle_button(
             selected_rect,
             "T",
             selected_drone_heatmap_id == status.id,
-            status.color,
         )
         self._drone_toggles.extend(
             (
@@ -321,7 +198,6 @@ class ControlCenterWidgetMixin:
             highway_rect,
             "P",
             status.show_highway,
-            status.color,
         )
         self._rover_toggles.append((
             status.id,
@@ -338,7 +214,6 @@ class ControlCenterWidgetMixin:
             rect,
             "T",
             selected_rover_heatmap_id == status.id,
-            status.color,
         )
         self._rover_toggles.append((
             status.id,
@@ -351,7 +226,6 @@ class ControlCenterWidgetMixin:
         rect: pygame.Rect,
         label: str,
         enabled: bool,
-        accent_color: tuple[int, int, int],
     ) -> None:
         """Draw a small labeled or square toggle button."""
         self.draw_image_button(
@@ -523,52 +397,6 @@ class ControlCenterWidgetMixin:
         """Resolve an ON/OFF button asset name from a prefix."""
         state = "ON" if enabled else "OFF"
         return f"{prefix}_{state}_button.png"
-
-    def _load_tab_sprites(self) -> None:
-        """Load optional bitmap icons for tab buttons."""
-        self._load_tab_sprite(
-            "drones",
-            Images.DRONE.value,
-            (28, 28),
-        )
-        self._load_tab_sprite(
-            "rovers",
-            Images.ROVER.value,
-            (28, 28),
-        )
-        self._load_tab_sprite(
-            "debug",
-            Images.DEBUG_ICON.value,
-            (34, 34),
-        )
-        self._load_tab_sprite(
-            "system",
-            Images.SYSTEM_ICON.value,
-            (36, 36),
-        )
-
-    def _load_tab_sprite(
-        self,
-        tab_name: str,
-        image_path: Any,
-        size: tuple[int, int],
-    ) -> None:
-        """Load a tab icon, preferring the outlined variant when present."""
-        try:
-            path = Path(str(image_path))
-            outlined = path.with_name(
-                path.stem + "_outlined" + path.suffix
-            )
-            load_path = outlined if outlined.exists() else path
-            image = pygame.image.load(
-                str(load_path)
-            ).convert_alpha()
-        except Exception:
-            return
-        self._tab_sprites[tab_name] = pygame.transform.smoothscale(
-            image,
-            size,
-        )
 
     def _absolute_rect(
         self,

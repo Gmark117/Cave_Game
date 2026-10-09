@@ -217,6 +217,57 @@ class MenuSettingsRepositoryTests(unittest.TestCase):
 
         self.assertIsNone(repository.load_simulation(SimulationConfig()))
 
+    def test_shipped_modes_are_active_but_constructor_fallbacks_are_off(self) -> None:
+        defaults = SimulationConfig()
+        repository = MenuSettingsRepository(Path(__file__).resolve().parents[1])
+        config = configparser.ConfigParser()
+        config.read(repository.simulation_default_path)
+        shipped = repository._load_current(config, defaults)
+
+        for name in ("highway", "incidental_scan", "focused_frontier_batch"):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(shipped, name).mode, "active")
+                self.assertEqual(getattr(defaults, name).mode, "off")
+
+    def test_partial_local_file_uses_supplied_fallbacks_without_merging_shipped_file(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.simulation_default_path.write_text("[HIGHWAY]\nmode = active\n")
+        repository.simulation_path.write_text("[MISSION]\nseed = 42\n")
+
+        loaded = repository.load_simulation(SimulationConfig())
+
+        self.assertEqual(loaded.mission_config.seed, 42)
+        self.assertEqual(loaded.highway.mode, "off")
+
+    def test_current_batch_section_takes_precedence_over_legacy_section(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        repository.simulation_path.write_text(
+            "[FOCUSED_FRONTIER_BATCH]\nmode = observe\n"
+            "[ENDGAME_BATCH]\nmode = active\nmaximum_route_queries = 17\n"
+        )
+
+        loaded = repository.load_simulation(SimulationConfig())
+
+        self.assertEqual(loaded.focused_frontier_batch.mode, "observe")
+        self.assertEqual(loaded.focused_frontier_batch.maximum_route_queries, 128)
+
+    def test_scalar_conversion_uses_declared_types_and_preserves_trace_boolean_rule(self) -> None:
+        temporary_directory, repository = self.make_repository()
+        self.addCleanup(temporary_directory.cleanup)
+        defaults = SimulationConfig()
+        defaults = replace(defaults, slam=replace(defaults.slam, scan_interval=1))
+        for enabled in ("ON", "yes", "true", "1", "off", "invalid", ""):
+            with self.subTest(enabled=enabled):
+                repository.simulation_path.write_text(
+                    "[SLAM]\nscan_interval = 0.125\n"
+                    f"[TRACE]\nenabled = {enabled}\n"
+                )
+                loaded = repository.load_simulation(defaults)
+                self.assertEqual(loaded.slam.scan_interval, 0.125)
+                self.assertEqual(loaded.trace.enabled, enabled in {"ON", "yes", "true", "1"})
+
     def test_invalid_section_restores_only_that_section_defaults(self) -> None:
         temporary_directory, repository = self.make_repository()
         self.addCleanup(temporary_directory.cleanup)

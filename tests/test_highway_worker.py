@@ -14,9 +14,9 @@ class Executor:
         self.jobs = []
         self.stopped = False
 
-    def submit(self, callback, slam, settings, kind):
+    def submit(self, callback, slam, settings):
         future = Future()
-        self.jobs.append((future, slam, kind))
+        self.jobs.append((future, slam))
         return future
 
     def shutdown(self, **kwargs):
@@ -46,7 +46,7 @@ class HighwayWorkerTests(unittest.TestCase):
     def finish(self, result=None):
         self.executor.jobs[-1][0].set_result(result or self.result)
         self.clock += self.worker.MINIMUM_INTERVAL
-        return self.worker.poll(None)
+        return self.worker.poll()
 
     def test_uploads_coalesce_and_unchanged_geometry_rebases_version(self):
         self.worker.request(self.slam, None)
@@ -91,7 +91,7 @@ class HighwayWorkerTests(unittest.TestCase):
         self.worker.request(self.slam, None)
         graph = self.finish().snapshot
         self.clock = 2.1
-        self.worker.poll(graph)
+        self.worker.poll()
         self.assertEqual(len(self.executor.jobs), 1)
         self.occupancy[10, 20] = OCCUPIED
         self.worker.request(self.snapshot(2), graph)
@@ -104,8 +104,7 @@ class HighwayWorkerTests(unittest.TestCase):
         self.worker.request(self.snapshot(4), graph)
         self.assertEqual(len(self.executor.jobs), 2)
         self.clock = submitted + 2.01
-        self.worker.poll(graph)
-        self.assertEqual(self.executor.jobs[-1][2], "full")
+        self.worker.poll()
         self.assertEqual(self.executor.jobs[-1][1].version, 4)
         self.assertEqual(len(self.executor.jobs), 3)
 
@@ -113,24 +112,24 @@ class HighwayWorkerTests(unittest.TestCase):
         self.worker.request(self.slam, None)
         graph = self.finish().snapshot
         self.clock = 120
-        self.worker.poll(graph)
+        self.worker.poll()
         self.assertEqual(len(self.executor.jobs), 1)
 
     def test_failed_build_retries_only_after_throttle_interval(self):
         self.worker.request(self.slam, None)
         self.executor.jobs[-1][0].set_result(HighwayBuildResult("budget_exhausted", None, 250))
         self.clock = .25
-        result = self.worker.poll(None)
+        result = self.worker.poll()
         self.assertIsNone(result.snapshot)
         self.assertEqual(len(self.executor.jobs), 1)
         self.clock = 2
-        self.worker.poll(None)
+        self.worker.poll()
         self.assertEqual(len(self.executor.jobs), 2)
 
     def test_worker_exception_disables_optional_advice(self):
         self.worker.request(self.slam, None)
         self.executor.jobs[-1][0].set_exception(RuntimeError("worker stopped"))
-        result = self.worker.poll(None)
+        result = self.worker.poll()
         self.assertEqual(result.status, "unavailable")
         self.assertTrue(self.worker.closed)
         self.assertEqual(self.worker.request(self.snapshot(2), None).status, "unavailable")
@@ -158,11 +157,11 @@ class HighwayWorkerTests(unittest.TestCase):
         self.worker.request(self.slam, None)
         self.executor.jobs[-1][0].set_result(HighwayBuildResult("budget_exhausted", None, 250))
         self.clock = .25
-        self.worker.poll(None)
+        self.worker.poll()
         self.occupancy[10, 20] = OCCUPIED
         self.worker.request(self.snapshot(2), None)
         self.clock = 2
-        self.worker.poll(None)
+        self.worker.poll()
         self.assertEqual(self.executor.jobs[-1][1].version, 2)
         self.assertFalse(self.worker.job_retry)
 

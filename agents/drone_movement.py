@@ -13,6 +13,8 @@ from typing import Any, Callable, Iterable, Tuple
 import numpy as np
 from navigation.local_slam_routes import LocalSlamRoutePlanner, bounded_local_planning
 
+from agents.exploration_policy import CoverageCell, CoverageMemory
+
 from agents.component_explorer import (
     FrontierObservationPose,
     IncidentalPocketSignature,
@@ -66,8 +68,6 @@ from navigation.highway import HighwayGraphSnapshot
 
 
 Position = Tuple[int, int]
-CoverageCell = tuple[int, int]
-CoverageEdge = tuple[CoverageCell, CoverageCell]
 logger = logging.getLogger(__name__)
 _GLOBAL_LAUNCH_SECTOR_TIE_RATIO = 0.25
 _GLOBAL_TARGET_SWITCH_SCORE_MARGIN = 0.5
@@ -244,14 +244,6 @@ class DroneActivitySnapshot:
     dfs_depth: int = 0
     peer_id: int | None = None
     rover_id: int | None = None
-
-
-@dataclass(frozen=True)
-class _CoverageRecord:
-    """Exponentially decaying traversal pressure for one cell or edge."""
-
-    value: float
-    updated_at: float
 
 
 @dataclass(frozen=True)
@@ -512,22 +504,6 @@ class DroneMovementController:
         self.separation_direction_bias = float(
             exploration.separation_direction_bias
         )
-        self.coverage_memory_cell_size = max(
-            1,
-            int(exploration.coverage_memory_cell_size),
-        )
-        self.coverage_memory_decay_seconds = max(
-            1e-9,
-            float(exploration.coverage_memory_decay_seconds),
-        )
-        self.coverage_visit_weight = max(
-            0.0,
-            float(exploration.coverage_visit_weight),
-        )
-        self.coverage_edge_weight = max(
-            0.0,
-            float(exploration.coverage_edge_weight),
-        )
         incidental = drone.settings.incidental_scan
         self.incidental_scan_mode = str(incidental.mode).casefold()
         self.incidental_maximum_attempts = max(
@@ -571,23 +547,9 @@ class DroneMovementController:
         )
         self._last_local_route_status = "unavailable"
         coverage_started_at = self._simulation_time()
-        initial_coverage_cell = self._coverage_cell(
-            drone.snapshot().position
+        self.coverage_memory = CoverageMemory(
+            exploration, drone.snapshot().position, coverage_started_at,
         )
-        self._coverage_cell_visits: dict[
-            CoverageCell,
-            _CoverageRecord,
-        ] = {
-            initial_coverage_cell: _CoverageRecord(
-                value=1.0,
-                updated_at=coverage_started_at,
-            )
-        }
-        self._coverage_edge_visits: dict[
-            CoverageEdge,
-            _CoverageRecord,
-        ] = {}
-        self._coverage_last_cell = initial_coverage_cell
         progress = drone.slam_map.progress_snapshot()
         self._stagnation_sensor_baseline = (
             progress.sensor_newly_known_cells
@@ -2376,7 +2338,6 @@ class DroneMovementController:
         self,
         execution: _CoordinationExecution,
     ) -> bool:
-        dfs = execution.dfs
         return bool(
             execution.directive.spatial_lease is not None
             and execution.batch_consecutive_low_gain_scans
@@ -4827,11 +4788,6 @@ class DroneMovementController:
 
     def _sweep_anchor_spacing(self) -> float:
         """Return the lateral width of one outward-facing sensor footprint."""
-        sensor = getattr(
-            getattr(self.drone, "sensor_controller", None),
-            "vision_sensor",
-            None,
-        )
         fov = self._sensor_fov()
         half_angle = min(90.0, max(0.0, fov / 2.0))
         return max(
@@ -4854,18 +4810,6 @@ class DroneMovementController:
     def _component_policy_enabled(self) -> bool:
         """Return whether frontier-component coordination is configured."""
         return callable(self.dependencies.exploration_check_in)
-
-    def coordination_rendezvous_pending(self) -> bool:
-        """Return whether the moving rover should hold for this drone."""
-        execution = self._coordination_execution
-        return bool(
-            self._coordination_report is not None
-            or self._coordination_ready is not None
-            or (
-                execution is not None
-                and execution.phase == "returning"
-            )
-        )
 
     def _start_sector_check_in(self, *, reason: str) -> None:
         """Retire the current assignment and begin the rover rendezvous."""
@@ -5515,8 +5459,8 @@ class DroneMovementController:
             maximum_coverage_edge_pressure=max(
                 bias.coverage_edge_pressure.values()
             ),
-            coverage_known_cell_count=len(self._coverage_cell_visits),
-            coverage_known_edge_count=len(self._coverage_edge_visits),
+            coverage_known_cell_count=len(self.coverage_memory.cell_visits),
+            coverage_known_edge_count=len(self.coverage_memory.edge_visits),
             maximum_wall_support=max(bias.wall_support.values()),
             maximum_frontier_support=max(bias.frontier_support.values()),
             maximum_global_frontier_support=max(
@@ -5702,10 +5646,13 @@ class DroneMovementController:
             coverage_visit_pressure,
             coverage_edge_pressure,
             coverage_penalty_factor,
-        ) = self._coverage_heading_penalties(
+        ) = self.coverage_memory.heading_penalties(
             directions,
             current=current,
             apply_penalty=not sector_ingress,
+            now=self._simulation_time(),
+            width=self.drone.game.width,
+            height=self.drone.game.height,
         )
         if sector_ingress:
             mode = "sector_ingress"
@@ -5839,147 +5786,6 @@ class DroneMovementController:
                 global_guidance.ownership_contribution
             ),
             global_slam_version=global_guidance.slam_version,
-        )
-
-    def _coverage_cell(self, position: Position) -> CoverageCell:
-        """Return the coarse coverage-memory cell for a map position."""
-        return (
-            int(position[0]) // self.coverage_memory_cell_size,
-            int(position[1]) // self.coverage_memory_cell_size,
-        )
-
-    @staticmethod
-    def _coverage_edge(
-        first: CoverageCell,
-        second: CoverageCell,
-    ) -> CoverageEdge:
-        """Return one direction-independent coarse traversal edge."""
-        return (first, second) if first <= second else (second, first)
-
-    def _coverage_record_value(
-        self,
-        record: _CoverageRecord | None,
-        now: float,
-    ) -> float:
-        """Return an exponentially decayed visit pressure."""
-        if record is None:
-            return 0.0
-        elapsed = max(0.0, float(now) - record.updated_at)
-        return record.value * math.exp(
-            -elapsed / self.coverage_memory_decay_seconds
-        )
-
-    def _increment_coverage_record(
-        self,
-        records: dict[Any, _CoverageRecord],
-        key: Any,
-        now: float,
-    ) -> None:
-        """Add one visit after lazily decaying the previous pressure."""
-        records[key] = _CoverageRecord(
-            value=self._coverage_record_value(records.get(key), now) + 1.0,
-            updated_at=float(now),
-        )
-
-    def _coverage_heading_penalties(
-        self,
-        directions: Iterable[int],
-        *,
-        current: Position,
-        apply_penalty: bool,
-    ) -> tuple[
-        dict[int, CoverageCell],
-        dict[int, float],
-        dict[int, float],
-        dict[int, float],
-    ]:
-        """Score projected cells and repeated edges for candidate headings."""
-        now = self._simulation_time()
-        current_cell = self._coverage_cell(current)
-        width = max(1, int(self.drone.game.width))
-        height = max(1, int(self.drone.game.height))
-        cells: dict[int, CoverageCell] = {}
-        visit_pressure: dict[int, float] = {}
-        edge_pressure: dict[int, float] = {}
-        penalty_factor: dict[int, float] = {}
-        for raw_direction in directions:
-            direction = int(raw_direction)
-            projected = next_cell_coords(
-                *current,
-                self.coverage_memory_cell_size,
-                direction,
-            )
-            projected = (
-                min(max(int(projected[0]), 0), width - 1),
-                min(max(int(projected[1]), 0), height - 1),
-            )
-            cell = self._coverage_cell(projected)
-            edge = self._coverage_edge(current_cell, cell)
-            if cell == current_cell:
-                # A coarse cell does not distinguish headings within itself;
-                # penalizing it would arbitrarily overpower other evidence
-                # near map edges and cell centers.
-                visits = 0.0
-                traversals = 0.0
-            else:
-                visits = self._coverage_record_value(
-                    self._coverage_cell_visits.get(cell),
-                    now,
-                )
-                traversals = self._coverage_record_value(
-                    self._coverage_edge_visits.get(edge),
-                    now,
-                )
-            pressure = (
-                self.coverage_visit_weight * math.log1p(visits)
-                + self.coverage_edge_weight * math.log1p(traversals)
-            )
-            cells[direction] = cell
-            visit_pressure[direction] = visits
-            edge_pressure[direction] = traversals
-            penalty_factor[direction] = (
-                1.0 if not apply_penalty else 1.0 / (1.0 + pressure)
-            )
-        return cells, visit_pressure, edge_pressure, penalty_factor
-
-    def _record_coverage_transition(
-        self,
-        previous: Position,
-        current: Position,
-        now: float,
-    ) -> tuple[int, int, int, int]:
-        """Record one coarse cell crossing and return trace counters."""
-        previous_cell = self._coverage_cell(previous)
-        current_cell = self._coverage_cell(current)
-        if self._coverage_last_cell != previous_cell:
-            self._increment_coverage_record(
-                self._coverage_cell_visits,
-                previous_cell,
-                now,
-            )
-            self._coverage_last_cell = previous_cell
-        if current_cell == previous_cell:
-            return 0, 0, 0, 0
-
-        edge = self._coverage_edge(previous_cell, current_cell)
-        revisited = current_cell in self._coverage_cell_visits
-        repeated_edge = edge in self._coverage_edge_visits
-        self._increment_coverage_record(
-            self._coverage_cell_visits,
-            current_cell,
-            now,
-        )
-        self._increment_coverage_record(
-            self._coverage_edge_visits,
-            edge,
-            now,
-        )
-        self._coverage_last_cell = current_cell
-        return (
-            1,
-            0 if revisited else 1,
-            1 if revisited else 0,
-            1 if repeated_edge else 0,
         )
 
     def _global_frontier_guidance(
@@ -8094,10 +7900,6 @@ class DroneMovementController:
             logger.info("Drone %s has completed the mission", self.drone.id)
         return done
 
-    def get_distance(self, target: Position) -> float:
-        """Return the current border-priority distance for compatibility."""
-        return self._distance_from(self.drone.snapshot().position, target)
-
     def _distance_from(self, position: Position, target: Position) -> float:
         distance = math.dist(position, target)
         if distance <= self.drone.radius:
@@ -8288,7 +8090,7 @@ class DroneMovementController:
                 new_cell_entries,
                 revisit_entries,
                 repeated_edge_entries,
-            ) = self._record_coverage_transition(
+            ) = self.coverage_memory.record_transition(
                 previous,
                 node,
                 self._simulation_time(),
@@ -8375,8 +8177,8 @@ class DroneMovementController:
             coverage_repeated_edge_entries=(
                 coverage_repeated_edge_entries
             ),
-            coverage_known_cell_count=len(self._coverage_cell_visits),
-            coverage_known_edge_count=len(self._coverage_edge_visits),
+            coverage_known_cell_count=len(self.coverage_memory.cell_visits),
+            coverage_known_edge_count=len(self.coverage_memory.edge_visits),
         )
         return completed
 

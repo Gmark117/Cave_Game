@@ -10,7 +10,6 @@ import numpy as np
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 from generation.mapgen_helpers import (
-    add_wall_transition_noise,
     apply_cv_brush,
     border_control_helper,
     homing_helper,
@@ -51,17 +50,6 @@ class MapGenHelperTests(unittest.TestCase):
 
         self.assertTrue(np.all(cleaned[1:3, 1:3] == 0))
         self.assertEqual(int(cleaned[4, 4]), 1)
-
-    def test_wall_transition_noise_is_seeded_and_binary(self) -> None:
-        cave = np.ones((20, 20), dtype=np.uint8)
-        cave[4:16, 4:16] = 0
-
-        first = add_wall_transition_noise(cave, 20, 20, 11, (8, 4, 3))
-        second = add_wall_transition_noise(cave, 20, 20, 11, (8, 4, 3))
-
-        np.testing.assert_array_equal(first, second)
-        self.assertEqual(first.shape, cave.shape)
-        self.assertTrue(np.all((first == 0) | (first == 1)))
 
     def test_derangement_has_no_fixed_points_and_is_reproducible(self) -> None:
         first = make_derangement(8, np.random.default_rng(17))

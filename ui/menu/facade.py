@@ -248,14 +248,6 @@ class Menu:
         """Play the menu button sound if that option is enabled."""
         self.audio.play_button(self.button_on_off == "on")
 
-    def load_options(self) -> None:
-        """Reload audio values from the existing options file."""
-        settings = self.settings_repository.load_audio()
-        self.volume = settings.volume
-        self.sound_on_off = settings.music
-        self.button_on_off = settings.button
-        self.audio.apply_volume(self.volume)
-
     def _update_options(self) -> None:
         """Apply values from the audio menu to the mixer."""
         volume_item = cast(SliderItem, self.options[1])

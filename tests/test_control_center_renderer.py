@@ -32,11 +32,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     def test_render_consumes_one_view_model_and_returns_hit_map(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(
-            ControlCenterRenderer,
-            "_load_tab_sprites",
-        ):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
         view = ControlCenterViewModel(
             elapsed_time="00:12",
             explored_percent=40,
@@ -95,11 +91,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     def test_full_map_toggle_uses_on_asset_when_enabled(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(
-            ControlCenterRenderer,
-            "_load_tab_sprites",
-        ):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
 
         with patch.object(
             renderer,
@@ -129,11 +121,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     ) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(
-            ControlCenterRenderer,
-            "_load_tab_sprites",
-        ):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
 
         for active_tab in ("drones", "rovers", "debug", "system"):
             with self.subTest(active_tab=active_tab):
@@ -191,11 +179,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     ) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(
-            ControlCenterRenderer,
-            "_load_tab_sprites",
-        ):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
         renderer.render(
             ControlCenterViewModel(
                 elapsed_time="00:12",
@@ -233,8 +217,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     def test_debug_panel_uses_compact_font(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(ControlCenterRenderer, "_load_tab_sprites"):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
 
         with patch.object(
             renderer,
@@ -260,8 +243,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     def test_completion_message_is_drawn_without_replacing_controls(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(ControlCenterRenderer, "_load_tab_sprites"):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
         view = ControlCenterViewModel(
             elapsed_time="10:00",
             explored_percent=98,
@@ -287,8 +269,7 @@ class ControlCenterRendererTests(unittest.TestCase):
     def test_statistics_use_short_label_and_two_decimal_percentage(self) -> None:
         window = pygame.Surface((1920, 1080), pygame.SRCALPHA)
         game = SimpleNamespace(window=window)
-        with patch.object(ControlCenterRenderer, "_load_tab_sprites"):
-            renderer = ControlCenterRenderer(game)
+        renderer = ControlCenterRenderer(game)
         view = ControlCenterViewModel(
             elapsed_time="00:12",
             explored_percent=98.765,

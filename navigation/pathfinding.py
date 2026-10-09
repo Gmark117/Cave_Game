@@ -84,47 +84,11 @@ class PathfindingService:
         start: Tuple[int, int],
         goal: Tuple[int, int],
     ) -> List[Tuple[int, int]]:
-        """Compute a drone path using the shared-memory worker pool."""
-        if not self.ready:
-            return []
-
-        map_shm = self.map_shm
-        map_shape = self.map_shape
-        pool = self.pool
-        pool_sem = self.pool_sem
-        if (
-            map_shm is None
-            or map_shape is None
-            or pool is None
-            or pool_sem is None
-        ):
-            return []
-
-        acquired = False
-        try:
-            # The worker process attaches to the shared cave map by name, so the
-            # large map is not pickled for every path request.
-            pool_sem.acquire()
-            acquired = True
-            future = pool.submit(
-                astar_pathfinder.compute_path,
-                map_shm.name,
-                map_shape,
-                start,
-                goal,
-            )
-            return future.result()
-        except (RuntimeError, ValueError, OSError) as exc:
-            logger.warning(
-                "Pathfinding pool request failed for %s -> %s: %s",
-                start,
-                goal,
-                exc,
-            )
-            return []
-        finally:
-            if acquired:
-                pool_sem.release()
+        """Compute a complete drone path using the shared-memory worker pool."""
+        return self._submit_path(
+            astar_pathfinder.compute_path, start, goal,
+            unavailable=[], failure_label="Pathfinding pool request",
+        )
 
     def compute_path_segment(
         self,
@@ -133,45 +97,33 @@ class PathfindingService:
     ) -> astar_pathfinder.PathResult:
         """Compute a complete drone route or a capped progress segment."""
         unavailable = astar_pathfinder.PathResult(
-            (),
-            astar_pathfinder.PATH_RESOURCE_UNAVAILABLE,
-            0,
-            float("inf"),
+            (), astar_pathfinder.PATH_RESOURCE_UNAVAILABLE, 0, float("inf"),
         )
+        return self._submit_path(
+            astar_pathfinder.compute_path_segment, start, goal,
+            unavailable=unavailable, failure_label="Segmented pathfinding request",
+        )
+
+    def _submit_path(self, worker, start, goal, *, unavailable, failure_label):
+        """Use the same resource checks and semaphore lifecycle for both APIs."""
         if not self.ready:
             return unavailable
-
         map_shm = self.map_shm
         map_shape = self.map_shape
         pool = self.pool
         pool_sem = self.pool_sem
-        if (
-            map_shm is None
-            or map_shape is None
-            or pool is None
-            or pool_sem is None
-        ):
+        if map_shm is None or map_shape is None or pool is None or pool_sem is None:
             return unavailable
 
         acquired = False
         try:
+            # Attach by shared-memory name instead of pickling the cave map.
             pool_sem.acquire()
             acquired = True
-            future = pool.submit(
-                astar_pathfinder.compute_path_segment,
-                map_shm.name,
-                map_shape,
-                start,
-                goal,
-            )
+            future = pool.submit(worker, map_shm.name, map_shape, start, goal)
             return future.result()
         except (RuntimeError, ValueError, OSError) as exc:
-            logger.warning(
-                "Segmented pathfinding request failed for %s -> %s: %s",
-                start,
-                goal,
-                exc,
-            )
+            logger.warning("%s failed for %s -> %s: %s", failure_label, start, goal, exc)
             return unavailable
         finally:
             if acquired:

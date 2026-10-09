@@ -99,8 +99,7 @@ class CaveGeneratorTests(unittest.TestCase):
         self.assertEqual(runner_args[5], 11)
         post_args = post_processor.calls[0]
         self.assertIs(post_args[0], raw_map)
-        self.assertEqual(post_args[1:4], (4, 3, 11))
-        self.assertEqual(post_args[4], tuple(WormInputs.SMALL.value))
+        self.assertEqual(post_args[1:], (tuple(WormInputs.SMALL.value),))
         self.assertIs(roughness_generator.calls[0][0], processed_map)
 
 

@@ -17,13 +17,8 @@ class PresentationAdapter:
     - Provide clean interface for MissionControl to render UI without owning state
     """
 
-    def __init__(self, map_w: int, map_h: int) -> None:
-        """Initialize presentation adapter with map dimensions.
-
-        Args:
-            map_w: Map width in pixels.
-            map_h: Map height in pixels.
-        """
+    def __init__(self) -> None:
+        """Initialize presentation visibility and selection state."""
         # SLAM map visibility state
         self.show_terrain_heatmap = False
         self.show_full_map = False

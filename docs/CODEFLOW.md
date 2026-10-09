@@ -454,7 +454,8 @@ without rotating. `active` retains the unwalked route suffix, rotates in place,
 accepts only a strictly newer exact-pose sensor completion, rebuilds local
 frontiers, and resumes the validated suffix; timeout resumes without route or
 DFS retry accounting. The overlay never creates work outcomes, claims,
-suppression, assistance, or communication state. The committed mode is `off`.
+suppression, assistance, or communication state. The shipped mode is `active`;
+the configuration constructor fallback remains `off`.
 
 When `[FOCUSED_FRONTIER_BATCH] mode` is `observe` or `active`, the coordinator
 runs a second scheduling pass only while every actionable component is in the
@@ -467,7 +468,8 @@ detour, energy, service, and member caps. The whole pass also has wall-time and
 route-query limits. Missing/stale/unreachable advice or budget exhaustion falls
 back to ordinary singular scheduling before any batch claim. `observe`
 publishes the same quotes and rejection reasons without changing directives,
-claims, leases, paths, or RNG state. The committed mode is `off`.
+claims, leases, paths, or RNG state. The shipped mode is `active`;
+the configuration constructor fallback remains `off`.
 
 The settings reader still accepts the legacy `[ENDGAME_BATCH]` section, while
 new saves use `[FOCUSED_FRONTIER_BATCH]`. The trace analyzer likewise
@@ -552,6 +554,27 @@ reports docking, late-run display coverage,
 travel cost, and rover-local knowledge sampled at physical check-ins; display
 coverage never enters coordinator decisions.
 
+### Highway advice
+
+The rover builds branching corridor backbones from physically collated SLAM.
+Capillarity is bounded by `maximum_access_distance_sensor_ranges`. A single
+low-priority process rebuilds complete snapshots, with one job running and
+submissions at least two wall-clock seconds apart. New inputs coalesce;
+unchanged free geometry needs no rebuild. One exact-map preparation can get
+one retry after a budget miss. Free-cell corrections invalidate unsafe retries
+and results. Failed attempts retain the previous complete graph. The frontier
+registry refreshes immediately, independently of throttled highway publication.
+Regional stitching is absent. The tiled builder remains an offline comparison.
+
+Routes intentionally straighten bends only through validated known free space.
+An eligible return can select a complete, shorter drone-local comparison route.
+Drone delivery still requires verified physical rover check-in. Batch-local
+routing caches by SLAM version, with 250 ms/128-query decision allowances and
+50 ms/4,096-expansion individual limits. Partial routes cannot supply complete
+economic costs; incomplete tour optimization retains the rover's order. Native
+build calls can overrun the 250 ms attempt budget before the next check.
+The shipped highway mode is `active`; constructor fallbacks remain `off`.
+
 ## Pathfinding
 
 `PathfindingService.start()` copies the cave into shared memory and creates a
@@ -564,6 +587,10 @@ before submitting the next segment. `compute_weighted_path()` is used by rover
 workers with roughness and confidence costs while every cell outside that
 rover's known-free SLAM remains blocked.
 
+Both drone APIs share resource checks, submission, semaphore release, and
+error handling in `PathfindingService._submit_path()`, while retaining separate
+worker entry points and unavailable-result formats.
+
 Both algorithms prevent diagonal movement through a pair of touching wall
 corners. `PathfindingService.shutdown()` closes the pool and unlinks shared
 memory.
@@ -573,7 +600,7 @@ memory.
 `MissionRenderer.draw()` composes each frame in this order:
 
 1. static background and SLAM/terrain view;
-2. drone and rover travelled paths;
+2. component markers, grey highways at 85% opacity, and travelled paths;
 3. drone vision overlays;
 4. agent icons;
 5. debug text and the control center.
@@ -586,8 +613,13 @@ cells are red, and confident free frontier cells bordering unknown SLAM are
 yellow. The frontier color uses the same confidence threshold and eight-neighbor
 definition as navigation.
 
+Each rover's highway visibility toggle is enabled by default. The renderer
+consumes complete snapshots and does not build or query routes while drawing.
+
 ## State Ownership
 
+- `CoverageMemory` in `agents/exploration_policy.py` owns local cell/edge
+  traversal pressure and exponential decay; movement supplies time and bounds.
 - `DroneRuntimeState` owns position, heading, border targets, lifecycle flags,
   visibility flags, ray endpoints, and travelled path history under one lock.
 - `SlamMap` owns occupancy, confidence, progress counters, and point-cloud
@@ -599,7 +631,16 @@ definition as navigation.
 
 ## Configuration
 
-The live navigation settings are intentionally small:
+`GameConfig/simulation.default.ini` ships HIGHWAY, INCIDENTAL_SCAN, and
+FOCUSED_FRONTIER_BATCH as `active`. Their dataclass constructors still use
+`off`. The menu selects an existing local simulation file before the shipped
+file; absent keys and invalid sections use the supplied dataclass fallbacks.
+It does not merge a partial local simulation file with the shipped defaults.
+Audio settings do merge the shipped and local files. The settings repository
+reads/writes ordinary scalar fields from the configuration dataclasses, with
+explicit mission-label conversion and historical rendering key aliases.
+
+The live navigation settings are:
 
 - `frontier.confidence_threshold`;
 - `frontier.stride`;
@@ -638,6 +679,8 @@ schema.
 - `mission/control.py`: runtime composition and agent-thread entry points.
 - `mission/lifecycle.py`: main loop and teardown.
 - `agents/drone.py`: per-drone collaborator composition.
+- `agents/exploration_policy.py`: private seeded heading choice and local
+  coverage-memory accounting.
 - `agents/component_explorer.py`: local scan progress and bounded DFS frames.
 - `agents/drone_movement.py`: directive execution, exact scans, transit, and
   breadcrumb return.
@@ -655,3 +698,7 @@ schema.
 - `navigation/astar_pathfinder.py`: unweighted and weighted A* algorithms.
 - `rendering/agent_renderer.py`: breadcrumb paths, vision, and icons.
 - `rendering/mission_renderer.py`: frame composition.
+- `tools/analyze_runtime_trace.py`: JSONL compatibility normalization, mission
+  summaries, and CLI; its existing public metric imports remain available.
+- `tools/trace_metrics.py`: structured replay metrics and characterization,
+  including historical waypoint/MCTS formats.

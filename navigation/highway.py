@@ -11,7 +11,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import Iterable
 from types import MappingProxyType
 from typing import Mapping
@@ -380,7 +380,12 @@ def build_highway_graph(
     maximum_access_distance: float = 80.0,
     preparation_cache=None,
 ) -> HighwayBuildResult:
-    """Build bounded corridor advice; the old tile size remains readable."""
+    """Build corridor advice, retaining the tiled builder's call signature.
+
+    The tile size is stored as metadata; maximum_connector_expansions is unused
+    by corridor construction. Query limits and the offline tiled builder still
+    use connector expansion budgets.
+    """
     from navigation.highway_backbone import build_backbone
     return build_backbone(
         slam, confidence_threshold=confidence_threshold,
@@ -590,7 +595,7 @@ class HighwayService:
             ))
 
     def poll(self) -> HighwayBuildResult | None:
-        result = None if self._worker is None else self._worker.poll(self._snapshot)
+        result = None if self._worker is None else self._worker.poll()
         if result is not None and result.snapshot is not None:
             self._snapshot = result.snapshot
         return result

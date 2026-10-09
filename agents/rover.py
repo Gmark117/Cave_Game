@@ -100,7 +100,6 @@ class Rover:
         self.pos       = start_pos
         # The source sprite faces north; headings increase clockwise.
         self.heading_deg = 0.0
-        self.dir_log   = []
         self.graph     = Graph(*start_pos, cave)
         # Rovers maintain their own knowledge store; navigation and the rover
         # map view consume only this received local knowledge.

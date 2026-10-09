@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mapping.slam_map import FREE, OCCUPIED, UNKNOWN, SlamSnapshot
+from mapping.slam_map import FREE, OCCUPIED, SlamSnapshot
 from navigation.highway import build_highway_graph, build_tiled_highway_graph
 
 
@@ -45,7 +45,7 @@ def benchmark_updates(name, slam, reach, *, background=False):
         graph = None
         while time.perf_counter() - started < 15:
             worker_settings = {key: value for key, value in settings.items() if key != "maximum_connector_expansions"}
-            result = service.poll() if background else _build(source, worker_settings, "full")
+            result = service.poll() if background else _build(source, worker_settings)
             if result is None:
                 time.sleep(.01)
                 continue

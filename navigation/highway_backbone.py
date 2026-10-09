@@ -167,10 +167,9 @@ def _trim_spurs(skeleton, pixels, reach, deadline):
     removed = 0
     for tip in sorted(point for point, edges in pixels.items() if len(edges) == 1):
         _check(deadline)
-        path, distance = [tip], 0.0
+        path = [tip]
         previous, current = tip, pixels[tip][0]
         while len(pixels[current]) == 2:
-            distance += math.dist(previous, current)
             path.append(current)
             following = next(point for point in pixels[current] if point != previous)
             previous, current = current, following
@@ -229,7 +228,7 @@ def _cover(free, skeleton, reach, deadline, labels):
         values = np.where(far, distances, 0.0).astype(np.float32)
         size = max(3, min(129, int(reach) * 2 + 1))
         peaks = far & (values == cv2.dilate(values, np.ones((size, size), np.uint8)))
-        count, regions = cv2.connectedComponents(peaks.astype(np.uint8), connectivity=4)
+        _, regions = cv2.connectedComponents(peaks.astype(np.uint8), connectivity=4)
         flat = np.flatnonzero(peaks)
         if not len(flat):
             flat = np.array([int(np.argmax(values))])

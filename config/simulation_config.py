@@ -1,4 +1,9 @@
-"""Typed, immutable configuration for one Cave Explorer simulation."""
+"""Typed, immutable configuration for one Cave Explorer simulation.
+
+Constructor fallbacks keep optional modes off. Shipped menu settings separately
+enable them in GameConfig/simulation.default.ini; the settings reader owns that
+file selection and does not change these programmatic fallbacks.
+"""
 
 from __future__ import annotations
 

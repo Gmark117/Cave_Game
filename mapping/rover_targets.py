@@ -219,7 +219,6 @@ class RoverTargetService:
         candidates = tuple(dependencies.get_frontier_candidates())
         with dependencies.assignment_lock:
             target = dependencies.assignments.get(int(rover_id))
-            tracked = self._targets_by_rover.get(int(rover_id))
         if target is None:
             return False
         return any(

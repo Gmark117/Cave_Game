@@ -420,10 +420,24 @@ The project keeps its runtime settings and visual assets in predictable location
 - `GameConfig/options.local.ini` and `GameConfig/simulation.local.ini` store
   user changes and are ignored by Git.
 - `Assets/` contains the audio, fonts, images, backgrounds, and map resources used by the game.
-- `Assets/Map/` contains cave images generated at runtime and ignored by Git.
+- `Assets/Map/` contains generated cave images and the matrix. The current
+  snapshots are tracked; ignore rules prevent new generated files from being
+  added automatically. Preserve the tracked snapshots during tests and cleanup.
 - `asset_config/` provides typed constants and enums so gameplay values, colors, asset paths, and map-generation parameters stay consistent across modules.
 
 This is a deliberate structural choice. Hard-coding file names and magic numbers across the codebase would make the simulation harder to tune and more brittle to change.
+
+The shipped `simulation.default.ini` enables HIGHWAY, INCIDENTAL_SCAN, and
+FOCUSED_FRONTIER_BATCH. Direct `SimulationConfig()` construction still gives
+all three modes `off`; these are constructor fallbacks, not the shipped menu
+settings. Simulation loading selects the local file when present, otherwise
+the shipped file. Missing or invalid sections fall back to the supplied typed
+configuration; a partial local file is not merged with the shipped file.
+Audio settings separately merge defaults followed by local overrides.
+Legacy `[ENDGAME_BATCH]` files remain readable; saves use the current name.
+
+The [cleanup audit](docs/CLEANUP_AUDIT.md) records the reviewed responsibilities,
+retained compatibility, verification, and separate behavior findings.
 
 ## Controls
 
@@ -460,7 +474,9 @@ Simulation settings available in-game:
 | Drone path rendering | Implemented | Each drone's complete travelled breadcrumb path is rendered incrementally |
 | Battery management | Contract implemented | Unlimited runtime policy uses route-to-task, next-action, route-home, reserve, accept, return, and suspension hooks; drain/charging remain deferred |
 | Route-based component transit | Implemented | A* routes are unrestricted by territory and actual breadcrumbs remain the return fallback |
-| Rover highway network | Implemented, default-off | Rover-SLAM graph, physical publication, bounded return-route advice, and a grey overlay with a rover-row visibility toggle |
+| Rover highway network | Implemented, shipped active | Rover-SLAM graph, physical publication, bounded return-route advice, and a grey overlay with a rover-row visibility toggle |
+| Incidental Scan | Implemented, shipped active | Bounded drone-local pocket scans retain the transit suffix and require a fresh exact-pose completion |
+| Focused Frontier Batching | Implemented, shipped active | Focused registry topology gates bounded multi-component claims, leases, and reports |
 | Search & Rescue mission logic | Planned | Objective exists in UI; starting it fails fast instead of running Exploration behavior |
 | Drift modeling | Planned | Not yet implemented |
 

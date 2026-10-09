@@ -114,11 +114,6 @@ class RuntimeTraceLogger:
             self._file.close()
             self._file = None
 
-    @classmethod
-    def disabled(cls) -> RuntimeTraceLogger:
-        """Return a disabled trace logger for tests and null defaults."""
-        return cls(Path.cwd(), TraceConfig(enabled=False))
-
     @staticmethod
     def _normalize(value: Any) -> Any:
         """Convert common runtime values into JSON-safe structures."""
